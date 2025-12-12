@@ -14,43 +14,55 @@ class HomeTabsScreen extends StatefulWidget {
 class _HomeTabsScreenState extends State<HomeTabsScreen> {
   late final HomeTabsController _controller;
   bool _initialPopupShown = false;
+  bool _initDone = false;
+
+  final List<String> _allSportsOptions = const [
+    'badminton',
+    'basketball',
+    'cricket',
+    'football',
+    'pickleball',
+    'soccer',
+    'table_tennis',
+    'tennis',
+    'volleyball',
+  ];
 
   @override
   void initState() {
     super.initState();
     _controller = HomeTabsController(Supabase.instance.client);
-    _controller.addListener(_onControllerChanged);
-
-    _controller.init().then((_) {
-      if (!mounted) return;
-      WidgetsBinding.instance.addPostFrameCallback((_) async {
-        if (_initialPopupShown) return;
-        _initialPopupShown = true;
-        await _controller.showCreateInstantMatchSheet(context);
-      });
-    });
+    _init();
   }
 
-  void _onControllerChanged() {
-    if (mounted) setState(() {});
+  Future<void> _init() async {
+    await _controller.init();
+    if (!mounted) return;
+
+    setState(() => _initDone = true);
+
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      if (_initialPopupShown) return;
+      if (_controller.currentUserId == null) return;
+      _initialPopupShown = true;
+      _showCreateInstantMatchSheet();
+    });
   }
 
   @override
   void dispose() {
     _controller.disposeRealtime();
-    _controller.removeListener(_onControllerChanged);
-    _controller.dispose();
     super.dispose();
   }
 
-  void _onItemTapped(int index) {
-    if (index == 2) {
-      Navigator.of(context).push(
-        MaterialPageRoute(builder: (_) => const UserProfileScreen()),
-      );
-      return;
-    }
-    setState(() => _controller.selectedIndex = index);
+  String _displaySport(String key) {
+    final withSpaces = key.replaceAll('_', ' ');
+    return withSpaces
+        .split(' ')
+        .map((w) =>
+            w.isEmpty ? w : w[0].toUpperCase() + w.substring(1).toLowerCase())
+        .join(' ');
   }
 
   // ---------- UI HELPERS ----------
@@ -80,9 +92,9 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
   String _statusLabel(String status) {
     switch (status.toLowerCase()) {
       case 'accepted':
-        return 'Accepted';
+        return 'Available';
       case 'declined':
-        return 'Declined';
+        return 'Not Available';
       default:
         return 'Pending';
     }
@@ -90,6 +102,7 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
 
   String _formatTimeRange(DateTime? start, DateTime? end) {
     if (start == null) return 'Time: TBA';
+
     String fmtTime(DateTime dt) {
       final h24 = dt.hour;
       final m = dt.minute.toString().padLeft(2, '0');
@@ -106,36 +119,494 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
     return '$dateStr • ${fmtTime(start)} – ${fmtTime(end)}';
   }
 
-  Widget _buildLikelihoodBar({
-    required String teamLabel,
-    required int acceptedCount,
-  }) {
-    // Cricket default
-    const int maxPlayers = 11;
-    final clamped = acceptedCount.clamp(0, maxPlayers);
-    final pct = clamped / maxPlayers;
-    final pctText = (pct * 100).toStringAsFixed(0);
+  Widget _errorBanner() {
+    if (_controller.lastError == null) return const SizedBox.shrink();
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
+      child: Card(
+        color: Colors.red.shade50,
+        child: Padding(
+          padding: const EdgeInsets.all(12),
+          child: Text(
+            _controller.lastError!,
+            style: const TextStyle(fontSize: 12),
+          ),
+        ),
+      ),
+    );
+  }
 
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Text(
-          '$teamLabel likelihood: $clamped/$maxPlayers players ($pctText%)',
-          style: const TextStyle(fontSize: 12),
+  // ---------- NEW: HIDE / CANCEL dialogs ----------
+
+  Future<void> _confirmHideGame(String requestId) async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: const Text('Hide this game?'),
+        content: const Text(
+          'This removes it only from your My Games. Others will still see it.',
         ),
-        const SizedBox(height: 4),
-        ClipRRect(
-          borderRadius: BorderRadius.circular(999),
-          child: LinearProgressIndicator(value: pct, minHeight: 6),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancel'),
+          ),
+          ElevatedButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Hide'),
+          ),
+        ],
+      ),
+    );
+
+    if (ok == true) {
+      await _controller.hideGame(requestId);
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Game hidden from your My Games')),
+      );
+    }
+  }
+
+  Future<void> _confirmCancelGame(Map<String, dynamic> match) async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: const Text('Cancel game for both teams?'),
+        content: const Text(
+          'This will cancel the game for everyone.',
         ),
-      ],
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('No'),
+          ),
+          ElevatedButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Yes, cancel'),
+          ),
+        ],
+      ),
+    );
+
+    if (ok == true) {
+      await _controller.cancelGameForBothTeams(match);
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Game cancelled')),
+      );
+    }
+  }
+
+  // ---------- CREATE INSTANT MATCH ----------
+
+  Future<void> _showCreateInstantMatchSheet() async {
+    if (_controller.currentUserId == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Please login first.')),
+      );
+      return;
+    }
+
+    final supa = Supabase.instance.client;
+
+    String? selectedSport;
+    String matchType = 'team'; // 'team' or 'pickup'
+    String? selectedTeamId;
+
+    double radiusMiles = 10;
+    String? proficiencyLevel;
+    bool allowAltTime = true;
+    bool isPublic = true;
+    int? numPlayers;
+
+    DateTime? selectedDate;
+    TimeOfDay? startTime;
+    TimeOfDay? endTime;
+
+    bool useGoogleMapLink = false;
+    String? venueText;
+
+    String? errorText;
+    bool saving = false;
+
+    await showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      builder: (sheetCtx) {
+        final bottomInset = MediaQuery.of(sheetCtx).viewInsets.bottom;
+
+        return StatefulBuilder(
+          builder: (ctx, setSheetState) {
+            Future<void> pickDate() async {
+              final now = DateTime.now();
+              final picked = await showDatePicker(
+                context: ctx,
+                initialDate: selectedDate ?? now,
+                firstDate: now.subtract(const Duration(days: 1)),
+                lastDate: now.add(const Duration(days: 365)),
+              );
+              if (picked != null) setSheetState(() => selectedDate = picked);
+            }
+
+            Future<void> pickTime(bool isStart) async {
+              final now = TimeOfDay.now();
+              final picked = await showTimePicker(
+                context: ctx,
+                initialTime: isStart ? (startTime ?? now) : (endTime ?? now),
+              );
+              if (picked != null) {
+                setSheetState(() {
+                  if (isStart) startTime = picked;
+                  if (!isStart) endTime = picked;
+                });
+              }
+            }
+
+            Future<void> submit() async {
+              if (selectedSport == null) {
+                setSheetState(() => errorText = 'Please choose a sport.');
+                return;
+              }
+              if (selectedDate == null) {
+                setSheetState(() => errorText = 'Please choose a day.');
+                return;
+              }
+              if (startTime == null || endTime == null) {
+                setSheetState(() => errorText = 'Please choose start/end time.');
+                return;
+              }
+              if (matchType == 'team' && selectedTeamId == null) {
+                setSheetState(() =>
+                    errorText = 'Please select which team this is for.');
+                return;
+              }
+              if (matchType == 'pickup' && ((numPlayers ?? 0) <= 0)) {
+                setSheetState(() =>
+                    errorText = 'Please enter how many players needed.');
+                return;
+              }
+
+              setSheetState(() {
+                saving = true;
+                errorText = null;
+              });
+
+              try {
+                final d = selectedDate!;
+                final startDt = DateTime(
+                  d.year,
+                  d.month,
+                  d.day,
+                  startTime!.hour,
+                  startTime!.minute,
+                );
+                final endDt = DateTime(
+                  d.year,
+                  d.month,
+                  d.day,
+                  endTime!.hour,
+                  endTime!.minute,
+                );
+
+                final insertMap = <String, dynamic>{
+                  'creator_id': _controller.currentUserId,
+                  'created_by': _controller.currentUserId,
+                  'mode': matchType == 'team' ? 'team_vs_team' : 'pickup',
+                  'match_type': matchType == 'team' ? 'team_vs_team' : 'pickup',
+                  'sport': selectedSport,
+                  'zip_code': _controller.baseZip,
+                  'radius_miles': radiusMiles.toInt(),
+                  'proficiency_level': proficiencyLevel,
+                  'allow_alternate_time': allowAltTime,
+                  'can_propose_time': allowAltTime,
+                  'is_public': isPublic,
+                  'visibility': isPublic ? 'public' : 'friends_only',
+                  'status': 'open',
+                  'time_slot_1': startDt.toIso8601String(),
+                  'time_slot_2': endDt.toIso8601String(),
+                  'start_time_1': startDt.toIso8601String(),
+                  'start_time_2': endDt.toIso8601String(),
+                  'last_updated_at': DateTime.now().toUtc().toIso8601String(),
+                };
+
+                if (matchType == 'team') {
+                  insertMap['team_id'] = selectedTeamId;
+                } else {
+                  insertMap['num_players'] = numPlayers;
+                }
+
+                final v = venueText?.trim();
+                if (v != null && v.isNotEmpty) {
+                  insertMap['venue'] = v;
+                  insertMap['venue_type'] =
+                      useGoogleMapLink ? 'google_map' : 'free_text';
+                }
+
+                final reqRow = await supa
+                    .from('instant_match_requests')
+                    .insert(insertMap)
+                    .select('id')
+                    .maybeSingle();
+
+                final requestId = reqRow?['id'] as String?;
+                if (requestId == null) {
+                  throw Exception('Failed to create request');
+                }
+
+                if (matchType == 'team') {
+                  final myTeamId = selectedTeamId!;
+                  final sportValue = selectedSport!;
+
+                  final allTeamsRes = await supa
+                      .from('teams')
+                      .select('id, sport')
+                      .neq('id', myTeamId)
+                      .eq('sport', sportValue);
+
+                  if (allTeamsRes is List) {
+                    final inviteRows = <Map<String, dynamic>>[];
+                    for (final t in allTeamsRes) {
+                      inviteRows.add({
+                        'request_id': requestId,
+                        'target_team_id': t['id'] as String,
+                        'status': 'pending',
+                        'target_type': 'team',
+                      });
+                    }
+                    if (inviteRows.isNotEmpty) {
+                      await supa
+                          .from('instant_request_invites')
+                          .insert(inviteRows);
+                    }
+                  }
+                }
+
+                if (!mounted) return;
+                Navigator.of(sheetCtx).pop();
+
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(content: Text('Instant match request created')),
+                );
+
+                await _controller.loadAdminTeamsAndInvites();
+              } catch (e) {
+                setSheetState(() {
+                  saving = false;
+                  errorText = 'Failed to create request: $e';
+                });
+              }
+            }
+
+            final filteredAdminTeams = selectedSport == null
+                ? _controller.adminTeams
+                : _controller.adminTeams
+                    .where((t) =>
+                        (t['sport'] as String? ?? '').toLowerCase() ==
+                        selectedSport!.toLowerCase())
+                    .toList();
+
+            return Padding(
+              padding: EdgeInsets.only(
+                left: 16,
+                right: 16,
+                top: 16,
+                bottom: bottomInset + 16,
+              ),
+              child: SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const Text(
+                      'Create instant match',
+                      style:
+                          TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+                    ),
+                    const SizedBox(height: 12),
+                    DropdownButtonFormField<String>(
+                      value: selectedSport,
+                      decoration: const InputDecoration(
+                        labelText: 'Sport *',
+                        prefixIcon: Icon(Icons.sports),
+                      ),
+                      items: _allSportsOptions
+                          .map((s) => DropdownMenuItem(
+                                value: s,
+                                child: Text(_displaySport(s)),
+                              ))
+                          .toList(),
+                      onChanged: (v) => setSheetState(() {
+                        selectedSport = v;
+                        selectedTeamId = null;
+                      }),
+                    ),
+                    const SizedBox(height: 12),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: RadioListTile<String>(
+                            title: const Text('Team vs Team'),
+                            value: 'team',
+                            groupValue: matchType,
+                            onChanged: (v) =>
+                                setSheetState(() => matchType = v ?? 'team'),
+                          ),
+                        ),
+                        Expanded(
+                          child: RadioListTile<String>(
+                            title: const Text('Individuals'),
+                            value: 'pickup',
+                            groupValue: matchType,
+                            onChanged: (v) =>
+                                setSheetState(() => matchType = v ?? 'pickup'),
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 8),
+                    if (matchType == 'team') ...[
+                      DropdownButtonFormField<String>(
+                        value: selectedTeamId,
+                        decoration: const InputDecoration(
+                          labelText: 'Your team *',
+                          prefixIcon: Icon(Icons.groups),
+                        ),
+                        items: filteredAdminTeams
+                            .map((t) => DropdownMenuItem(
+                                  value: t['id'] as String,
+                                  child: Text(t['name'] as String? ?? ''),
+                                ))
+                            .toList(),
+                        onChanged: (v) =>
+                            setSheetState(() => selectedTeamId = v),
+                      ),
+                      if (selectedSport != null && filteredAdminTeams.isEmpty)
+                        Padding(
+                          padding: const EdgeInsets.only(top: 8),
+                          child: Text(
+                            'No admin team found for ${_displaySport(selectedSport!)}.\nCreate/select a team first.',
+                            style: const TextStyle(
+                                fontSize: 12, color: Colors.red),
+                          ),
+                        ),
+                    ] else
+                      TextField(
+                        decoration: const InputDecoration(
+                          labelText: 'How many players are you looking for? *',
+                          prefixIcon: Icon(Icons.person_add_alt_1),
+                        ),
+                        keyboardType: TextInputType.number,
+                        onChanged: (val) =>
+                            setSheetState(() => numPlayers = int.tryParse(val)),
+                      ),
+                    const SizedBox(height: 12),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: OutlinedButton.icon(
+                            onPressed: pickDate,
+                            icon: const Icon(Icons.calendar_today),
+                            label: Text(
+                              selectedDate == null
+                                  ? 'Match day'
+                                  : '${selectedDate!.year}-${selectedDate!.month.toString().padLeft(2, '0')}-${selectedDate!.day.toString().padLeft(2, '0')}',
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 8),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: OutlinedButton.icon(
+                            onPressed: () => pickTime(true),
+                            icon: const Icon(Icons.access_time),
+                            label: Text(startTime == null
+                                ? 'Start time'
+                                : 'Start: ${startTime!.format(ctx)}'),
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: OutlinedButton.icon(
+                            onPressed: () => pickTime(false),
+                            icon: const Icon(Icons.access_time_outlined),
+                            label: Text(endTime == null
+                                ? 'End time'
+                                : 'End: ${endTime!.format(ctx)}'),
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 12),
+                    TextField(
+                      decoration: const InputDecoration(
+                        labelText: 'Venue (optional)',
+                        prefixIcon: Icon(Icons.place_outlined),
+                      ),
+                      onChanged: (val) => setSheetState(() => venueText = val),
+                    ),
+                    if (errorText != null) ...[
+                      const SizedBox(height: 8),
+                      Text(
+                        errorText!,
+                        style: const TextStyle(color: Colors.red, fontSize: 12),
+                      ),
+                    ],
+                    const SizedBox(height: 12),
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.end,
+                      children: [
+                        TextButton(
+                          onPressed:
+                              saving ? null : () => Navigator.of(sheetCtx).pop(),
+                          child: const Text('Cancel'),
+                        ),
+                        const SizedBox(width: 8),
+                        ElevatedButton.icon(
+                          onPressed: saving ? null : submit,
+                          icon: saving
+                              ? const SizedBox(
+                                  width: 16,
+                                  height: 16,
+                                  child:
+                                      CircularProgressIndicator(strokeWidth: 2),
+                                )
+                              : const Icon(Icons.check),
+                          label: Text(saving ? 'Creating...' : 'Create request'),
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+            );
+          },
+        );
+      },
     );
   }
 
   // ---------- SECTIONS ----------
 
   Widget _buildTeamVsTeamInvitesSection() {
-    if (_controller.teamVsTeamInvites.isEmpty) return const SizedBox.shrink();
+    if (!_initDone) {
+      return const Padding(
+        padding: EdgeInsets.all(16),
+        child: Center(child: CircularProgressIndicator()),
+      );
+    }
+
+    if (_controller.teamVsTeamInvites.isEmpty) {
+      return const Padding(
+        padding: EdgeInsets.fromLTRB(16, 16, 16, 0),
+        child: Text(
+          'No team match requests yet.',
+          style: TextStyle(fontSize: 13, color: Colors.grey),
+        ),
+      );
+    }
 
     return Padding(
       padding: const EdgeInsets.fromLTRB(16, 16, 16, 0),
@@ -159,19 +630,49 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
             return Card(
               margin: const EdgeInsets.symmetric(vertical: 4),
               child: ListTile(
-                title: Text('Team match request (${_controller.displaySport(sport)})'),
-                subtitle: Text(
-                  [
-                    'ZIP: $zip',
-                    if (startDt != null) _formatTimeRange(startDt, null),
-                  ].join(' • '),
-                ),
-                trailing: ElevatedButton(
-                  onPressed: () => _controller.approveInvite(
-                    context: context,
-                    invite: inv,
-                  ),
-                  child: const Text('Approve'),
+                title: Text('Team match request (${_displaySport(sport)})'),
+                subtitle: Text([
+                  'ZIP: $zip',
+                  if (startDt != null) _formatTimeRange(startDt, null),
+                ].join(' • ')),
+                trailing: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    TextButton(
+                      onPressed: () async {
+                        try {
+                          await _controller.denyInvite(inv);
+                          if (!mounted) return;
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            const SnackBar(content: Text('Invite denied')),
+                          );
+                        } catch (e) {
+                          if (!mounted) return;
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            SnackBar(content: Text('$e')),
+                          );
+                        }
+                      },
+                      child: const Text('Deny'),
+                    ),
+                    ElevatedButton(
+                      onPressed: () async {
+                        try {
+                          await _controller.approveInvite(inv);
+                          if (!mounted) return;
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            const SnackBar(content: Text('Invite approved')),
+                          );
+                        } catch (e) {
+                          if (!mounted) return;
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            SnackBar(content: Text('$e')),
+                          );
+                        }
+                      },
+                      child: const Text('Accept'),
+                    ),
+                  ],
                 ),
               ),
             );
@@ -179,6 +680,85 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
         ],
       ),
     );
+  }
+
+  Widget _playerChip(Map<String, dynamic> p) {
+    final name = (p['name'] as String?) ?? 'Player';
+    final status = (p['status'] as String?) ?? 'pending';
+    return Container(
+      margin: const EdgeInsets.only(right: 6, bottom: 6),
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+      decoration: BoxDecoration(
+        color: _statusChipColor(status),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: Colors.black12),
+      ),
+      child: Text(
+        '$name • ${_statusLabel(status)}',
+        style: TextStyle(fontSize: 12, color: _statusTextColor(status)),
+      ),
+    );
+  }
+
+  Map<String, int> _statusCounts(List<Map<String, dynamic>> players) {
+    int a = 0, d = 0, p = 0;
+    for (final x in players) {
+      final st = ((x['status'] as String?) ?? 'pending').toLowerCase();
+      if (st == 'accepted') a++;
+      else if (st == 'declined') d++;
+      else p++;
+    }
+    return {'accepted': a, 'declined': d, 'pending': p, 'total': players.length};
+  }
+
+  String _pct(int part, int total) {
+    if (total <= 0) return '0%';
+    final v = ((part / total) * 100).round();
+    return '$v%';
+  }
+
+  Future<void> _vote({
+    required String requestId,
+    required String teamId,
+    required String status,
+  }) async {
+    try {
+      await _controller.setMyAttendance(
+        requestId: requestId,
+        teamId: teamId,
+        status: status,
+      );
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Updated: ${_statusLabel(status)}')),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('$e')),
+      );
+    }
+  }
+
+  Future<void> _switchSide({
+    required String requestId,
+    required String newTeamId,
+  }) async {
+    try {
+      await _controller.switchMyTeamForMatch(
+        requestId: requestId,
+        newTeamId: newTeamId,
+      );
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Switched team for this match')),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('$e')),
+      );
+    }
   }
 
   Widget _buildConfirmedMatchesSection() {
@@ -193,11 +773,13 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
       return const Padding(
         padding: EdgeInsets.all(16),
         child: Text(
-          'You don\'t have any confirmed games yet.',
+          'You don\'t have any games yet.',
           style: TextStyle(fontSize: 14, color: Colors.grey),
         ),
       );
     }
+
+    final uid = _controller.currentUserId;
 
     return Padding(
       padding: const EdgeInsets.fromLTRB(16, 16, 16, 0),
@@ -205,78 +787,99 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           const Text(
-            'Your confirmed team matches',
+            'Your games',
             style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
           ),
           const SizedBox(height: 8),
           ..._controller.confirmedTeamMatches.map((m) {
             final reqId = m['request_id'] as String;
-            final teamAId = m['team_a_id'] as String;
-            final teamBId = m['team_b_id'] as String;
-            final sport = m['sport'] as String? ?? '';
+            final teamAId = m['team_a_id'] as String?;
+            final teamBId = m['team_b_id'] as String?;
             final teamAName = m['team_a_name'] as String? ?? 'Team A';
             final teamBName = m['team_b_name'] as String? ?? 'Team B';
+            final sport = m['sport'] as String? ?? '';
+            final startDt = m['start_time'] as DateTime?;
+            final endDt = m['end_time'] as DateTime?;
+            final venue = m['venue'] as String?;
+            final canSwitchSide = (m['can_switch_side'] as bool?) ?? false;
 
-            final List<Map<String, dynamic>> teamAPlayers =
-                (m['team_a_players'] as List).cast<Map<String, dynamic>>();
-            final List<Map<String, dynamic>> teamBPlayers =
-                (m['team_b_players'] as List).cast<Map<String, dynamic>>();
+            final teamAPlayers =
+                (m['team_a_players'] as List?)?.cast<Map<String, dynamic>>() ??
+                    <Map<String, dynamic>>[];
+            final teamBPlayers =
+                (m['team_b_players'] as List?)?.cast<Map<String, dynamic>>() ??
+                    <Map<String, dynamic>>[];
 
-            final DateTime? startDt = m['start_time'] as DateTime?;
-            final DateTime? endDt = m['end_time'] as DateTime?;
-            final String? venue = m['venue'] as String?;
-            final bool canSwitchSide = (m['can_switch_side'] as bool?) ?? false;
+            final myStatusA = teamAPlayers
+                .where((p) => p['user_id'] == uid)
+                .map((p) => p['status'] as String?)
+                .firstWhere((x) => x != null, orElse: () => null);
+            final myStatusB = teamBPlayers
+                .where((p) => p['user_id'] == uid)
+                .map((p) => p['status'] as String?)
+                .firstWhere((x) => x != null, orElse: () => null);
 
-            // which team am I currently on?
-            String? myTeamId;
-            if (teamAPlayers.any((p) => p['user_id'] == _controller.currentUserId)) {
-              myTeamId = teamAId;
-            } else if (teamBPlayers.any((p) => p['user_id'] == _controller.currentUserId)) {
-              myTeamId = teamBId;
-            }
+            final myTeamId = myStatusA != null
+                ? teamAId
+                : (myStatusB != null ? teamBId : teamAId);
 
-            final mySidePlayers = myTeamId == teamAId ? teamAPlayers : teamBPlayers;
-            final theirSidePlayers = myTeamId == teamAId ? teamBPlayers : teamAPlayers;
+            final aCounts = _statusCounts(teamAPlayers);
+            final bCounts = _statusCounts(teamBPlayers);
 
-            final myStatus = mySidePlayers
-                .firstWhere(
-                  (p) => p['user_id'] == _controller.currentUserId,
-                  orElse: () => {'status': 'pending'},
-                )['status'] as String;
-
-            final teamAAccepted = teamAPlayers
-                .where((p) => (p['status'] as String).toLowerCase() == 'accepted')
-                .length;
-            final teamBAccepted = teamBPlayers
-                .where((p) => (p['status'] as String).toLowerCase() == 'accepted')
-                .length;
-
-            final otherTeamId = myTeamId == teamAId ? teamBId : teamAId;
-            final otherTeamName = myTeamId == teamAId ? teamBName : teamAName;
-
-            final showReminder =
-                myTeamId != null && _controller.isAdminOfTeam(myTeamId);
+            final isOrganizer = _controller.isOrganizerForMatch(m);
+            final canSendReminder = _controller.canSendReminderForMatch(m);
 
             return Card(
-              margin: const EdgeInsets.symmetric(vertical: 6),
+              margin: const EdgeInsets.symmetric(vertical: 8),
               child: Padding(
                 padding: const EdgeInsets.all(12),
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text(
-                      '$teamAName vs $teamBName',
-                      style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 16),
+                    // ✅ Title row + NEW menu
+                    Row(
+                      children: [
+                        Expanded(
+                          child: Text(
+                            '$teamAName vs $teamBName',
+                            style: const TextStyle(
+                                fontWeight: FontWeight.w600, fontSize: 16),
+                          ),
+                        ),
+                        PopupMenuButton<String>(
+                          onSelected: (v) async {
+                            if (v == 'hide') {
+                              await _confirmHideGame(reqId);
+                            } else if (v == 'cancel') {
+                              await _confirmCancelGame(m);
+                            }
+                          },
+                          itemBuilder: (_) => [
+                            const PopupMenuItem(
+                              value: 'hide',
+                              child: Text('Hide from My Games'),
+                            ),
+                            if (isOrganizer)
+                              const PopupMenuItem(
+                                value: 'cancel',
+                                child: Text('Cancel game (both teams)'),
+                              ),
+                          ],
+                        ),
+                      ],
                     ),
-                    const SizedBox(height: 4),
-                    Text('Sport: ${_controller.displaySport(sport)}',
+
+                    const SizedBox(height: 6),
+                    Text('Sport: ${_displaySport(sport)}',
                         style: const TextStyle(fontSize: 13)),
                     const SizedBox(height: 4),
-                    Text(_formatTimeRange(startDt, endDt),
-                        style: const TextStyle(fontSize: 13, color: Colors.black87)),
-
+                    Text(
+                      _formatTimeRange(startDt, endDt),
+                      style:
+                          const TextStyle(fontSize: 13, color: Colors.black87),
+                    ),
                     if (venue != null && venue.isNotEmpty) ...[
-                      const SizedBox(height: 2),
+                      const SizedBox(height: 4),
                       Row(
                         children: [
                           const Icon(Icons.place_outlined, size: 14),
@@ -284,125 +887,141 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
                           Expanded(
                             child: Text(
                               venue,
-                              style: const TextStyle(fontSize: 13, color: Colors.black87),
+                              style: const TextStyle(
+                                  fontSize: 13, color: Colors.black87),
                             ),
                           ),
                         ],
                       ),
                     ],
 
-                    const SizedBox(height: 8),
+                    // ✅ Admin-only reminder button (kept)
+                    if (canSendReminder && myTeamId != null) ...[
+                      const SizedBox(height: 10),
+                      OutlinedButton.icon(
+                        onPressed: () async {
+                          await _controller.sendReminderToTeams(
+                            requestId: reqId,
+                            teamId: myTeamId,
+                          );
+                          if (!mounted) return;
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            const SnackBar(
+                                content: Text('Reminder sent (placeholder)')),
+                          );
+                        },
+                        icon: const Icon(Icons.notifications_active_outlined),
+                        label: const Text('Send reminder to teams'),
+                      ),
+                    ],
 
+                    const SizedBox(height: 12),
+
+                    // ✅ Voting buttons (attendance)
                     Row(
                       children: [
-                        Chip(
-                          label: Text('You: ${_statusLabel(myStatus).toUpperCase()}'),
-                          backgroundColor: _statusChipColor(myStatus),
-                          labelStyle: TextStyle(
-                            color: _statusTextColor(myStatus),
-                            fontWeight: FontWeight.w600,
+                        Expanded(
+                          child: OutlinedButton(
+                            onPressed: (myTeamId == null)
+                                ? null
+                                : () => _vote(
+                                      requestId: reqId,
+                                      teamId: myTeamId,
+                                      status: 'accepted',
+                                    ),
+                            child: const Text('Available'),
                           ),
                         ),
                         const SizedBox(width: 8),
-                        if (showReminder)
-                          OutlinedButton(
-                            onPressed: () {
-                              ScaffoldMessenger.of(context).showSnackBar(
-                                const SnackBar(content: Text('Reminder placeholder (wire later).')),
-                              );
-                            },
-                            child: const Text('Send reminder to my team'),
+                        Expanded(
+                          child: OutlinedButton(
+                            onPressed: (myTeamId == null)
+                                ? null
+                                : () => _vote(
+                                      requestId: reqId,
+                                      teamId: myTeamId,
+                                      status: 'declined',
+                                    ),
+                            child: const Text('Not available'),
                           ),
+                        ),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: TextButton(
+                            onPressed: (myTeamId == null)
+                                ? null
+                                : () => _vote(
+                                      requestId: reqId,
+                                      teamId: myTeamId,
+                                      status: 'pending',
+                                    ),
+                            child: const Text('Reset'),
+                          ),
+                        ),
                       ],
                     ),
 
-                    const SizedBox(height: 8),
+                    const SizedBox(height: 10),
 
-                    if (myTeamId != null) ...[
+                    // ✅ Percentages (kept)
+                    Text(
+                      'Team $teamAName: '
+                      'Avail ${aCounts['accepted']} (${_pct(aCounts['accepted']!, aCounts['total']!)}), '
+                      'Not ${aCounts['declined']} (${_pct(aCounts['declined']!, aCounts['total']!)}), '
+                      'Pending ${aCounts['pending']}',
+                      style: const TextStyle(fontSize: 12, color: Colors.black87),
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      'Team $teamBName: '
+                      'Avail ${bCounts['accepted']} (${_pct(bCounts['accepted']!, bCounts['total']!)}), '
+                      'Not ${bCounts['declined']} (${_pct(bCounts['declined']!, bCounts['total']!)}), '
+                      'Pending ${bCounts['pending']}',
+                      style: const TextStyle(fontSize: 12, color: Colors.black87),
+                    ),
+
+                    const SizedBox(height: 12),
+
+                    // ✅ Switch side (kept)
+                    if (canSwitchSide && teamAId != null && teamBId != null)
                       Row(
                         children: [
-                          ElevatedButton(
-                            onPressed: () => _controller.setMyAttendance(
-                              context: context,
-                              requestId: reqId,
-                              teamId: myTeamId!,
-                              status: 'accepted',
+                          Expanded(
+                            child: ElevatedButton.icon(
+                              onPressed: () async {
+                                final newTeam =
+                                    (myTeamId == teamAId) ? teamBId : teamAId;
+                                await _switchSide(
+                                  requestId: reqId,
+                                  newTeamId: newTeam,
+                                );
+                              },
+                              icon: const Icon(Icons.swap_horiz),
+                              label: const Text('Switch side'),
                             ),
-                            child: const Text('Accept'),
-                          ),
-                          const SizedBox(width: 8),
-                          TextButton(
-                            onPressed: () => _controller.setMyAttendance(
-                              context: context,
-                              requestId: reqId,
-                              teamId: myTeamId!,
-                              status: 'declined',
-                            ),
-                            child: const Text('Decline'),
                           ),
                         ],
                       ),
-                      if (canSwitchSide)
-                        TextButton.icon(
-                          onPressed: () => _controller.switchMyTeamForMatch(
-                            context: context,
-                            requestId: reqId,
-                            newTeamId: otherTeamId,
-                          ),
-                          icon: const Icon(Icons.swap_horiz),
-                          label: Text('Switch to play for $otherTeamName'),
-                        ),
-                    ],
 
-                    const SizedBox(height: 8),
+                    const SizedBox(height: 12),
 
-                    _buildLikelihoodBar(teamLabel: teamAName, acceptedCount: teamAAccepted),
-                    const SizedBox(height: 4),
-                    _buildLikelihoodBar(teamLabel: teamBName, acceptedCount: teamBAccepted),
+                    // ✅ Player chips per team (kept)
+                    Text(teamAName,
+                        style: const TextStyle(
+                            fontWeight: FontWeight.w600, fontSize: 13)),
+                    const SizedBox(height: 6),
+                    Wrap(children: teamAPlayers.map(_playerChip).toList()),
+                    const SizedBox(height: 10),
+                    Text(teamBName,
+                        style: const TextStyle(
+                            fontWeight: FontWeight.w600, fontSize: 13)),
+                    const SizedBox(height: 6),
+                    Wrap(children: teamBPlayers.map(_playerChip).toList()),
 
-                    const Divider(height: 16),
-
-                    Text('$teamAName players', style: const TextStyle(fontWeight: FontWeight.w500)),
-                    const SizedBox(height: 4),
-                    Wrap(
-                      spacing: 6,
-                      runSpacing: 4,
-                      children: teamAPlayers.map((p) {
-                        final status = p['status'] as String;
-                        return Chip(
-                          label: Text(
-                            '${p['name']} (${_statusLabel(status)})',
-                            style: TextStyle(
-                              color: _statusTextColor(status),
-                              fontSize: 12,
-                            ),
-                          ),
-                          backgroundColor: _statusChipColor(status),
-                        );
-                      }).toList(),
-                    ),
-
-                    const SizedBox(height: 8),
-
-                    Text('$teamBName players', style: const TextStyle(fontWeight: FontWeight.w500)),
-                    const SizedBox(height: 4),
-                    Wrap(
-                      spacing: 6,
-                      runSpacing: 4,
-                      children: theirSidePlayers.map((p) {
-                        final status = p['status'] as String;
-                        return Chip(
-                          label: Text(
-                            '${p['name']} (${_statusLabel(status)})',
-                            style: TextStyle(
-                              color: _statusTextColor(status),
-                              fontSize: 12,
-                            ),
-                          ),
-                          backgroundColor: _statusChipColor(status),
-                        );
-                      }).toList(),
-                    ),
+                    const SizedBox(height: 10),
+                    Text('Request ID: $reqId',
+                        style:
+                            const TextStyle(fontSize: 11, color: Colors.grey)),
                   ],
                 ),
               ),
@@ -425,6 +1044,7 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
         child: ListView(
           physics: const AlwaysScrollableScrollPhysics(),
           children: [
+            _errorBanner(),
             const SizedBox(height: 12),
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 16),
@@ -435,11 +1055,14 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
                     backgroundColor: Colors.green,
                     child: Icon(Icons.flash_on, color: Colors.white),
                   ),
-                  title: const Text('Create instant match',
-                      style: TextStyle(fontWeight: FontWeight.w600)),
+                  title: const Text(
+                    'Create instant match',
+                    style: TextStyle(fontWeight: FontWeight.w600),
+                  ),
                   subtitle: const Text(
-                      'Set up a quick match now and find teams or players nearby.'),
-                  onTap: () => _controller.showCreateInstantMatchSheet(context),
+                    'Set up a quick match now and find teams or players nearby.',
+                  ),
+                  onTap: _showCreateInstantMatchSheet,
                 ),
               ),
             ),
@@ -456,12 +1079,18 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
       appBar: AppBar(title: const Text('My Games')),
       body: RefreshIndicator(
         onRefresh: _controller.loadConfirmedTeamMatches,
-        child: ListView(
-          physics: const AlwaysScrollableScrollPhysics(),
-          children: [
-            _buildConfirmedMatchesSection(),
-            const SizedBox(height: 24),
-          ],
+        child: AnimatedBuilder(
+          animation: _controller,
+          builder: (_, __) {
+            return ListView(
+              physics: const AlwaysScrollableScrollPhysics(),
+              children: [
+                _errorBanner(),
+                _buildConfirmedMatchesSection(),
+                const SizedBox(height: 24),
+              ],
+            );
+          },
         ),
       ),
     );
@@ -471,7 +1100,10 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
     return Scaffold(
       appBar: AppBar(title: const Text("What's New")),
       body: const Center(
-        child: Text("What’s New coming soon."),
+        child: Text(
+          'What’s New coming soon.\nWe will show updates, tips and nearby events here.',
+          textAlign: TextAlign.center,
+        ),
       ),
     );
   }
@@ -489,21 +1121,48 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
     }
   }
 
+  void _onItemTapped(int index) {
+    if (index == 2) {
+      Navigator.of(context).push(
+        MaterialPageRoute(builder: (_) => const UserProfileScreen()),
+      );
+      return;
+    }
+    setState(() => _controller.selectedIndex = index);
+  }
+
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      body: _buildCurrentTabBody(),
-      bottomNavigationBar: BottomNavigationBar(
-        currentIndex: _controller.selectedIndex,
-        onTap: _onItemTapped,
-        type: BottomNavigationBarType.fixed,
-        items: const [
-          BottomNavigationBarItem(icon: Icon(Icons.home_filled), label: 'Home'),
-          BottomNavigationBarItem(icon: Icon(Icons.sports_esports), label: 'My Games'),
-          BottomNavigationBarItem(icon: Icon(Icons.person), label: 'My Profile'),
-          BottomNavigationBarItem(icon: Icon(Icons.new_releases_outlined), label: "What's New"),
-        ],
-      ),
+    return AnimatedBuilder(
+      animation: _controller,
+      builder: (_, __) {
+        return Scaffold(
+          body: _buildCurrentTabBody(),
+          bottomNavigationBar: BottomNavigationBar(
+            currentIndex: _controller.selectedIndex,
+            onTap: _onItemTapped,
+            type: BottomNavigationBarType.fixed,
+            items: const [
+              BottomNavigationBarItem(
+                icon: Icon(Icons.home_filled),
+                label: 'Home',
+              ),
+              BottomNavigationBarItem(
+                icon: Icon(Icons.sports_esports),
+                label: 'My Games',
+              ),
+              BottomNavigationBarItem(
+                icon: Icon(Icons.person),
+                label: 'My Profile',
+              ),
+              BottomNavigationBarItem(
+                icon: Icon(Icons.new_releases_outlined),
+                label: "What's New",
+              ),
+            ],
+          ),
+        );
+      },
     );
   }
 }
