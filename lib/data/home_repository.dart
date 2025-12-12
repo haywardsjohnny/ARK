@@ -53,43 +53,62 @@ class HomeRepository {
         .toList();
   }
 
+  // ✅ RPC: pending invites for admin team ids
   Future<List<Map<String, dynamic>>> getPendingInvitesForTeams(
       List<String> teamIds) async {
     if (teamIds.isEmpty) return [];
 
-    final inviteRows = await supa
-        .from('instant_request_invites')
-        .select('id, request_id, target_team_id, status')
-        .inFilter('target_team_id', teamIds)
-        .eq('status', 'pending');
+    final res = await supa.rpc(
+      'get_pending_team_invites',
+      params: {'admin_team_ids': teamIds},
+    );
 
-    if (inviteRows is! List) return [];
-
-    final invites = <Map<String, dynamic>>[];
-    for (final inv in inviteRows) {
-      final reqId = inv['request_id'] as String;
-      final reqRow = await supa
-          .from('instant_match_requests')
-          .select(
-              'id, team_id, sport, zip_code, mode, start_time_1, start_time_2, venue, time_slot_1, time_slot_2')
-          .eq('id', reqId)
-          .maybeSingle();
-
-      if (reqRow == null) continue;
-
-      invites.add({
-        'id': inv['id'] as String,
-        'request_id': reqId,
-        'target_team_id': inv['target_team_id'] as String,
-        'status': inv['status'] as String? ?? 'pending',
-        'base_request': reqRow,
-      });
-    }
-    return invites;
+    if (res is! List) return [];
+    return res.cast<Map<String, dynamic>>();
   }
 
-  // ---------------- TEAM VS TEAM: ACCEPT INVITE ----------------
+  // ---------- CREATE REQUEST ----------
+  Future<String> createInstantMatchRequest(Map<String, dynamic> insertMap) async {
+    final reqRow = await supa
+        .from('instant_match_requests')
+        .insert(insertMap)
+        .select('id')
+        .maybeSingle();
 
+    final String? requestId = reqRow?['id'] as String?;
+    if (requestId == null) throw Exception('Failed to create instant match request');
+    return requestId;
+  }
+
+  Future<void> createTeamInvitesForRequest({
+    required String requestId,
+    required String myTeamId,
+    required String sport,
+  }) async {
+    final allTeamsRes = await supa
+        .from('teams')
+        .select('id, sport')
+        .neq('id', myTeamId)
+        .eq('sport', sport);
+
+    if (allTeamsRes is! List) return;
+
+    final List<Map<String, dynamic>> inviteRows = [];
+    for (final t in allTeamsRes) {
+      inviteRows.add({
+        'request_id': requestId,
+        'target_team_id': t['id'] as String,
+        'status': 'pending',
+        'target_type': 'team',
+      });
+    }
+
+    if (inviteRows.isNotEmpty) {
+      await supa.from('instant_request_invites').insert(inviteRows);
+    }
+  }
+
+  // ---------- APPROVE INVITE (transaction-ish order) ----------
   Future<void> approveTeamVsTeamInvite({
     required String myUserId,
     required String inviteId,
@@ -112,14 +131,11 @@ class HomeRepository {
     // 3) base request (team A)
     final reqRow = await supa
         .from('instant_match_requests')
-        .select(
-            'id, team_id, sport, zip_code, created_by, start_time_1, venue, time_slot_1')
+        .select('id, team_id, created_by')
         .eq('id', requestId)
         .maybeSingle();
 
-    if (reqRow == null) {
-      throw Exception('Base team match request not found');
-    }
+    if (reqRow == null) throw Exception('Base team match request not found');
 
     final teamAId = reqRow['team_id'] as String;
     final creatorUserId = reqRow['created_by'] as String?;
@@ -163,7 +179,6 @@ class HomeRepository {
       }
     }
 
-    // Upsert attendance rows, ignoring duplicates on (request_id, user_id)
     if (attendanceRows.isNotEmpty) {
       await supa.from('team_match_attendance').upsert(
             attendanceRows,
@@ -188,139 +203,29 @@ class HomeRepository {
         .eq('user_id', myUserId);
   }
 
-  // ---------------- CONFIRMED MATCHES FOR CURRENT USER ----------------
+  // ✅ RPC: confirmed matches for user (single call, aggregated)
+  Future<List<Map<String, dynamic>>> loadConfirmedTeamMatches(String myUserId) async {
+    final res = await supa.rpc(
+      'get_confirmed_team_matches',
+      params: {'my_user_id': myUserId},
+    );
 
-  Future<List<Map<String, dynamic>>> loadConfirmedTeamMatches(
-      String myUserId) async {
-    final attendRows = await supa
-        .from('team_match_attendance')
-        .select('request_id, team_id, status')
-        .eq('user_id', myUserId);
+    if (res is! List) return [];
 
-    if (attendRows == null || attendRows is! List || attendRows.isEmpty) {
-      return [];
-    }
+    // Normalize JSON array fields to List<Map<String,dynamic>>
+    return res.map<Map<String, dynamic>>((row) {
+      final r = Map<String, dynamic>.from(row as Map);
 
-    final requestIds = attendRows
-        .map<String>((r) => r['request_id'] as String)
-        .toSet()
-        .toList();
-
-    // requests that are matched team_vs_team
-    final reqs = await supa
-        .from('instant_match_requests')
-        .select(
-            'id, sport, mode, zip_code, team_id, matched_team_id, start_time_1, start_time_2, time_slot_1, time_slot_2, venue, status')
-        .inFilter('id', requestIds)
-        .eq('mode', 'team_vs_team')
-        .eq('status', 'matched');
-
-    final List<Map<String, dynamic>> rows = [];
-    if (reqs is! List) return rows;
-
-    for (final r in reqs) {
-      final reqId = r['id'] as String;
-      final teamAId = r['team_id'] as String;
-      final teamBId = r['matched_team_id'] as String?;
-      if (teamBId == null) continue;
-
-      // parse date/time
-      DateTime? startDt;
-      DateTime? endDt;
-      final st1 = r['start_time_1'] ?? r['time_slot_1'];
-      final st2 = r['start_time_2'] ?? r['time_slot_2'];
-      if (st1 is String) startDt = DateTime.tryParse(st1);
-      if (st2 is String) endDt = DateTime.tryParse(st2);
-
-      final venue = r['venue'] as String?;
-
-      // team names
-      final teamRows = await supa
-          .from('teams')
-          .select('id, name')
-          .inFilter('id', [teamAId, teamBId]);
-
-      String teamAName = 'Team A';
-      String teamBName = 'Team B';
-      if (teamRows is List) {
-        for (final t in teamRows) {
-          if (t['id'] == teamAId) {
-            teamAName = t['name'] as String? ?? 'Team A';
-          } else if (t['id'] == teamBId) {
-            teamBName = t['name'] as String? ?? 'Team B';
-          }
-        }
+      List<Map<String, dynamic>> parsePlayers(dynamic v) {
+        if (v is List) return v.cast<Map<String, dynamic>>();
+        return const [];
       }
 
-      final attendees = await supa
-          .from('team_match_attendance')
-          .select('user_id, team_id, status')
-          .eq('request_id', reqId);
-
-      final List<Map<String, dynamic>> teamAPlayers = [];
-      final List<Map<String, dynamic>> teamBPlayers = [];
-
-      if (attendees is List) {
-        for (final a in attendees) {
-          final uid = a['user_id'] as String;
-          final teamId = a['team_id'] as String;
-          final status = (a['status'] as String?)?.toLowerCase() ?? 'pending';
-
-          final userRow = await supa
-              .from('users')
-              .select('full_name')
-              .eq('id', uid)
-              .maybeSingle();
-
-          final displayName = userRow?['full_name'] as String? ?? 'Player';
-
-          final item = {
-            'user_id': uid,
-            'name': displayName,
-            'status': status,
-          };
-
-          if (teamId == teamAId) {
-            teamAPlayers.add(item);
-          } else if (teamId == teamBId) {
-            teamBPlayers.add(item);
-          }
-        }
-      }
-
-      // can switch side if member of both
-      bool canSwitchSide = false;
-      final membershipRows = await supa
-          .from('team_members')
-          .select('team_id')
-          .eq('user_id', myUserId)
-          .inFilter('team_id', [teamAId, teamBId]);
-
-      if (membershipRows is List && membershipRows.length >= 2) {
-        canSwitchSide = true;
-      }
-
-      rows.add({
-        'request_id': reqId,
-        'sport': r['sport'],
-        'zip_code': r['zip_code'],
-        'team_a_id': teamAId,
-        'team_b_id': teamBId,
-        'team_a_name': teamAName,
-        'team_b_name': teamBName,
-        'team_a_players': teamAPlayers,
-        'team_b_players': teamBPlayers,
-        'start_time': startDt,
-        'end_time': endDt,
-        'venue': venue,
-        'can_switch_side': canSwitchSide,
-      });
-    }
-
-    return rows;
+      r['team_a_players'] = parsePlayers(r['team_a_players']);
+      r['team_b_players'] = parsePlayers(r['team_b_players']);
+      return r;
+    }).toList();
   }
-
-  // ---------------- ATTENDANCE ----------------
 
   Future<void> setMyAttendance({
     required String myUserId,
@@ -328,11 +233,11 @@ class HomeRepository {
     required String teamId,
     required String status,
   }) async {
-    // Use (request_id, user_id) as identity; team can change
     await supa
         .from('team_match_attendance')
         .update({'status': status})
         .eq('request_id', requestId)
+        .eq('team_id', teamId)
         .eq('user_id', myUserId);
   }
 

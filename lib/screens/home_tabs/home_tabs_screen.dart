@@ -5,7 +5,7 @@ import '../user_profile_screen.dart';
 import 'home_tabs_controller.dart';
 
 class HomeTabsScreen extends StatefulWidget {
-  const HomeTabsScreen({Key? key}) : super(key: key);
+  const HomeTabsScreen({super.key});
 
   @override
   State<HomeTabsScreen> createState() => _HomeTabsScreenState();
@@ -18,32 +18,21 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
   @override
   void initState() {
     super.initState();
-
     _controller = HomeTabsController(Supabase.instance.client);
     _controller.addListener(_onControllerChanged);
 
-    _init();
-  }
-
-  Future<void> _init() async {
-    await _controller.init();
-
-    // Show create instant match popup once when app lands on Home tab
-    WidgetsBinding.instance.addPostFrameCallback((_) async {
+    _controller.init().then((_) {
       if (!mounted) return;
-      if (_initialPopupShown) return;
-
-      _initialPopupShown = true;
-
-      // If your controller handles opening sheet, call it here.
-      // Otherwise keep your old sheet in a separate widget and call that.
-      await _controller.showCreateInstantMatchSheet(context);
+      WidgetsBinding.instance.addPostFrameCallback((_) async {
+        if (_initialPopupShown) return;
+        _initialPopupShown = true;
+        await _controller.showCreateInstantMatchSheet(context);
+      });
     });
   }
 
   void _onControllerChanged() {
-    if (!mounted) return;
-    setState(() {});
+    if (mounted) setState(() {});
   }
 
   @override
@@ -54,15 +43,17 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
     super.dispose();
   }
 
-  // ---------- UI HELPERS ----------
-
-  String _displaySport(String key) {
-    final withSpaces = key.replaceAll('_', ' ');
-    return withSpaces
-        .split(' ')
-        .map((w) => w.isEmpty ? w : w[0].toUpperCase() + w.substring(1).toLowerCase())
-        .join(' ');
+  void _onItemTapped(int index) {
+    if (index == 2) {
+      Navigator.of(context).push(
+        MaterialPageRoute(builder: (_) => const UserProfileScreen()),
+      );
+      return;
+    }
+    setState(() => _controller.selectedIndex = index);
   }
+
+  // ---------- UI HELPERS ----------
 
   Color _statusChipColor(String status) {
     switch (status.toLowerCase()) {
@@ -99,7 +90,6 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
 
   String _formatTimeRange(DateTime? start, DateTime? end) {
     if (start == null) return 'Time: TBA';
-
     String fmtTime(DateTime dt) {
       final h24 = dt.hour;
       final m = dt.minute.toString().padLeft(2, '0');
@@ -120,6 +110,7 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
     required String teamLabel,
     required int acceptedCount,
   }) {
+    // Cricket default
     const int maxPlayers = 11;
     final clamped = acceptedCount.clamp(0, maxPlayers);
     final pct = clamped / maxPlayers;
@@ -135,20 +126,16 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
         const SizedBox(height: 4),
         ClipRRect(
           borderRadius: BorderRadius.circular(999),
-          child: LinearProgressIndicator(
-            value: pct,
-            minHeight: 6,
-          ),
+          child: LinearProgressIndicator(value: pct, minHeight: 6),
         ),
       ],
     );
   }
 
-  // ---------- UI SECTIONS ----------
+  // ---------- SECTIONS ----------
 
   Widget _buildTeamVsTeamInvitesSection() {
-    final invites = _controller.teamVsTeamInvites;
-    if (invites.isEmpty) return const SizedBox.shrink();
+    if (_controller.teamVsTeamInvites.isEmpty) return const SizedBox.shrink();
 
     return Padding(
       padding: const EdgeInsets.fromLTRB(16, 16, 16, 0),
@@ -160,7 +147,7 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
             style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
           ),
           const SizedBox(height: 8),
-          ...invites.map((inv) {
+          ..._controller.teamVsTeamInvites.map((inv) {
             final req = inv['base_request'] as Map<String, dynamic>;
             final sport = req['sport'] as String? ?? '';
             final zip = req['zip_code'] as String? ?? '-';
@@ -172,7 +159,7 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
             return Card(
               margin: const EdgeInsets.symmetric(vertical: 4),
               child: ListTile(
-                title: Text('Team match request (${_displaySport(sport)})'),
+                title: Text('Team match request (${_controller.displaySport(sport)})'),
                 subtitle: Text(
                   [
                     'ZIP: $zip',
@@ -180,21 +167,10 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
                   ].join(' • '),
                 ),
                 trailing: ElevatedButton(
-                  onPressed: () async {
-                    final ok = await _controller.approveTeamVsTeamInvite(inv);
-                    if (!mounted) return;
-                    if (!ok) {
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        const SnackBar(content: Text('Failed to approve team match')),
-                      );
-                    } else {
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        const SnackBar(
-                          content: Text('Team match confirmed. Players will be asked for availability.'),
-                        ),
-                      );
-                    }
-                  },
+                  onPressed: () => _controller.approveInvite(
+                    context: context,
+                    invite: inv,
+                  ),
                   child: const Text('Approve'),
                 ),
               ),
@@ -213,10 +189,7 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
       );
     }
 
-    final matches = _controller.confirmedTeamMatches;
-    final myUserId = _controller.currentUserId;
-
-    if (matches.isEmpty) {
+    if (_controller.confirmedTeamMatches.isEmpty) {
       return const Padding(
         padding: EdgeInsets.all(16),
         child: Text(
@@ -236,7 +209,7 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
             style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
           ),
           const SizedBox(height: 8),
-          ...matches.map((m) {
+          ..._controller.confirmedTeamMatches.map((m) {
             final reqId = m['request_id'] as String;
             final teamAId = m['team_a_id'] as String;
             final teamBId = m['team_b_id'] as String;
@@ -244,37 +217,45 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
             final teamAName = m['team_a_name'] as String? ?? 'Team A';
             final teamBName = m['team_b_name'] as String? ?? 'Team B';
 
-            final teamAPlayers = (m['team_a_players'] as List).cast<Map<String, dynamic>>();
-            final teamBPlayers = (m['team_b_players'] as List).cast<Map<String, dynamic>>();
+            final List<Map<String, dynamic>> teamAPlayers =
+                (m['team_a_players'] as List).cast<Map<String, dynamic>>();
+            final List<Map<String, dynamic>> teamBPlayers =
+                (m['team_b_players'] as List).cast<Map<String, dynamic>>();
 
             final DateTime? startDt = m['start_time'] as DateTime?;
             final DateTime? endDt = m['end_time'] as DateTime?;
             final String? venue = m['venue'] as String?;
             final bool canSwitchSide = (m['can_switch_side'] as bool?) ?? false;
 
+            // which team am I currently on?
             String? myTeamId;
-            if (myUserId != null && teamAPlayers.any((p) => p['user_id'] == myUserId)) {
+            if (teamAPlayers.any((p) => p['user_id'] == _controller.currentUserId)) {
               myTeamId = teamAId;
-            } else if (myUserId != null && teamBPlayers.any((p) => p['user_id'] == myUserId)) {
+            } else if (teamBPlayers.any((p) => p['user_id'] == _controller.currentUserId)) {
               myTeamId = teamBId;
             }
 
-            final myTeamIdSafe = myTeamId;
-            final mySidePlayers = myTeamIdSafe == teamAId ? teamAPlayers : teamBPlayers;
-            final theirSidePlayers = myTeamIdSafe == teamAId ? teamBPlayers : teamAPlayers;
+            final mySidePlayers = myTeamId == teamAId ? teamAPlayers : teamBPlayers;
+            final theirSidePlayers = myTeamId == teamAId ? teamBPlayers : teamAPlayers;
 
-            final myStatus = myUserId == null
-                ? 'pending'
-                : (mySidePlayers.firstWhere(
-                    (p) => p['user_id'] == myUserId,
-                    orElse: () => {'status': 'pending'},
-                  )['status'] as String);
+            final myStatus = mySidePlayers
+                .firstWhere(
+                  (p) => p['user_id'] == _controller.currentUserId,
+                  orElse: () => {'status': 'pending'},
+                )['status'] as String;
 
-            final teamAAccepted = teamAPlayers.where((p) => (p['status'] as String).toLowerCase() == 'accepted').length;
-            final teamBAccepted = teamBPlayers.where((p) => (p['status'] as String).toLowerCase() == 'accepted').length;
+            final teamAAccepted = teamAPlayers
+                .where((p) => (p['status'] as String).toLowerCase() == 'accepted')
+                .length;
+            final teamBAccepted = teamBPlayers
+                .where((p) => (p['status'] as String).toLowerCase() == 'accepted')
+                .length;
 
-            final otherTeamId = myTeamIdSafe == teamAId ? teamBId : teamAId;
-            final otherTeamName = myTeamIdSafe == teamAId ? teamBName : teamAName;
+            final otherTeamId = myTeamId == teamAId ? teamBId : teamAId;
+            final otherTeamName = myTeamId == teamAId ? teamBName : teamAName;
+
+            final showReminder =
+                myTeamId != null && _controller.isAdminOfTeam(myTeamId);
 
             return Card(
               margin: const EdgeInsets.symmetric(vertical: 6),
@@ -288,9 +269,11 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
                       style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 16),
                     ),
                     const SizedBox(height: 4),
-                    Text('Sport: ${_displaySport(sport)}', style: const TextStyle(fontSize: 13)),
+                    Text('Sport: ${_controller.displaySport(sport)}',
+                        style: const TextStyle(fontSize: 13)),
                     const SizedBox(height: 4),
-                    Text(_formatTimeRange(startDt, endDt), style: const TextStyle(fontSize: 13, color: Colors.black87)),
+                    Text(_formatTimeRange(startDt, endDt),
+                        style: const TextStyle(fontSize: 13, color: Colors.black87)),
 
                     if (venue != null && venue.isNotEmpty) ...[
                       const SizedBox(height: 2),
@@ -299,7 +282,10 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
                           const Icon(Icons.place_outlined, size: 14),
                           const SizedBox(width: 4),
                           Expanded(
-                            child: Text(venue, style: const TextStyle(fontSize: 13, color: Colors.black87)),
+                            child: Text(
+                              venue,
+                              style: const TextStyle(fontSize: 13, color: Colors.black87),
+                            ),
                           ),
                         ],
                       ),
@@ -318,20 +304,12 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
                           ),
                         ),
                         const SizedBox(width: 8),
-                        if (myTeamIdSafe != null)
+                        if (showReminder)
                           OutlinedButton(
-                            onPressed: () async {
-                              final ok = await _controller.sendReminderToMyTeam(reqId, myTeamIdSafe);
-                              if (!mounted) return;
-                              if (!ok) {
-                                ScaffoldMessenger.of(context).showSnackBar(
-                                  const SnackBar(content: Text('Reminder not sent')),
-                                );
-                              } else {
-                                ScaffoldMessenger.of(context).showSnackBar(
-                                  const SnackBar(content: Text('Reminder sent')),
-                                );
-                              }
+                            onPressed: () {
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                const SnackBar(content: Text('Reminder placeholder (wire later).')),
+                              );
                             },
                             child: const Text('Send reminder to my team'),
                           ),
@@ -340,24 +318,37 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
 
                     const SizedBox(height: 8),
 
-                    if (myTeamIdSafe != null) ...[
+                    if (myTeamId != null) ...[
                       Row(
                         children: [
                           ElevatedButton(
-                            onPressed: () => _controller.setMyAttendance(reqId, myTeamIdSafe, 'accepted'),
+                            onPressed: () => _controller.setMyAttendance(
+                              context: context,
+                              requestId: reqId,
+                              teamId: myTeamId!,
+                              status: 'accepted',
+                            ),
                             child: const Text('Accept'),
                           ),
                           const SizedBox(width: 8),
                           TextButton(
-                            onPressed: () => _controller.setMyAttendance(reqId, myTeamIdSafe, 'declined'),
+                            onPressed: () => _controller.setMyAttendance(
+                              context: context,
+                              requestId: reqId,
+                              teamId: myTeamId!,
+                              status: 'declined',
+                            ),
                             child: const Text('Decline'),
                           ),
                         ],
                       ),
-                      const SizedBox(height: 4),
                       if (canSwitchSide)
                         TextButton.icon(
-                          onPressed: () => _controller.switchMyTeamForMatch(reqId, otherTeamId),
+                          onPressed: () => _controller.switchMyTeamForMatch(
+                            context: context,
+                            requestId: reqId,
+                            newTeamId: otherTeamId,
+                          ),
                           icon: const Icon(Icons.swap_horiz),
                           label: Text('Switch to play for $otherTeamName'),
                         ),
@@ -381,7 +372,10 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
                         return Chip(
                           label: Text(
                             '${p['name']} (${_statusLabel(status)})',
-                            style: TextStyle(color: _statusTextColor(status), fontSize: 12),
+                            style: TextStyle(
+                              color: _statusTextColor(status),
+                              fontSize: 12,
+                            ),
                           ),
                           backgroundColor: _statusChipColor(status),
                         );
@@ -389,6 +383,7 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
                     ),
 
                     const SizedBox(height: 8),
+
                     Text('$teamBName players', style: const TextStyle(fontWeight: FontWeight.w500)),
                     const SizedBox(height: 4),
                     Wrap(
@@ -399,7 +394,10 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
                         return Chip(
                           label: Text(
                             '${p['name']} (${_statusLabel(status)})',
-                            style: TextStyle(color: _statusTextColor(status), fontSize: 12),
+                            style: TextStyle(
+                              color: _statusTextColor(status),
+                              fontSize: 12,
+                            ),
                           ),
                           backgroundColor: _statusChipColor(status),
                         );
@@ -421,7 +419,9 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
     return Scaffold(
       appBar: AppBar(title: const Text('Home')),
       body: RefreshIndicator(
-        onRefresh: _controller.loadAdminTeamsAndInvites,
+        onRefresh: () async {
+          await _controller.loadAdminTeamsAndInvites();
+        },
         child: ListView(
           physics: const AlwaysScrollableScrollPhysics(),
           children: [
@@ -435,8 +435,10 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
                     backgroundColor: Colors.green,
                     child: Icon(Icons.flash_on, color: Colors.white),
                   ),
-                  title: const Text('Create instant match', style: TextStyle(fontWeight: FontWeight.w600)),
-                  subtitle: const Text('Set up a quick match now and find teams or players nearby.'),
+                  title: const Text('Create instant match',
+                      style: TextStyle(fontWeight: FontWeight.w600)),
+                  subtitle: const Text(
+                      'Set up a quick match now and find teams or players nearby.'),
                   onTap: () => _controller.showCreateInstantMatchSheet(context),
                 ),
               ),
@@ -469,10 +471,7 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
     return Scaffold(
       appBar: AppBar(title: const Text("What's New")),
       body: const Center(
-        child: Text(
-          'What’s New coming soon.\nWe will show updates, tips and nearby events here.',
-          textAlign: TextAlign.center,
-        ),
+        child: Text("What’s New coming soon."),
       ),
     );
   }
@@ -488,17 +487,6 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
       default:
         return _buildHomeTab();
     }
-  }
-
-  void _onItemTapped(int index) {
-    if (index == 2) {
-      Navigator.of(context).push(
-        MaterialPageRoute(builder: (_) => const UserProfileScreen()),
-      );
-      return;
-    }
-    _controller.selectedIndex = index;
-    _controller.notifyListeners(); // simple refresh; better: add a setSelectedIndex method
   }
 
   @override
