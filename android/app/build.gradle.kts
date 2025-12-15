@@ -6,7 +6,7 @@ plugins {
 }
 
 android {
-    namespace = "com.example.sportsdug_app"
+    namespace = "com.sportsdug.app"
     compileSdk = flutter.compileSdkVersion
     ndkVersion = flutter.ndkVersion
 
@@ -20,22 +20,50 @@ android {
     }
 
     defaultConfig {
-        // TODO: Specify your own unique Application ID (https://developer.android.com/studio/build/application-id.html).
-        applicationId = "com.example.sportsdug_app"
-        // You can update the following values to match your application needs.
-        // For more information, see: https://flutter.dev/to/review-gradle-config.
-        minSdk = flutter.minSdkVersion
+        // Update with your unique Application ID
+        applicationId = "com.sportsdug.app"
+        minSdk = 21  // Minimum Android 5.0
         targetSdk = flutter.targetSdkVersion
         versionCode = flutter.versionCode
         versionName = flutter.versionName
+        
+        // Multi-dex support for larger apps
+        multiDexEnabled = true
+    }
+
+    signingConfigs {
+        // Create signing configs for release builds
+        create("release") {
+            // TODO: Configure your release signing
+            // Store file, key alias, and passwords should be in local.properties
+            // or use environment variables for CI/CD
+            storeFile = file(System.getenv("KEYSTORE_FILE") ?: "../keystore.jks")
+            keyAlias = System.getenv("KEYSTORE_ALIAS") ?: "sportsdug"
+            storePassword = System.getenv("KEYSTORE_PASSWORD") ?: ""
+            keyPassword = System.getenv("KEY_PASSWORD") ?: ""
+        }
     }
 
     buildTypes {
         release {
-            // TODO: Add your own signing config for the release build.
-            // Signing with the debug keys for now, so `flutter run --release` works.
-            signingConfig = signingConfigs.getByName("debug")
+            signingConfig = signingConfigs.getByName("release")
+            isMinifyEnabled = true
+            isShrinkResources = true
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro"
+            )
         }
+        debug {
+            signingConfig = signingConfigs.getByName("debug")
+            applicationIdSuffix = ".debug"
+            versionNameSuffix = "-debug"
+        }
+    }
+    
+    // Enable view binding
+    buildFeatures {
+        viewBinding = true
     }
 }
 

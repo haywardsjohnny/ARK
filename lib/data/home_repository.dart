@@ -90,7 +90,7 @@ class HomeRepository {
         : await supa
             .from('instant_match_requests')
             .select(
-                'id, team_id, sport, zip_code, mode, start_time_1, start_time_2, venue, time_slot_1, time_slot_2, status, created_by, creator_id, matched_team_id')
+                'id, team_id, sport, zip_code, mode, start_time_1, start_time_2, venue, status, created_by, creator_id, matched_team_id')
             .inFilter('id', reqIds);
 
     final Map<String, Map<String, dynamic>> reqById = {};
@@ -283,7 +283,7 @@ class HomeRepository {
     final reqs = await supa
         .from('instant_match_requests')
         .select(
-            'id, sport, mode, zip_code, team_id, matched_team_id, start_time_1, start_time_2, time_slot_1, time_slot_2, venue, status, created_by, creator_id')
+            'id, sport, mode, zip_code, team_id, matched_team_id, start_time_1, start_time_2, venue, status, created_by, creator_id')
         .inFilter('id', requestIds)
         .eq('mode', 'team_vs_team')
         .neq('status', 'cancelled')

@@ -216,7 +216,6 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
 
     double radiusMiles = 10;
     String? proficiencyLevel;
-    bool allowAltTime = true;
     bool isPublic = true;
     int? numPlayers;
 
@@ -294,14 +293,14 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
 
               try {
                 final d = selectedDate!;
-                final startDt = DateTime(
+                final startLocal = DateTime(
                   d.year,
                   d.month,
                   d.day,
                   startTime!.hour,
                   startTime!.minute,
                 );
-                final endDt = DateTime(
+                final endLocal = DateTime(
                   d.year,
                   d.month,
                   d.day,
@@ -309,6 +308,11 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
                   endTime!.minute,
                 );
 
+                // ✅ Store as UTC ISO strings
+                final startUtc = startLocal.toUtc().toIso8601String();
+                final endUtc = endLocal.toUtc().toIso8601String();
+
+                // ✅ OPT A: only columns that exist in instant_match_requests
                 final insertMap = <String, dynamic>{
                   'creator_id': _controller.currentUserId,
                   'created_by': _controller.currentUserId,
@@ -318,15 +322,11 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
                   'zip_code': _controller.baseZip,
                   'radius_miles': radiusMiles.toInt(),
                   'proficiency_level': proficiencyLevel,
-                  'allow_alternate_time': allowAltTime,
-                  'can_propose_time': allowAltTime,
                   'is_public': isPublic,
                   'visibility': isPublic ? 'public' : 'friends_only',
                   'status': 'open',
-                  'time_slot_1': startDt.toIso8601String(),
-                  'time_slot_2': endDt.toIso8601String(),
-                  'start_time_1': startDt.toIso8601String(),
-                  'start_time_2': endDt.toIso8601String(),
+                  'start_time_1': startUtc,
+                  'start_time_2': endUtc,
                   'last_updated_at': DateTime.now().toUtc().toIso8601String(),
                 };
 
@@ -354,6 +354,7 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
                   throw Exception('Failed to create request');
                 }
 
+                // create invites for team_vs_team
                 if (matchType == 'team') {
                   final myTeamId = selectedTeamId!;
                   final sportValue = selectedSport!;
@@ -624,7 +625,7 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
             final zip = req['zip_code'] as String? ?? '-';
 
             DateTime? startDt;
-            final st1 = req['start_time_1'] ?? req['time_slot_1'];
+            final st1 = req['start_time_1'];
             if (st1 is String) startDt = DateTime.tryParse(st1);
 
             return Card(
@@ -836,7 +837,6 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    // ✅ Title row + NEW menu
                     Row(
                       children: [
                         Expanded(
@@ -868,7 +868,6 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
                         ),
                       ],
                     ),
-
                     const SizedBox(height: 6),
                     Text('Sport: ${_displaySport(sport)}',
                         style: const TextStyle(fontSize: 13)),
@@ -894,8 +893,6 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
                         ],
                       ),
                     ],
-
-                    // ✅ Admin-only reminder button (kept)
                     if (canSendReminder && myTeamId != null) ...[
                       const SizedBox(height: 10),
                       OutlinedButton.icon(
@@ -914,10 +911,7 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
                         label: const Text('Send reminder to teams'),
                       ),
                     ],
-
                     const SizedBox(height: 12),
-
-                    // ✅ Voting buttons (attendance)
                     Row(
                       children: [
                         Expanded(
@@ -960,10 +954,7 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
                         ),
                       ],
                     ),
-
                     const SizedBox(height: 10),
-
-                    // ✅ Percentages (kept)
                     Text(
                       'Team $teamAName: '
                       'Avail ${aCounts['accepted']} (${_pct(aCounts['accepted']!, aCounts['total']!)}), '
@@ -979,10 +970,7 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
                       'Pending ${bCounts['pending']}',
                       style: const TextStyle(fontSize: 12, color: Colors.black87),
                     ),
-
                     const SizedBox(height: 12),
-
-                    // ✅ Switch side (kept)
                     if (canSwitchSide && teamAId != null && teamBId != null)
                       Row(
                         children: [
@@ -1002,10 +990,7 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
                           ),
                         ],
                       ),
-
                     const SizedBox(height: 12),
-
-                    // ✅ Player chips per team (kept)
                     Text(teamAName,
                         style: const TextStyle(
                             fontWeight: FontWeight.w600, fontSize: 13)),
@@ -1017,7 +1002,6 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
                             fontWeight: FontWeight.w600, fontSize: 13)),
                     const SizedBox(height: 6),
                     Wrap(children: teamBPlayers.map(_playerChip).toList()),
-
                     const SizedBox(height: 10),
                     Text('Request ID: $reqId',
                         style:

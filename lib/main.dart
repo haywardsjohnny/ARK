@@ -1,31 +1,73 @@
 import 'package:flutter/material.dart';
+import 'package:firebase_core/firebase_core.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
+import 'package:sentry_flutter/sentry_flutter.dart';
 
+import 'core/app_config.dart';
+import 'core/error_handler.dart';
+import 'core/logger_service.dart';
+import 'core/analytics_service.dart';
+import 'core/app_info.dart';
+import 'core/sentry_navigator_observer.dart';
 import 'screens/auth_sign_in_screen.dart';
 import 'screens/home_tabs/home_tabs_screen.dart';
 
-
 Future<void> main() async {
+  // Initialize Flutter binding first
   WidgetsFlutterBinding.ensureInitialized();
-
-  // 🔐 Read Supabase credentials from environment
-  const supabaseUrl = String.fromEnvironment('SUPABASE_URL');
-  const supabaseAnonKey = String.fromEnvironment('SUPABASE_ANON_KEY');
-
-  if (supabaseUrl.isEmpty || supabaseAnonKey.isEmpty) {
-    throw Exception(
-      'Supabase env vars not found. '
-      'Run app with --dart-define=SUPABASE_URL=... '
-      'and --dart-define=SUPABASE_ANON_KEY=...',
-    );
+  
+  // Validate configuration
+  AppConfig.validate();
+  
+  // Initialize app info
+  await AppInfo.initialize();
+  
+  // Initialize Firebase if enabled
+  if (AppConfig.enableFirebase) {
+    try {
+      await Firebase.initializeApp();
+      await AnalyticsService.initialize();
+      LoggerService.info('Firebase initialized');
+    } catch (e) {
+      LoggerService.error('Firebase initialization failed', e);
+    }
   }
-
-  await Supabase.initialize(
-    url: supabaseUrl,
-    anonKey: supabaseAnonKey,
+  
+  // Initialize Sentry for error tracking
+  await SentryFlutter.init(
+    (options) {
+      options.dsn = AppConfig.sentryDsn.isNotEmpty 
+          ? AppConfig.sentryDsn 
+          : null;
+      options.environment = AppConfig.isProduction ? 'production' : 'development';
+      options.release = '${AppInfo.appName}@${AppInfo.versionString}';
+      options.tracesSampleRate = AppConfig.isProduction ? 0.1 : 1.0;
+      options.enableAutoSessionTracking = true;
+    },
+    appRunner: () => _initializeApp(),
   );
+}
 
-  runApp(const SportsDugApp());
+Future<void> _initializeApp() async {
+  try {
+    // Setup error handling
+    ErrorHandler.setupErrorHandling();
+    
+    // Initialize Supabase
+    await Supabase.initialize(
+      url: AppConfig.supabaseUrl,
+      anonKey: AppConfig.supabaseAnonKey,
+    );
+    
+    LoggerService.info('App initialized successfully');
+    
+    // Run the app
+    runApp(const SportsDugApp());
+  } catch (e, stackTrace) {
+    LoggerService.fatal('Failed to initialize app', e, stackTrace);
+    AnalyticsService.recordFatalError(e, stackTrace, reason: 'App initialization');
+    rethrow;
+  }
 }
 
 class SportsDugApp extends StatelessWidget {
@@ -34,13 +76,21 @@ class SportsDugApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'SPORTSDUG',
+      title: AppConfig.appName,
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
         useMaterial3: true,
         colorScheme: ColorScheme.fromSeed(seedColor: Colors.green),
       ),
       home: const AuthGate(),
+      navigatorObservers: [
+        // Track screen views for analytics
+        if (AppConfig.enableFirebase)
+          SentryNavigatorObserver(),
+      ],
+      builder: (context, child) {
+        return child!;
+      },
     );
   }
 }
