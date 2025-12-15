@@ -147,9 +147,9 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
             };
           }).toList();
 
-          // Sort: admin (incl. captain) → member
+          // Sort: admin → member
           teams.sort((a, b) {
-            const rank = {'admin': 0, 'captain': 0, 'member': 1};
+            const rank = {'admin': 0, 'member': 1};
             final ra =
                 rank[(a['role'] as String?)?.toLowerCase() ?? 'member'] ?? 2;
             final rb =
@@ -339,21 +339,20 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
         .join(' ');
   }
 
-  // captain is treated as Admin in UI
-  String _roleLabel(String role) {
+  String? _roleLabel(String role) {
     final lower = role.toLowerCase();
-    if (lower == 'admin' || lower == 'captain') {
+    if (lower == 'admin') {
       return 'Admin';
     }
-    return 'Member';
+    return null; // Don't show label for members
   }
 
-  Color _roleColor(String role) {
+  Color? _roleColor(String role) {
     final lower = role.toLowerCase();
-    if (lower == 'admin' || lower == 'captain') {
+    if (lower == 'admin') {
       return Colors.blue;
     }
-    return Colors.grey;
+    return null; // No color for members
   }
 
   Future<void> _logout() async {
@@ -1949,16 +1948,17 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
                                             ' • ${t['proficiency_level'] ?? 'N/A'}'
                                             ' • ZIP ${t['zip_code'] ?? '-'}',
                                           ),
-                                          trailing: Chip(
-                                            label: Text(
-                                              roleText,
-                                              style: const TextStyle(
-                                                color: Colors.white,
-                                              ),
-                                            ),
-                                            backgroundColor:
-                                                roleColor,
-                                          ),
+                                          trailing: roleText != null && roleColor != null
+                                              ? Chip(
+                                                  label: Text(
+                                                    roleText!,
+                                                    style: const TextStyle(
+                                                      color: Colors.white,
+                                                    ),
+                                                  ),
+                                                  backgroundColor: roleColor!,
+                                                )
+                                              : null,
                                           onTap: () {
                                             Navigator.of(context)
                                                 .push(

@@ -25,7 +25,7 @@ class HomeRepository {
     return rows.map<String>((r) => r['sport'] as String).toList();
   }
 
-  /// Admin/captain teams for current user
+  /// Admin teams for current user
   Future<List<Map<String, dynamic>>> getAdminTeams(String userId) async {
     final memberRows = await supa
         .from('team_members')
@@ -36,7 +36,7 @@ class HomeRepository {
     if (memberRows is List) {
       for (final m in memberRows) {
         final role = (m['role'] as String?)?.toLowerCase() ?? 'member';
-        if (role == 'admin' || role == 'captain') {
+        if (role == 'admin') {
           adminTeamIds.add(m['team_id'] as String);
         }
       }

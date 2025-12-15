@@ -77,7 +77,7 @@ class _TeamsScreenState extends State<TeamsScreen> {
       myTeams.sort((a, b) {
         int rank(String role) {
           final lower = role.toLowerCase();
-          if (lower == 'admin' || lower == 'captain') return 0;
+          if (lower == 'admin') return 0;
           return 1;
         }
 
@@ -102,20 +102,20 @@ class _TeamsScreenState extends State<TeamsScreen> {
     }
   }
 
-  String _roleLabel(String role) {
+  String? _roleLabel(String role) {
     final lower = role.toLowerCase();
-    if (lower == 'admin' || lower == 'captain') {
+    if (lower == 'admin') {
       return 'Admin';
     }
-    return 'Member';
+    return null; // Don't show label for members
   }
 
-  Color _roleColor(String role) {
+  Color? _roleColor(String role) {
     final lower = role.toLowerCase();
-    if (lower == 'admin' || lower == 'captain') {
+    if (lower == 'admin') {
       return Colors.blue;
     }
-    return Colors.grey;
+    return null; // No color for members
   }
 
   Future<void> _exitTeam(String teamId, String teamName) async {
@@ -153,7 +153,7 @@ class _TeamsScreenState extends State<TeamsScreen> {
           .where((m) {
             final r = (m['role'] as String?) ?? 'member';
             final lower = r.toLowerCase();
-            return lower == 'admin' || lower == 'captain';
+            return lower == 'admin';
           })
           .toList();
 
@@ -227,8 +227,7 @@ class _TeamsScreenState extends State<TeamsScreen> {
                     itemBuilder: (ctx, i) {
                       final t = _myTeams[i];
                       final role = (t['role'] as String?) ?? 'member';
-                      final isAdmin =
-                          role.toLowerCase() == 'admin' || role.toLowerCase() == 'captain';
+                      final isAdmin = role.toLowerCase() == 'admin';
 
                       return Card(
                         margin: const EdgeInsets.symmetric(vertical: 6),
@@ -259,15 +258,16 @@ class _TeamsScreenState extends State<TeamsScreen> {
                           trailing: Wrap(
                             spacing: 4,
                             children: [
-                              Chip(
-                                label: Text(
-                                  _roleLabel(role),
-                                  style: const TextStyle(
-                                    color: Colors.white,
+                              if (_roleLabel(role) != null)
+                                Chip(
+                                  label: Text(
+                                    _roleLabel(role)!,
+                                    style: const TextStyle(
+                                      color: Colors.white,
+                                    ),
                                   ),
+                                  backgroundColor: _roleColor(role),
                                 ),
-                                backgroundColor: _roleColor(role),
-                              ),
                               if (isAdmin)
                                 IconButton(
                                   tooltip: 'Edit team & members',
@@ -414,7 +414,7 @@ class _TeamManagementScreenState extends State<TeamManagementScreen> {
       combinedMembers.sort((a, b) {
         int rank(String role) {
           final lower = role.toLowerCase();
-          if (lower == 'admin' || lower == 'captain') return 0;
+          if (lower == 'admin') return 0;
           return 1;
         }
 
@@ -482,7 +482,7 @@ class _TeamManagementScreenState extends State<TeamManagementScreen> {
       final admins = _members.where((m) {
         final r = (m['role'] as String?) ?? 'member';
         final lower = r.toLowerCase();
-        return lower == 'admin' || lower == 'captain';
+        return lower == 'admin';
       }).toList();
 
       final isTargetAdmin = admins.any((m) => m['user_id'] == userId);
@@ -552,7 +552,7 @@ class _TeamManagementScreenState extends State<TeamManagementScreen> {
       final admins = _members.where((m) {
         final r = (m['role'] as String?) ?? 'member';
         final lower = r.toLowerCase();
-        return lower == 'admin' || lower == 'captain';
+        return lower == 'admin';
       }).toList();
 
       final isTargetAdmin = admins.any((m) => m['user_id'] == userId);
@@ -912,8 +912,7 @@ class _TeamManagementScreenState extends State<TeamManagementScreen> {
                                 final userId = m['user_id'] as String;
 
                                 final lower = role.toLowerCase();
-                                final isAdmin =
-                                    lower == 'admin' || lower == 'captain';
+                                final isAdmin = lower == 'admin';
 
                                 return Card(
                                   margin:

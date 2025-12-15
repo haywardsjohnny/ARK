@@ -171,7 +171,7 @@ class HomeTabsController extends ChangeNotifier {
     return createdBy == uid;
   }
 
-  /// ✅ Rule: Send reminder only if Admin/Captain in either team
+  /// ✅ Rule: Send reminder only if Admin in either team
   bool canSendReminderForMatch(Map<String, dynamic> match) {
     final teamAId = match['team_a_id'] as String?;
     final teamBId = match['team_b_id'] as String?;

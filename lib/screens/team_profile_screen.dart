@@ -125,7 +125,7 @@ class _TeamProfileScreenState extends State<TeamProfileScreen> {
           if (m['user_id'] == currentUserId) {
             isMember = true;
             final role = (m['role'] as String?)?.toLowerCase() ?? 'member';
-            if (role == 'admin' || role == 'captain') {
+            if (role == 'admin') {
               isAdmin = true;
             }
           }
@@ -218,27 +218,17 @@ class _TeamProfileScreenState extends State<TeamProfileScreen> {
     }
   }
 
-  /// captain is displayed as Admin in UI.
-  Widget _buildRoleChip(String role) {
+  Widget? _buildRoleChip(String role) {
     final lower = role.toLowerCase();
-    String label;
-    Color color;
-
-    if (lower == 'admin' || lower == 'captain') {
-      label = 'Admin';
-      color = Colors.blue;
-    } else {
-      label = 'Member';
-      color = Colors.grey;
+    
+    if (lower == 'admin') {
+      return Chip(
+        label: const Text('Admin', style: TextStyle(color: Colors.white)),
+        backgroundColor: Colors.blue,
+      );
     }
-
-    return Chip(
-      label: Text(
-        label,
-        style: const TextStyle(color: Colors.white),
-      ),
-      backgroundColor: color,
-    );
+    return null; // Don't show chip for members
+  }
   }
 
   Future<void> _approveJoinRequest(Map<String, dynamic> req) async {
