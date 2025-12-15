@@ -1024,36 +1024,254 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
       body: RefreshIndicator(
         onRefresh: () async {
           await _controller.loadAdminTeamsAndInvites();
+          await _controller.loadConfirmedTeamMatches();
+          await _controller.loadDiscoveryPickupMatches();
         },
         child: ListView(
           physics: const AlwaysScrollableScrollPhysics(),
           children: [
             _errorBanner(),
             const SizedBox(height: 12),
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 16),
-              child: Card(
-                color: Colors.green.shade50,
-                child: ListTile(
-                  leading: const CircleAvatar(
-                    backgroundColor: Colors.green,
-                    child: Icon(Icons.flash_on, color: Colors.white),
-                  ),
-                  title: const Text(
-                    'Create instant match',
-                    style: TextStyle(fontWeight: FontWeight.w600),
-                  ),
-                  subtitle: const Text(
-                    'Set up a quick match now and find teams or players nearby.',
-                  ),
-                  onTap: _showCreateInstantMatchSheet,
-                ),
-              ),
-            ),
-            _buildTeamVsTeamInvitesSection(),
+            
+            // 1. Create Instant Match Section
+            _buildCreateInstantMatchSection(),
+            const SizedBox(height: 24),
+            
+            // 2. Team vs Team Matches Section
+            _buildTeamVsTeamMatchesSection(),
+            const SizedBox(height: 24),
+            
+            // 3. Matches (Discovery / Pickup) Section
+            _buildDiscoveryPickupMatchesSection(),
             const SizedBox(height: 24),
           ],
         ),
+      ),
+    );
+  }
+  
+  // 1. Create Instant Match Section
+  Widget _buildCreateInstantMatchSection() {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 16),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text(
+            '1. Create Instant Match',
+            style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+          ),
+          const SizedBox(height: 12),
+          Card(
+            color: Colors.green.shade50,
+            child: ListTile(
+              leading: const CircleAvatar(
+                backgroundColor: Colors.green,
+                child: Icon(Icons.flash_on, color: Colors.white),
+              ),
+              title: const Text(
+                'Create instant match',
+                style: TextStyle(fontWeight: FontWeight.w600),
+              ),
+              subtitle: const Text(
+                'Set up a quick match now and find teams or players nearby.',
+              ),
+              onTap: _showCreateInstantMatchSheet,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+  
+  // 2. Team vs Team Matches Section
+  Widget _buildTeamVsTeamMatchesSection() {
+    if (!_initDone) {
+      return const Padding(
+        padding: EdgeInsets.symmetric(horizontal: 16),
+        child: Center(child: CircularProgressIndicator()),
+      );
+    }
+    
+    // Filter confirmed matches to only show team vs team
+    final teamVsTeamMatches = _controller.confirmedTeamMatches
+        .where((m) {
+          // All confirmedTeamMatches are already team_vs_team from the query
+          return true;
+        })
+        .toList();
+    
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 16),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text(
+            '2. Team vs Team Matches',
+            style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+          ),
+          const SizedBox(height: 12),
+          if (teamVsTeamMatches.isEmpty)
+            const Padding(
+              padding: EdgeInsets.all(16.0),
+              child: Text(
+                'No team vs team matches yet.',
+                style: TextStyle(fontSize: 14, color: Colors.grey),
+              ),
+            )
+          else
+            ...teamVsTeamMatches.take(5).map((m) {
+              return _buildMatchCard(m, isTeamVsTeam: true);
+            }),
+          if (teamVsTeamMatches.length > 5)
+            Padding(
+              padding: const EdgeInsets.only(top: 8.0),
+              child: TextButton(
+                onPressed: () {
+                  // Switch to My Games tab to see all matches
+                  setState(() => _controller.selectedIndex = 1);
+                },
+                child: Text('View all ${teamVsTeamMatches.length} matches'),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+  
+  // 3. Matches (Discovery / Pickup) Section
+  Widget _buildDiscoveryPickupMatchesSection() {
+    if (!_initDone) {
+      return const Padding(
+        padding: EdgeInsets.symmetric(horizontal: 16),
+        child: Center(child: CircularProgressIndicator()),
+      );
+    }
+    
+    if (_controller.loadingDiscoveryMatches) {
+      return const Padding(
+        padding: EdgeInsets.symmetric(horizontal: 16),
+        child: Center(child: CircularProgressIndicator()),
+      );
+    }
+    
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 16),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text(
+            '3. Matches (Discovery / Pickup)',
+            style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+          ),
+          const SizedBox(height: 12),
+          if (_controller.discoveryPickupMatches.isEmpty)
+            const Padding(
+              padding: EdgeInsets.all(16.0),
+              child: Text(
+                'No discovery or pickup matches available yet.',
+                style: TextStyle(fontSize: 14, color: Colors.grey),
+              ),
+            )
+          else
+            ..._controller.discoveryPickupMatches.take(5).map((m) {
+              return _buildPickupMatchCard(m);
+            }),
+          if (_controller.discoveryPickupMatches.length > 5)
+            Padding(
+              padding: const EdgeInsets.only(top: 8.0),
+              child: TextButton(
+                onPressed: () async {
+                  await _controller.loadDiscoveryPickupMatches();
+                },
+                child: const Text('Load more matches'),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+  
+  // Helper to build pickup/discovery match card
+  Widget _buildPickupMatchCard(Map<String, dynamic> match) {
+    final reqId = match['request_id'] as String;
+    final sport = match['sport'] as String? ?? '';
+    final numPlayers = match['num_players'];
+    final startDt = match['start_time'] as DateTime?;
+    final endDt = match['end_time'] as DateTime?;
+    final venue = match['venue'] as String?;
+    final zip = match['zip_code'] as String?;
+    
+    return Card(
+      margin: const EdgeInsets.only(bottom: 8),
+      child: ListTile(
+        leading: CircleAvatar(
+          backgroundColor: Colors.blue.shade100,
+          child: Icon(Icons.people_outline, color: Colors.blue.shade700),
+        ),
+        title: Text(
+          '${_displaySport(sport)} Pickup Match',
+          style: const TextStyle(fontWeight: FontWeight.w600),
+        ),
+        subtitle: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            if (numPlayers != null)
+              Text('Looking for $numPlayers players'),
+            if (startDt != null)
+              Text(_formatTimeRange(startDt, endDt)),
+            if (venue != null && venue.isNotEmpty)
+              Text('Venue: $venue'),
+            if (zip != null)
+              Text('ZIP: $zip'),
+          ],
+        ),
+        trailing: const Icon(Icons.chevron_right),
+        onTap: () {
+          // TODO: Show match details or join dialog
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('Pickup match: ${_displaySport(sport)}')),
+          );
+        },
+      ),
+    );
+  }
+  
+  // Helper to build match card
+  Widget _buildMatchCard(Map<String, dynamic> match, {required bool isTeamVsTeam}) {
+    final reqId = match['request_id'] as String;
+    final teamAName = match['team_a_name'] as String? ?? 'Team A';
+    final teamBName = match['team_b_name'] as String? ?? 'Team B';
+    final sport = match['sport'] as String? ?? '';
+    final startDt = match['start_time'] as DateTime?;
+    final endDt = match['end_time'] as DateTime?;
+    final venue = match['venue'] as String?;
+    
+    return Card(
+      margin: const EdgeInsets.only(bottom: 8),
+      child: ListTile(
+        title: Text(
+          isTeamVsTeam ? '$teamAName vs $teamBName' : 'Pickup Match',
+          style: const TextStyle(fontWeight: FontWeight.w600),
+        ),
+        subtitle: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text('Sport: ${_displaySport(sport)}'),
+            if (startDt != null)
+              Text(_formatTimeRange(startDt, endDt)),
+            if (venue != null && venue.isNotEmpty)
+              Text('Venue: $venue'),
+          ],
+        ),
+        trailing: const Icon(Icons.chevron_right),
+        onTap: () {
+          // Navigate to match details or show more info
+          // For now, just show a snackbar
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('Match: $teamAName vs $teamBName')),
+          );
+        },
       ),
     );
   }

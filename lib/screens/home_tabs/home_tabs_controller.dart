@@ -17,7 +17,9 @@ class HomeTabsController extends ChangeNotifier {
   List<Map<String, dynamic>> adminTeams = [];
   List<Map<String, dynamic>> teamVsTeamInvites = [];
   List<Map<String, dynamic>> confirmedTeamMatches = [];
+  List<Map<String, dynamic>> discoveryPickupMatches = [];
   bool loadingConfirmedMatches = false;
+  bool loadingDiscoveryMatches = false;
 
   String? lastError;
 
@@ -39,6 +41,7 @@ class HomeTabsController extends ChangeNotifier {
       await loadAdminTeamsAndInvites();
       await loadHiddenGames();
       await loadConfirmedTeamMatches();
+      await loadDiscoveryPickupMatches();
       setupRealtimeAttendance();
     } catch (e) {
       lastError = 'Init failed: $e';
@@ -291,5 +294,64 @@ class HomeTabsController extends ChangeNotifier {
     required String teamId,
   }) async {
     return;
+  }
+  
+  /// Load discovery/pickup matches (individual matches open for joining)
+  Future<void> loadDiscoveryPickupMatches() async {
+    final uid = currentUserId;
+    if (uid == null) return;
+    
+    loadingDiscoveryMatches = true;
+    lastError = null;
+    notifyListeners();
+    
+    try {
+      final supa = Supabase.instance.client;
+      
+      // Load open pickup/individual matches
+      // These are matches that are not team_vs_team and are open for discovery
+      final matches = await supa
+          .from('instant_match_requests')
+          .select(
+            'id, sport, zip_code, mode, start_time_1, start_time_2, venue, status, created_by, num_players, created_at')
+          .neq('mode', 'team_vs_team') // Get pickup/individual matches
+          .neq('status', 'cancelled')
+          .neq('created_by', uid) // Don't show own matches
+          .order('created_at', ascending: false)
+          .limit(20);
+      
+      if (matches is List) {
+        discoveryPickupMatches = matches
+            .map<Map<String, dynamic>>((m) {
+              DateTime? startDt;
+              DateTime? endDt;
+              final st1 = m['start_time_1'];
+              final st2 = m['start_time_2'];
+              if (st1 is String) startDt = DateTime.tryParse(st1);
+              if (st2 is String) endDt = DateTime.tryParse(st2);
+              
+              return {
+                'request_id': m['id'] as String,
+                'sport': m['sport'],
+                'zip_code': m['zip_code'],
+                'mode': m['mode'],
+                'start_time': startDt,
+                'end_time': endDt,
+                'venue': m['venue'],
+                'num_players': m['num_players'],
+                'created_by': m['created_by'],
+              };
+            })
+            .toList();
+      } else {
+        discoveryPickupMatches = [];
+      }
+    } catch (e) {
+      lastError = 'loadDiscoveryPickupMatches failed: $e';
+      discoveryPickupMatches = [];
+    } finally {
+      loadingDiscoveryMatches = false;
+      notifyListeners();
+    }
   }
 }
