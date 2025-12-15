@@ -368,8 +368,8 @@ class HomeRepository {
 
       DateTime? startDt;
       DateTime? endDt;
-      final st1 = r['start_time_1'] ?? r['time_slot_1'];
-      final st2 = r['start_time_2'] ?? r['time_slot_2'];
+      final st1 = r['start_time_1'];
+      final st2 = r['start_time_2'];
       if (st1 is String) startDt = DateTime.tryParse(st1);
       if (st2 is String) endDt = DateTime.tryParse(st2);
 
