@@ -229,7 +229,6 @@ class _TeamProfileScreenState extends State<TeamProfileScreen> {
     }
     return null; // Don't show chip for members
   }
-  }
 
   Future<void> _approveJoinRequest(Map<String, dynamic> req) async {
     if (_team == null) return;

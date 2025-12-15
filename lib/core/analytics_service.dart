@@ -37,7 +37,9 @@ class AnalyticsService {
     try {
       await _analytics!.logEvent(
         name: name,
-        parameters: parameters,
+        parameters: parameters != null 
+            ? Map<String, Object>.from(parameters) 
+            : null,
       );
       LoggerService.debug('Analytics event: $name', parameters);
     } catch (e) {

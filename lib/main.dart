@@ -86,7 +86,7 @@ class SportsDugApp extends StatelessWidget {
       navigatorObservers: [
         // Track screen views for analytics
         if (AppConfig.enableFirebase)
-          SentryNavigatorObserver(),
+          AnalyticsNavigatorObserver(),
       ],
       builder: (context, child) {
         return child!;

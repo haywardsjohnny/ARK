@@ -2,7 +2,7 @@ import 'package:flutter/material.dart';
 import 'analytics_service.dart';
 
 /// Navigator observer to track screen views
-class SentryNavigatorObserver extends NavigatorObserver {
+class AnalyticsNavigatorObserver extends NavigatorObserver {
   @override
   void didPush(Route<dynamic> route, Route<dynamic>? previousRoute) {
     super.didPush(route, previousRoute);
