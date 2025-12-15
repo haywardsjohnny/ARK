@@ -33,19 +33,22 @@ Future<void> main() async {
     }
   }
   
-  // Initialize Sentry for error tracking
-  await SentryFlutter.init(
-    (options) {
-      options.dsn = AppConfig.sentryDsn.isNotEmpty 
-          ? AppConfig.sentryDsn 
-          : null;
-      options.environment = AppConfig.isProduction ? 'production' : 'development';
-      options.release = '${AppInfo.appName}@${AppInfo.versionString}';
-      options.tracesSampleRate = AppConfig.isProduction ? 0.1 : 1.0;
-      options.enableAutoSessionTracking = true;
-    },
-    appRunner: () => _initializeApp(),
-  );
+  // Initialize Sentry for error tracking (only if DSN is provided)
+  if (AppConfig.sentryDsn.isNotEmpty) {
+    await SentryFlutter.init(
+      (options) {
+        options.dsn = AppConfig.sentryDsn;
+        options.environment = AppConfig.isProduction ? 'production' : 'development';
+        options.release = '${AppInfo.appName}@${AppInfo.versionString}';
+        options.tracesSampleRate = AppConfig.isProduction ? 0.1 : 1.0;
+        options.enableAutoSessionTracking = true;
+      },
+      appRunner: () => _initializeApp(),
+    );
+  } else {
+    // Skip Sentry initialization and run app directly
+    await _initializeApp();
+  }
 }
 
 Future<void> _initializeApp() async {
