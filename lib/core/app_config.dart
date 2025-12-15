@@ -49,7 +49,8 @@ class AppConfig {
   
   // Validate configuration
   static void validate() {
-    if (supabaseUrl.isEmpty || supabaseAnonKey.isEmpty) {
+    // Only validate in production - allow empty in dev for testing
+    if (isProduction && (supabaseUrl.isEmpty || supabaseAnonKey.isEmpty)) {
       throw Exception(
         'Missing Supabase configuration. '
         'Set SUPABASE_URL and SUPABASE_ANON_KEY via --dart-define',

@@ -16,7 +16,7 @@ Future<void> main() async {
   // Initialize Flutter binding first
   WidgetsFlutterBinding.ensureInitialized();
   
-  // Validate configuration
+  // Validate configuration (only strict in production)
   AppConfig.validate();
   
   // Initialize app info
@@ -53,11 +53,16 @@ Future<void> _initializeApp() async {
     // Setup error handling
     ErrorHandler.setupErrorHandling();
     
-    // Initialize Supabase
-    await Supabase.initialize(
-      url: AppConfig.supabaseUrl,
-      anonKey: AppConfig.supabaseAnonKey,
-    );
+    // Initialize Supabase only if credentials are provided
+    if (AppConfig.supabaseUrl.isNotEmpty && AppConfig.supabaseAnonKey.isNotEmpty) {
+      await Supabase.initialize(
+        url: AppConfig.supabaseUrl,
+        anonKey: AppConfig.supabaseAnonKey,
+      );
+      LoggerService.info('Supabase initialized successfully');
+    } else {
+      LoggerService.warning('Supabase credentials not provided - app will run in demo mode');
+    }
     
     LoggerService.info('App initialized successfully');
     
@@ -66,7 +71,8 @@ Future<void> _initializeApp() async {
   } catch (e, stackTrace) {
     LoggerService.fatal('Failed to initialize app', e, stackTrace);
     AnalyticsService.recordFatalError(e, stackTrace, reason: 'App initialization');
-    rethrow;
+    // Show error screen instead of crashing
+    runApp(const ErrorApp());
   }
 }
 
@@ -95,11 +101,86 @@ class SportsDugApp extends StatelessWidget {
   }
 }
 
+class ErrorApp extends StatelessWidget {
+  const ErrorApp({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return MaterialApp(
+      title: AppConfig.appName,
+      home: Scaffold(
+        body: Center(
+          child: Padding(
+            padding: const EdgeInsets.all(24.0),
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                const Icon(Icons.error_outline, size: 64, color: Colors.red),
+                const SizedBox(height: 16),
+                const Text(
+                  'App Initialization Error',
+                  style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold),
+                ),
+                const SizedBox(height: 16),
+                const Text(
+                  'The app failed to initialize. Please check:\n'
+                  '1. Supabase credentials are set\n'
+                  '2. Network connection is available\n'
+                  '3. Check console for detailed errors',
+                  textAlign: TextAlign.center,
+                ),
+                const SizedBox(height: 24),
+                ElevatedButton(
+                  onPressed: () {
+                    // Try to reload
+                    main();
+                  },
+                  child: const Text('Retry'),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 class AuthGate extends StatelessWidget {
   const AuthGate({super.key});
 
   @override
   Widget build(BuildContext context) {
+    // Check if Supabase is initialized
+    if (AppConfig.supabaseUrl.isEmpty || AppConfig.supabaseAnonKey.isEmpty) {
+      return Scaffold(
+        body: Center(
+          child: Padding(
+            padding: const EdgeInsets.all(24.0),
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                const Icon(Icons.settings, size: 64, color: Colors.orange),
+                const SizedBox(height: 16),
+                const Text(
+                  'Configuration Required',
+                  style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold),
+                ),
+                const SizedBox(height: 16),
+                const Text(
+                  'Please set your Supabase credentials:\n\n'
+                  'Run the app with:\n'
+                  'flutter run --dart-define=SUPABASE_URL=your_url '
+                  '--dart-define=SUPABASE_ANON_KEY=your_key',
+                  textAlign: TextAlign.center,
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
+    }
+
     final supa = Supabase.instance.client;
 
     return StreamBuilder<AuthState>(
