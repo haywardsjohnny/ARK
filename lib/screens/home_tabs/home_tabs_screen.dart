@@ -8,6 +8,8 @@ import '../discover_screen.dart';
 import '../chat_screen.dart';
 import '../create_game_screen.dart';
 import 'home_tabs_controller.dart';
+import '../../widgets/status_bar.dart';
+import '../../utils/sport_defaults.dart';
 
 class HomeTabsScreen extends StatefulWidget {
   const HomeTabsScreen({super.key});
@@ -197,6 +199,111 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('Game unhidden. It will appear in Current tab if active.')),
       );
+    }
+  }
+
+  Future<void> _editExpectedPlayers(Map<String, dynamic> match) async {
+    final reqId = match['request_id'] as String;
+    final sport = match['sport'] as String? ?? '';
+    if (sport.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Invalid sport')),
+      );
+      return;
+    }
+    
+    // Get current value: match-specific if exists, otherwise sport default
+    final matchSpecific = match['expected_players_per_team'] as int?;
+    final currentExpected = matchSpecific ?? await SportDefaults.getExpectedPlayersPerTeam(sport);
+    final sportDefault = await SportDefaults.getExpectedPlayersPerTeam(sport);
+    
+    final controller = TextEditingController(text: currentExpected.toString());
+    
+    final result = await showDialog<int>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Edit Expected Players'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              'Sport: ${_displaySport(sport)}',
+              style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w500),
+            ),
+            const SizedBox(height: 8),
+            const Text(
+              'This will update the expected players for THIS match only.',
+              style: TextStyle(fontSize: 12, color: Colors.blue),
+            ),
+            const SizedBox(height: 8),
+            TextField(
+              controller: controller,
+              keyboardType: TextInputType.number,
+              decoration: InputDecoration(
+                labelText: 'Expected players per team',
+                hintText: 'Enter number',
+                border: const OutlineInputBorder(),
+                helperText: 'Sport default: $sportDefault players',
+              ),
+            ),
+            const SizedBox(height: 8),
+            Text(
+              matchSpecific != null 
+                  ? 'Current (match-specific): $currentExpected players'
+                  : 'Current (using sport default): $currentExpected players',
+              style: TextStyle(
+                fontSize: 12,
+                color: Colors.grey.shade600,
+                fontStyle: FontStyle.italic,
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(),
+            child: const Text('Cancel'),
+          ),
+          ElevatedButton(
+            onPressed: () {
+              final value = int.tryParse(controller.text);
+              if (value != null && value > 0) {
+                Navigator.of(ctx).pop(value);
+              } else {
+                ScaffoldMessenger.of(ctx).showSnackBar(
+                  const SnackBar(content: Text('Please enter a valid number')),
+                );
+              }
+            },
+            child: const Text('Save'),
+          ),
+        ],
+      ),
+    );
+
+    if (result != null && result != currentExpected) {
+      try {
+        // Update this specific match's expected_players_per_team
+        final supa = Supabase.instance.client;
+        await supa
+            .from('instant_match_requests')
+            .update({'expected_players_per_team': result})
+            .eq('id', reqId);
+
+        // Reload matches to refresh the UI
+        await _controller.loadAllMyMatches();
+        
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Expected players for this match updated to $result')),
+        );
+      } catch (e) {
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Failed to update: $e')),
+        );
+      }
     }
   }
 
@@ -1069,6 +1176,12 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
     if (total <= 0) return '0%';
     final v = ((part / total) * 100).round();
     return '$v%';
+  }
+
+  /// Calculate percentage based on expected players (for status bar)
+  double _calculatePercentage(int available, int? expectedPlayers) {
+    if (expectedPlayers == null || expectedPlayers <= 0) return 0.0;
+    return (available / expectedPlayers).clamp(0.0, 1.0);
   }
 
   Future<void> _vote({
@@ -3285,12 +3398,89 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
                     ],
                   ),
                 ),
+                // Game Level Status Bar on the right
+                Builder(
+                  builder: (context) {
+                    // Use match-specific value if exists, otherwise use sport default
+                    final matchSpecific = match['expected_players_per_team'] as int?;
+                    
+                    return FutureBuilder<int>(
+                      future: matchSpecific != null 
+                          ? Future.value(matchSpecific)
+                          : SportDefaults.getExpectedPlayersPerTeam(sport),
+                      builder: (context, snapshot) {
+                        final expectedPlayersPerTeam = snapshot.data ?? 11;
+                    final teamAPercentage = _calculatePercentage(aCounts['accepted']!, expectedPlayersPerTeam);
+                    final teamBPercentage = _calculatePercentage(bCounts['accepted']!, expectedPlayersPerTeam);
+                    final gamePercentage = (teamAPercentage + teamBPercentage) / 2.0;
+                    final pct = gamePercentage.clamp(0.0, 1.0);
+                    final percentageText = '${(pct * 100).round()}%';
+                    
+                    // Get color for the percentage
+                    Color getColor(double pct) {
+                      final clamped = pct.clamp(0.0, 1.0);
+                      if (clamped <= 0.5) {
+                        final ratio = clamped * 2;
+                        return Color.lerp(Colors.red, Colors.orange, ratio)!;
+                      } else {
+                        final ratio = (clamped - 0.5) * 2;
+                        return Color.lerp(Colors.orange, Colors.green, ratio)!;
+                      }
+                    }
+                    final color = getColor(pct);
+                    
+                    return Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        SizedBox(
+                          width: 80,
+                          child: ClipRRect(
+                            borderRadius: BorderRadius.circular(4),
+                            child: Container(
+                              height: 8,
+                              decoration: BoxDecoration(
+                                color: Colors.grey.shade200,
+                                borderRadius: BorderRadius.circular(4),
+                              ),
+                              child: Stack(
+                                children: [
+                                  FractionallySizedBox(
+                                    widthFactor: pct,
+                                    child: Container(
+                                      decoration: BoxDecoration(
+                                        color: color,
+                                        borderRadius: BorderRadius.circular(4),
+                                      ),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ),
+                        ),
+                        const SizedBox(width: 6),
+                        Text(
+                          percentageText,
+                          style: TextStyle(
+                            fontSize: 12,
+                            fontWeight: FontWeight.w600,
+                            color: color,
+                          ),
+                        ),
+                      ],
+                    );
+                      },
+                    );
+                  },
+                ),
                 PopupMenuButton<String>(
                   onSelected: (v) async {
                     if (v == 'hide') {
                       await _confirmHideGame(reqId);
                     } else if (v == 'unhide') {
                       await _confirmUnhideGame(reqId);
+                    } else if (v == 'edit_players') {
+                      await _editExpectedPlayers(match);
                     } else if (v == 'cancel') {
                       await _confirmCancelGame(match);
                     }
@@ -3307,11 +3497,16 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
                         value: 'hide',
                         child: Text('Hide from My Games'),
                       ),
-                    if (isOrganizer)
+                    if (isOrganizer) ...[
+                      const PopupMenuItem(
+                        value: 'edit_players',
+                        child: Text('Edit expected players'),
+                      ),
                       const PopupMenuItem(
                         value: 'cancel',
                         child: Text('Cancel game (both teams)'),
                       ),
+                    ],
                   ],
                 ),
               ],
@@ -3402,22 +3597,41 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
               ],
             ),
             const SizedBox(height: 10),
-            Text(
-              'Team $teamAName: '
-              'Avail ${aCounts['accepted']} (${_pct(aCounts['accepted']!, aCounts['total']!)}), '
-              'Not ${aCounts['declined']} (${_pct(aCounts['declined']!, aCounts['total']!)}), '
-              'Pending ${aCounts['pending']}',
-              style: const TextStyle(fontSize: 12, color: Colors.black87),
+            
+            // Team availability info (without status bars)
+            Builder(
+              builder: (context) {
+                // Use match-specific value if exists, otherwise use sport default
+                final matchSpecific = match['expected_players_per_team'] as int?;
+                
+                return FutureBuilder<int>(
+                  future: matchSpecific != null 
+                      ? Future.value(matchSpecific)
+                      : SportDefaults.getExpectedPlayersPerTeam(sport),
+                  builder: (context, snapshot) {
+                    final expectedPlayersPerTeam = snapshot.data ?? 11;
+                    
+                    return Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        // Team A info
+                        Text(
+                          'Team $teamAName: Avail ${aCounts['accepted']}, Not ${aCounts['declined']}, Pending ${aCounts['pending']}',
+                          style: const TextStyle(fontSize: 12, color: Colors.black87),
+                        ),
+                        const SizedBox(height: 8),
+                        // Team B info
+                        Text(
+                          'Team $teamBName: Avail ${bCounts['accepted']}, Not ${bCounts['declined']}, Pending ${bCounts['pending']}',
+                          style: const TextStyle(fontSize: 12, color: Colors.black87),
+                        ),
+                        const SizedBox(height: 12),
+                      ],
+                    );
+                  },
+                );
+              },
             ),
-            const SizedBox(height: 4),
-            Text(
-              'Team $teamBName: '
-              'Avail ${bCounts['accepted']} (${_pct(bCounts['accepted']!, bCounts['total']!)}), '
-              'Not ${bCounts['declined']} (${_pct(bCounts['declined']!, bCounts['total']!)}), '
-              'Pending ${bCounts['pending']}',
-              style: const TextStyle(fontSize: 12, color: Colors.black87),
-            ),
-            const SizedBox(height: 12),
             if (canSwitchSide && teamAId != null && teamBId != null)
               Row(
                 children: [

@@ -325,9 +325,10 @@ class HomeRepository {
     final adminSports = adminTeams.map((t) => (t['sport'] as String? ?? '').toLowerCase()).toSet();
 
     // Get all pending/open team match requests with same sport
+    // Include public visibility for open challenges
     final requests = await supa
         .from('instant_match_requests')
-        .select('id, team_id, sport, zip_code, mode, start_time_1, start_time_2, venue, status, created_by, creator_id, radius_miles')
+        .select('id, team_id, sport, zip_code, mode, start_time_1, start_time_2, venue, status, created_by, creator_id, radius_miles, visibility, is_public')
         .eq('mode', 'team_vs_team')
         .inFilter('status', ['pending', 'open'])
         .neq('status', 'cancelled');
@@ -396,6 +397,19 @@ class HomeRepository {
           final inviteKey = '$reqId:$adminTeamId';
           if (existingInviteKeys.contains(inviteKey)) {
             continue; // Skip - invite already exists
+          }
+        }
+        
+        // For open challenge games (status='open'), check visibility
+        // Only show if visibility is 'public' or is_public is true
+        final visibility = (req['visibility'] as String?)?.toLowerCase();
+        final isPublic = req['is_public'] as bool? ?? false;
+        final status = (req['status'] as String?)?.toLowerCase();
+        
+        // If status is 'open' (open challenge), it must be public to show to admins
+        if (status == 'open') {
+          if (visibility != 'public' && !isPublic) {
+            continue; // Skip non-public open challenges
           }
         }
         
@@ -751,6 +765,7 @@ class HomeRepository {
         'my_attendance_status': userAttendanceStatus, // 'accepted' or 'declined'
         'my_team_id': userTeamId,
         'status': matchStatus, // Match request status (e.g., 'cancelled', 'matched', etc.)
+        'expected_players_per_team': r['expected_players_per_team'], // Match-specific expected players (can be null, falls back to sport default)
       });
     }
 

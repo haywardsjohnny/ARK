@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
 import 'home_tabs/home_tabs_controller.dart';
+import '../../utils/sport_defaults.dart';
 
 class CreateGameScreen extends StatefulWidget {
   final HomeTabsController controller;
@@ -266,6 +267,7 @@ class _TeamVsTeamFormState extends State<_TeamVsTeamForm> {
   bool _notifyAdmins = true;
   String? _errorText;
   bool _saving = false;
+  int? _expectedPlayersPerTeam;
 
   String _displaySport(String key) {
     final withSpaces = key.replaceAll('_', ' ');
@@ -345,6 +347,8 @@ class _TeamVsTeamFormState extends State<_TeamVsTeamForm> {
         'start_time_2': endUtc,
         'last_updated_at': DateTime.now().toUtc().toIso8601String(),
         'team_id': _selectedTeamId,
+        // Note: expected_players_per_team is now stored in sport_expected_players table
+        // We don't store it per-match anymore
       };
 
       if (_venueText != null && _venueText!.trim().isNotEmpty) {
@@ -447,10 +451,19 @@ class _TeamVsTeamFormState extends State<_TeamVsTeamForm> {
                         child: Text(_displaySport(s)),
                       ))
                   .toList(),
-              onChanged: (v) => setState(() {
-                _selectedSport = v;
-                _selectedTeamId = null;
-              }),
+              onChanged: (v) async {
+                setState(() {
+                  _selectedSport = v;
+                  _selectedTeamId = null;
+                });
+                // Set default expected players based on sport
+                if (v != null) {
+                  final expected = await SportDefaults.getExpectedPlayersPerTeam(v);
+                  setState(() {
+                    _expectedPlayersPerTeam = expected;
+                  });
+                }
+              },
             ),
             const SizedBox(height: 24),
 
@@ -667,30 +680,116 @@ class _TeamVsTeamFormState extends State<_TeamVsTeamForm> {
             ),
             const SizedBox(height: 24),
 
+            // Expected Players Per Team (Admin only, shown after sport is selected)
+            // Note: This is now managed globally in the sport_expected_players table
+            // Display info only, editing is done in a separate admin screen
+            if (widget.isAdmin && _selectedSport != null) ...[
+              FutureBuilder<int>(
+                future: SportDefaults.getExpectedPlayersPerTeam(_selectedSport!),
+                builder: (context, snapshot) {
+                  final expected = snapshot.data ?? 11;
+                  return Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
+                        children: [
+                          const Text('👥', style: TextStyle(fontSize: 20)),
+                          const SizedBox(width: 8),
+                          const Text('Expected players per team', style: TextStyle(fontWeight: FontWeight.bold)),
+                        ],
+                      ),
+                      const SizedBox(height: 8),
+                      Container(
+                        padding: const EdgeInsets.all(12),
+                        decoration: BoxDecoration(
+                          color: Colors.grey.shade100,
+                          borderRadius: BorderRadius.circular(8),
+                          border: Border.all(color: Colors.grey.shade300),
+                        ),
+                        child: Row(
+                          children: [
+                            Text(
+                              '$expected players',
+                              style: const TextStyle(
+                                fontSize: 14,
+                                fontWeight: FontWeight.w500,
+                              ),
+                            ),
+                            const SizedBox(width: 8),
+                            Text(
+                              '(Default for ${_displaySport(_selectedSport!)})',
+                              style: TextStyle(
+                                fontSize: 12,
+                                color: Colors.grey.shade600,
+                                fontStyle: FontStyle.italic,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                      const SizedBox(height: 8),
+                      Text(
+                        'Note: Expected players are managed globally per sport. Contact admin to update.',
+                        style: TextStyle(
+                          fontSize: 11,
+                          color: Colors.grey.shade600,
+                          fontStyle: FontStyle.italic,
+                        ),
+                      ),
+                      const SizedBox(height: 24),
+                    ],
+                  );
+                },
+              ),
+            ],
+
             const Divider(),
             const SizedBox(height: 16),
 
-            // Visibility (Admin only)
+            // Visibility (Admin only) - Auto-set based on opponent type, non-editable
             if (widget.isAdmin) ...[
               const Text('Visibility', style: TextStyle(fontWeight: FontWeight.bold)),
               const SizedBox(height: 8),
-              RadioListTile<String>(
-                title: const Text('Only invited teams'),
-                value: 'invited',
-                groupValue: _visibility,
-                onChanged: (v) => setState(() => _visibility = v ?? 'invited'),
+              Container(
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: Colors.grey.shade100,
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(color: Colors.grey.shade300),
+                ),
+                child: Row(
+                  children: [
+                    Icon(
+                      _opponentType == 'specific' ? Icons.lock : Icons.public,
+                      color: Colors.grey.shade600,
+                      size: 20,
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        _opponentType == 'specific' 
+                            ? 'Only invited teams (auto-set)'
+                            : 'Public (auto-set)',
+                        style: TextStyle(
+                          fontSize: 14,
+                          fontWeight: FontWeight.w500,
+                          color: Colors.grey.shade700,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
               ),
-              RadioListTile<String>(
-                title: const Text('Nearby teams'),
-                value: 'nearby',
-                groupValue: _visibility,
-                onChanged: (v) => setState(() => _visibility = v ?? 'nearby'),
-              ),
-              RadioListTile<String>(
-                title: const Text('Public'),
-                value: 'public',
-                groupValue: _visibility,
-                onChanged: (v) => setState(() => _visibility = v ?? 'public'),
+              const SizedBox(height: 8),
+              Text(
+                _opponentType == 'specific'
+                    ? 'Visibility is automatically set to "Only invited teams" when inviting specific teams.'
+                    : 'Visibility is automatically set to "Public" for open challenges.',
+                style: TextStyle(
+                  fontSize: 12,
+                  color: Colors.grey.shade600,
+                  fontStyle: FontStyle.italic,
+                ),
               ),
               const SizedBox(height: 16),
               CheckboxListTile(

@@ -227,7 +227,8 @@ BEGIN
         imr.start_time_1,
         imr.start_time_2,
         imr.venue,
-        imr.status
+        imr.status,
+        imr.expected_players_per_team
     FROM instant_match_requests imr
     WHERE imr.id = ANY(p_request_ids)
       AND imr.mode = 'team_vs_team';
@@ -282,7 +283,8 @@ BEGIN
         imr.created_by,
         imr.creator_id,
         tma.status AS user_attendance_status,
-        tma.team_id AS user_team_id
+        tma.team_id AS user_team_id,
+        imr.expected_players_per_team
     FROM instant_match_requests imr
     INNER JOIN team_match_attendance tma ON tma.request_id = imr.id
     WHERE tma.user_id = p_user_id
@@ -318,7 +320,8 @@ RETURNS TABLE (
     created_by UUID,
     creator_id UUID,
     user_attendance_status TEXT,
-    user_team_id UUID
+    user_team_id UUID,
+    expected_players_per_team INTEGER
 )
 LANGUAGE plpgsql
 SECURITY DEFINER
@@ -341,7 +344,8 @@ BEGIN
         imr.created_by,
         imr.creator_id,
         tma.status AS user_attendance_status,
-        tma.team_id AS user_team_id
+        tma.team_id AS user_team_id,
+        imr.expected_players_per_team
     FROM instant_match_requests imr
     INNER JOIN team_match_attendance tma ON tma.request_id = imr.id
     WHERE tma.user_id = p_user_id
@@ -349,6 +353,7 @@ BEGIN
       AND imr.mode = 'team_vs_team'
       AND imr.matched_team_id IS NOT NULL;
     -- Note: We include cancelled matches here (no status filter)
+    -- Note: expected_players_per_team is now in sport_expected_players lookup table
 END;
 $$;
 
