@@ -27,6 +27,20 @@ class SportDefaults {
     return _getHardcodedDefault(normalized);
   }
 
+  /// Synchronous version that uses cached data or hardcoded defaults
+  /// Use this in build methods where async is not possible
+  static int getExpectedPlayersPerTeamSync(String sport) {
+    final normalized = sport.toLowerCase().trim();
+    
+    // Try cache first
+    if (_cache != null && _cache!.containsKey(normalized)) {
+      return _cache![normalized]!;
+    }
+    
+    // Fallback to hardcoded defaults
+    return _getHardcodedDefault(normalized);
+  }
+
   /// Load cache from database
   static Future<void> _loadCache() async {
     try {

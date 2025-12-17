@@ -572,4 +572,27 @@ class HomeTabsController extends ChangeNotifier {
       rethrow;
     }
   }
+
+  Future<void> denyPendingAdminMatch({
+    required String requestId,
+    required String myAdminTeamId,
+  }) async {
+    final uid = currentUserId;
+    if (uid == null) return;
+
+    try {
+      await repo.denyPendingAdminMatch(
+        requestId: requestId,
+        myAdminTeamId: myAdminTeamId,
+        userId: uid,
+      );
+      // Refresh lists after successful deny
+      await loadPendingGamesForAdmin();
+      notifyListeners();
+    } catch (e) {
+      lastError = 'denyPendingAdminMatch failed: $e';
+      notifyListeners();
+      rethrow;
+    }
+  }
 }

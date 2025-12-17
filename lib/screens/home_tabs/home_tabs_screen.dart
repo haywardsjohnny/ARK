@@ -21,8 +21,10 @@ class HomeTabsScreen extends StatefulWidget {
 class _HomeTabsScreenState extends State<HomeTabsScreen> {
   late final HomeTabsController _controller;
   bool _initDone = false;
-  bool _pendingGamesExpanded = false;
+  bool _pendingAdminExpanded = false;
+  bool _pendingConfirmationExpanded = false;
   String _myGamesFilter = 'Current'; // 'Current', 'Past', 'Cancelled', 'Hidden'
+  final Set<String> _expandedMatchIds = {}; // Track which matches are expanded
 
   final List<String> _allSportsOptions = const [
     'badminton',
@@ -1577,9 +1579,15 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
             _buildMyGamesPreviewSection(),
             const SizedBox(height: 24),
             
-            // [ Pending Games ] Section (expanded)
-            if (_pendingGamesExpanded) ...[
-              _buildPendingGamesSection(),
+            // [ Pending Admin Approval ] Section (expanded)
+            if (_pendingAdminExpanded) ...[
+              _buildPendingAdminApprovalSection(),
+              const SizedBox(height: 24),
+            ],
+            
+            // [ Pending Confirmation ] Section (expanded)
+            if (_pendingConfirmationExpanded) ...[
+              _buildPendingConfirmationSection(),
               const SizedBox(height: 24),
             ],
           ],
@@ -2018,26 +2026,25 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
     );
   }
   
-  // [ Pending Games ] Section (expanded with details)
-  Widget _buildPendingGamesSection() {
+  // [ Pending Admin Approval ] Section (expanded with details)
+  Widget _buildPendingAdminApprovalSection() {
     final pendingInvites = _controller.teamVsTeamInvites
         .where((inv) => inv['status'] == 'pending')
         .toList();
     final pendingAdminMatches = _controller.pendingTeamMatchesForAdmin;
     final friendsOnlyGames = _controller.friendsOnlyIndividualGames;
-    final pendingAvailabilityGames =
-        _controller.pendingAvailabilityTeamMatches;
 
-    if (pendingInvites.isEmpty &&
-        pendingAdminMatches.isEmpty &&
-        friendsOnlyGames.isEmpty &&
-        pendingAvailabilityGames.isEmpty) {
+    final hasContent = pendingInvites.isNotEmpty ||
+        pendingAdminMatches.isNotEmpty ||
+        friendsOnlyGames.isNotEmpty;
+
+    if (!hasContent) {
       return Card(
         child: Padding(
           padding: const EdgeInsets.all(16),
           child: Center(
             child: Text(
-              'No pending games',
+              'No pending admin approvals',
               style: TextStyle(color: Colors.grey.shade600),
             ),
           ),
@@ -2048,9 +2055,15 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        const Text(
-          'Pending Games',
-          style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+        Row(
+          children: [
+            const Icon(Icons.admin_panel_settings, color: Colors.blue, size: 20),
+            const SizedBox(width: 8),
+            const Text(
+              'Pending Admin Approval',
+              style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+            ),
+          ],
         ),
         const SizedBox(height: 12),
         
@@ -2062,7 +2075,43 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
         
         // Friends-only Individual Games
         ...friendsOnlyGames.map((game) => _buildFriendsOnlyGameCard(game)),
+      ],
+    );
+  }
 
+  // [ Pending Confirmation ] Section (expanded with details)
+  Widget _buildPendingConfirmationSection() {
+    final pendingAvailabilityGames = _controller.pendingAvailabilityTeamMatches;
+
+    if (pendingAvailabilityGames.isEmpty) {
+      return Card(
+        child: Padding(
+          padding: const EdgeInsets.all(16),
+          child: Center(
+            child: Text(
+              'No pending confirmations',
+              style: TextStyle(color: Colors.grey.shade600),
+            ),
+          ),
+        ),
+      );
+    }
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            const Icon(Icons.event_available, color: Colors.orange, size: 20),
+            const SizedBox(width: 8),
+            const Text(
+              'Pending Confirmation',
+              style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+            ),
+          ],
+        ),
+        const SizedBox(height: 12),
+        
         // Confirmed Team Games where MY availability is pending
         ...pendingAvailabilityGames
             .map((game) => _buildPendingAvailabilityTeamCard(game)),
@@ -2336,11 +2385,50 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
               mainAxisAlignment: MainAxisAlignment.end,
               children: [
                 OutlinedButton(
-                  onPressed: () {
-                    // TODO: Implement deny for admin matches
-                    ScaffoldMessenger.of(context).showSnackBar(
-                      const SnackBar(content: Text('Deny functionality coming soon')),
+                  onPressed: () async {
+                    // Deny the pending admin match
+                    final req = match['request'] as Map<String, dynamic>?;
+                    if (req == null) return;
+                    
+                    final sport = req['sport'] as String?;
+                    if (sport == null) return;
+                    
+                    // Find admin team with same sport
+                    final matchingTeam = _controller.adminTeams.firstWhere(
+                      (t) => (t['sport'] as String? ?? '').toLowerCase() == sport.toLowerCase(),
+                      orElse: () => <String, dynamic>{},
                     );
+                    
+                    if (matchingTeam.isEmpty) {
+                      if (mounted) {
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          const SnackBar(content: Text('No admin team found for this sport')),
+                        );
+                      }
+                      return;
+                    }
+                    
+                    final requestId = req['id'] as String?;
+                    final teamId = matchingTeam['id'] as String?;
+                    if (requestId == null || teamId == null) return;
+                    
+                    try {
+                      await _controller.denyPendingAdminMatch(
+                        requestId: requestId,
+                        myAdminTeamId: teamId,
+                      );
+                      if (mounted) {
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          const SnackBar(content: Text('Match declined')),
+                        );
+                      }
+                    } catch (e) {
+                      if (mounted) {
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          SnackBar(content: Text('Failed to deny: $e')),
+                        );
+                      }
+                    }
                   },
                   child: const Text('Deny'),
                 ),
@@ -2361,9 +2449,11 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
                     );
                     
                     if (matchingTeam.isEmpty) {
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        const SnackBar(content: Text('No admin team found for this sport')),
-                      );
+                      if (mounted) {
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          const SnackBar(content: Text('No admin team found for this sport')),
+                        );
+                      }
                       return;
                     }
                     
@@ -2737,29 +2827,42 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
     return '$displayHour:$minute $period';
   }
 
+  /// Get color based on percentage (0.0-1.0): red → orange → green
+  Color _getPercentageColor(double pct) {
+    final clamped = pct.clamp(0.0, 1.0);
+    
+    if (clamped <= 0.5) {
+      // 0% to 50%: Red to Orange
+      final ratio = clamped * 2;
+      return Color.lerp(Colors.red, Colors.orange, ratio)!;
+    } else {
+      // 50% to 100%: Orange to Green
+      final ratio = (clamped - 0.5) * 2;
+      return Color.lerp(Colors.orange, Colors.green, ratio)!;
+    }
+  }
+
   // [ My Games Preview ] Section
   Widget _buildMyGamesPreviewSection() {
     final confirmedCount = _controller.confirmedTeamMatches.length;
     
-    // Calculate pending count:
-    // 1. Existing team invites (pending)
+    // Calculate pending counts by type:
+    // 1. Pending Admin Approval: Games where user is admin and needs to approve/deny
+    //    - Existing team invites (pending)
     final existingPendingInvites = _controller.teamVsTeamInvites
         .where((inv) => inv['status'] == 'pending')
         .length;
-    
-    // 2. Team matches where user is admin and can approve (within 75 miles, same sport)
+    //    - Team matches where user is admin and can approve (public/discoverable games)
     final pendingAdminMatches = _controller.pendingTeamMatchesForAdmin.length;
-    
-    // 3. Individual games from friends that are "friends_only"
+    //    - Individual games from friends that are "friends_only"
     final friendsOnlyGames = _controller.friendsOnlyIndividualGames.length;
+    final pendingAdminApprovalCount = existingPendingInvites + pendingAdminMatches + friendsOnlyGames;
     
-    // 4. Confirmed team games where user's attendance is pending
-    final pendingAvailabilityTeamMatches = _controller.pendingAvailabilityTeamMatches.length;
+    // 2. Pending Confirmation: Games where user needs to give availability
+    //    - Confirmed team games where user's attendance is pending
+    final pendingConfirmationCount = _controller.pendingAvailabilityTeamMatches.length;
     
-    final pendingCount = existingPendingInvites + 
-        pendingAdminMatches + 
-        friendsOnlyGames + 
-        pendingAvailabilityTeamMatches;
+    final totalPendingCount = pendingAdminApprovalCount + pendingConfirmationCount;
     
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -2774,6 +2877,7 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
             padding: const EdgeInsets.all(16),
             child: Column(
               children: [
+                // Confirmed Games
                 Row(
                   mainAxisAlignment: MainAxisAlignment.spaceBetween,
                   children: [
@@ -2794,24 +2898,49 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
                   ],
                 ),
                 const Divider(),
+                // Pending Admin Approval
                 Row(
                   mainAxisAlignment: MainAxisAlignment.spaceBetween,
                   children: [
                     Row(
                       children: [
-                        const Icon(Icons.pending, color: Colors.orange),
+                        const Icon(Icons.admin_panel_settings, color: Colors.blue),
                         const SizedBox(width: 8),
-                        Text('Pending – $pendingCount'),
+                        Text('Pending Admin Approval – $pendingAdminApprovalCount'),
                       ],
                     ),
-                    TextButton(
-                      onPressed: () {
-                        setState(() {
-                          _pendingGamesExpanded = !_pendingGamesExpanded;
-                        });
-                      },
-                      child: Text(_pendingGamesExpanded ? 'Hide' : 'View All'),
+                    if (pendingAdminApprovalCount > 0)
+                      TextButton(
+                        onPressed: () {
+                          setState(() {
+                            _pendingAdminExpanded = !_pendingAdminExpanded;
+                          });
+                        },
+                        child: Text(_pendingAdminExpanded ? 'Hide' : 'View All'),
+                      ),
+                  ],
+                ),
+                const Divider(),
+                // Pending Confirmation (Availability)
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    Row(
+                      children: [
+                        const Icon(Icons.event_available, color: Colors.orange),
+                        const SizedBox(width: 8),
+                        Text('Pending Confirmation – $pendingConfirmationCount'),
+                      ],
                     ),
+                    if (pendingConfirmationCount > 0)
+                      TextButton(
+                        onPressed: () {
+                          setState(() {
+                            _pendingConfirmationExpanded = !_pendingConfirmationExpanded;
+                          });
+                        },
+                        child: Text(_pendingConfirmationExpanded ? 'Hide' : 'View All'),
+                      ),
                   ],
                 ),
               ],
@@ -3266,6 +3395,32 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
   }
 
   Widget _buildMatchesList(List<Map<String, dynamic>> matches) {
+    // Group matches by sport and sort by date
+    final groupedMatches = <String, List<Map<String, dynamic>>>{};
+    
+    for (final match in matches) {
+      final sport = (match['sport'] as String?)?.toLowerCase() ?? 'other';
+      if (!groupedMatches.containsKey(sport)) {
+        groupedMatches[sport] = [];
+      }
+      groupedMatches[sport]!.add(match);
+    }
+    
+    // Sort matches within each sport by date (earliest first)
+    for (final sportMatches in groupedMatches.values) {
+      sportMatches.sort((a, b) {
+        final aTime = a['start_time'] as DateTime?;
+        final bTime = b['start_time'] as DateTime?;
+        if (aTime == null && bTime == null) return 0;
+        if (aTime == null) return 1;
+        if (bTime == null) return -1;
+        return aTime.compareTo(bTime);
+      });
+    }
+    
+    // Sort sports alphabetically
+    final sortedSports = groupedMatches.keys.toList()..sort();
+    
     return Padding(
       padding: const EdgeInsets.fromLTRB(16, 16, 16, 0),
       child: Column(
@@ -3275,18 +3430,188 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
             'Your games (${matches.length})',
             style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
           ),
-          const SizedBox(height: 8),
-          ...matches.map((m) => _buildMatchCardForFilter(m)),
+          const SizedBox(height: 16),
+          
+          // Display matches grouped by sport
+          ...sortedSports.expand((sport) {
+            final sportMatches = groupedMatches[sport]!;
+            return [
+              // Sport header
+              Padding(
+                padding: const EdgeInsets.only(bottom: 8, top: 8),
+                child: Row(
+                  children: [
+                    Text(
+                      _getSportEmoji(sport),
+                      style: const TextStyle(fontSize: 20),
+                    ),
+                    const SizedBox(width: 8),
+                    Text(
+                      _displaySport(sport),
+                      style: const TextStyle(
+                        fontSize: 16,
+                        fontWeight: FontWeight.bold,
+                        color: Colors.blue,
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Text(
+                      '(${sportMatches.length})',
+                      style: TextStyle(
+                        fontSize: 14,
+                        color: Colors.grey.shade600,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              // Matches for this sport
+              ...sportMatches.map((m) => _buildMatchCardForFilter(m)),
+              const SizedBox(height: 12),
+            ];
+          }),
         ],
       ),
     );
   }
 
   Widget _buildMatchCardForFilter(Map<String, dynamic> match) {
-    // Use the full card implementation for Current and Hidden tabs (today/future matches)
-    final startTime = match['start_time'] as DateTime?;
+    final reqId = match['request_id'] as String;
+    final isExpanded = _expandedMatchIds.contains(reqId);
+    
+    // Show compact summary by default, expandable to full details
+    return _buildCollapsibleMatchCard(match, isExpanded);
+  }
+  
+  Widget _buildCollapsibleMatchCard(Map<String, dynamic> match, bool isExpanded) {
+    final reqId = match['request_id'] as String;
+    final teamAName = match['team_a_name'] as String? ?? 'Team A';
+    final teamBName = match['team_b_name'] as String? ?? 'Team B';
+    final sport = match['sport'] as String? ?? '';
+    final startDt = match['start_time'] as DateTime?;
+    final endDt = match['end_time'] as DateTime?;
+    final status = (match['status'] as String?)?.toLowerCase() ?? '';
+    
+    // Calculate game-level percentage (based on accepted players only)
+    final teamAPlayers = (match['team_a_players'] as List?)?.cast<Map<String, dynamic>>() ?? [];
+    final teamBPlayers = (match['team_b_players'] as List?)?.cast<Map<String, dynamic>>() ?? [];
+    final expectedPlayers = match['expected_players_per_team'] as int? ?? 
+        SportDefaults.getExpectedPlayersPerTeamSync(sport);
+    
+    // Count only accepted players
+    final teamAAccepted = teamAPlayers.where((p) => (p['status'] as String?)?.toLowerCase() == 'accepted').length;
+    final teamBAccepted = teamBPlayers.where((p) => (p['status'] as String?)?.toLowerCase() == 'accepted').length;
+    final totalAccepted = teamAAccepted + teamBAccepted;
+    final totalExpected = expectedPlayers * 2;
+    final gamePercentage = totalExpected > 0 ? (totalAccepted / totalExpected * 100).round() : 0;
+    
+    return Card(
+      margin: const EdgeInsets.only(bottom: 12),
+      color: status == 'cancelled' ? Colors.grey.shade100 : null,
+      child: InkWell(
+        onTap: () {
+          setState(() {
+            if (isExpanded) {
+              _expandedMatchIds.remove(reqId);
+            } else {
+              _expandedMatchIds.add(reqId);
+            }
+          });
+        },
+        child: Padding(
+          padding: const EdgeInsets.all(16),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              // Compact Summary (always visible)
+              Row(
+                children: [
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        // Team A vs Team B
+                        Text(
+                          '$teamAName vs $teamBName',
+                          style: const TextStyle(
+                            fontSize: 16,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                        const SizedBox(height: 4),
+                        // Date & Time
+                        if (startDt != null) ...[
+                          Row(
+                            children: [
+                              const Icon(Icons.calendar_today, size: 14, color: Colors.grey),
+                              const SizedBox(width: 4),
+                              Text(
+                                '${startDt.year}-${startDt.month.toString().padLeft(2, '0')}-${startDt.day.toString().padLeft(2, '0')}',
+                                style: TextStyle(fontSize: 13, color: Colors.grey.shade700),
+                              ),
+                              if (endDt != null) ...[
+                                const SizedBox(width: 8),
+                                const Icon(Icons.access_time, size: 14, color: Colors.grey),
+                                const SizedBox(width: 4),
+                                Text(
+                                  '${_formatTime(startDt)} - ${_formatTime(endDt)}',
+                                  style: TextStyle(fontSize: 13, color: Colors.grey.shade700),
+                                ),
+                              ],
+                            ],
+                          ),
+                        ],
+                      ],
+                    ),
+                  ),
+                  Icon(
+                    isExpanded ? Icons.expand_less : Icons.expand_more,
+                    color: Colors.grey,
+                  ),
+                ],
+              ),
+              const SizedBox(height: 8),
+              // Percentage Bar
+              Row(
+                children: [
+                  Expanded(
+                    child: StatusBar(
+                      percentage: gamePercentage / 100.0, // Convert 0-100 to 0.0-1.0
+                      height: 8,
+                      showPercentage: false, // We'll show it separately
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Text(
+                    '$gamePercentage%',
+                    style: TextStyle(
+                      fontSize: 12,
+                      fontWeight: FontWeight.bold,
+                      color: _getPercentageColor(gamePercentage / 100.0),
+                    ),
+                  ),
+                ],
+              ),
+              
+              // Full Details (only when expanded)
+              if (isExpanded) ...[
+                const SizedBox(height: 16),
+                const Divider(),
+                const SizedBox(height: 8),
+                _buildExpandedMatchDetails(match),
+              ],
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+  
+  Widget _buildExpandedMatchDetails(Map<String, dynamic> match) {
+    // For interactive matches, show full details. For past/cancelled, show basic info.
     final now = DateTime.now();
     final today = DateTime(now.year, now.month, now.day);
+    final startTime = match['start_time'] as DateTime?;
     DateTime? matchDate;
     if (startTime != null) {
       matchDate = DateTime(startTime.year, startTime.month, startTime.day);
@@ -3294,13 +3619,290 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
     final isTodayOrFuture = matchDate != null && 
         (matchDate.isAfter(today) || matchDate.isAtSameMomentAs(today));
     
-    // For Current and Hidden tabs with today/future matches, show full card
+    // For Current/Hidden tabs with future games, use full card content
     if ((_myGamesFilter == 'Current' || _myGamesFilter == 'Hidden') && isTodayOrFuture) {
-      return _buildFullMatchCard(match);
+      return _buildFullMatchCardContent(match);
     }
     
-    // For Past and Cancelled tabs, show simplified card
-    return _buildMatchCardFromData(match);
+    // For Past/Cancelled, show basic info only
+    return _buildBasicMatchInfo(match);
+  }
+  
+  Widget _buildFullMatchCardContent(Map<String, dynamic> match) {
+    final reqId = match['request_id'] as String;
+    final teamAId = match['team_a_id'] as String?;
+    final teamBId = match['team_b_id'] as String?;
+    final teamAName = match['team_a_name'] as String? ?? 'Team A';
+    final teamBName = match['team_b_name'] as String? ?? 'Team B';
+    final sport = match['sport'] as String? ?? '';
+    final startDt = match['start_time'] as DateTime?;
+    final endDt = match['end_time'] as DateTime?;
+    final venue = match['venue'] as String?;
+    final canSwitchSide = (match['can_switch_side'] as bool?) ?? false;
+
+    final teamAPlayers = (match['team_a_players'] as List?)?.cast<Map<String, dynamic>>() ?? [];
+    final teamBPlayers = (match['team_b_players'] as List?)?.cast<Map<String, dynamic>>() ?? [];
+
+    final uid = _controller.currentUserId;
+
+    final myStatusA = teamAPlayers
+        .where((p) => p['user_id'] == uid)
+        .map((p) => p['status'] as String?)
+        .firstWhere((x) => x != null, orElse: () => null);
+    final myStatusB = teamBPlayers
+        .where((p) => p['user_id'] == uid)
+        .map((p) => p['status'] as String?)
+        .firstWhere((x) => x != null, orElse: () => null);
+
+    final myTeamId = match['my_team_id'] as String? ??
+        (myStatusA != null ? teamAId : (myStatusB != null ? teamBId : teamAId));
+
+    final aCounts = _statusCounts(teamAPlayers);
+    final bCounts = _statusCounts(teamBPlayers);
+
+    final isOrganizer = _controller.isOrganizerForMatch(match);
+    final canSendReminder = _controller.canSendReminderForMatch(match);
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        // Menu options
+        Row(
+          mainAxisAlignment: MainAxisAlignment.end,
+          children: [
+            PopupMenuButton<String>(
+              onSelected: (v) async {
+                if (v == 'hide') {
+                  await _confirmHideGame(reqId);
+                } else if (v == 'unhide') {
+                  await _confirmUnhideGame(reqId);
+                } else if (v == 'edit_players') {
+                  await _editExpectedPlayers(match);
+                } else if (v == 'cancel') {
+                  await _confirmCancelGame(match);
+                }
+              },
+              itemBuilder: (_) => [
+                if (_myGamesFilter == 'Hidden')
+                  const PopupMenuItem(
+                    value: 'unhide',
+                    child: Text('Unhide game'),
+                  )
+                else
+                  const PopupMenuItem(
+                    value: 'hide',
+                    child: Text('Hide from My Games'),
+                  ),
+                if (isOrganizer) ...[
+                  const PopupMenuItem(
+                    value: 'edit_players',
+                    child: Text('Edit expected players'),
+                  ),
+                  const PopupMenuItem(
+                    value: 'cancel',
+                    child: Text('Cancel game (both teams)'),
+                  ),
+                ],
+              ],
+            ),
+          ],
+        ),
+        
+        // Venue
+        if (venue != null && venue.isNotEmpty) ...[
+          Row(
+            children: [
+              const Icon(Icons.place_outlined, size: 14),
+              const SizedBox(width: 4),
+              Expanded(
+                child: Text(venue, style: const TextStyle(fontSize: 13)),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+        ],
+        
+        // Expected players info
+        Builder(
+          builder: (context) {
+            final matchSpecific = match['expected_players_per_team'] as int?;
+            final expected = matchSpecific ?? SportDefaults.getExpectedPlayersPerTeamSync(sport);
+            return Text(
+              'Expected: $expected players per team',
+              style: TextStyle(fontSize: 12, color: Colors.grey.shade600),
+            );
+          },
+        ),
+        const SizedBox(height: 12),
+        
+        // Team A
+        Row(
+          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+          children: [
+            Text('Team $teamAName', style: const TextStyle(fontWeight: FontWeight.bold)),
+            Text(
+              '${aCounts['accepted']}/${teamAPlayers.length}',
+              style: const TextStyle(fontSize: 12),
+            ),
+          ],
+        ),
+        const SizedBox(height: 4),
+        ...teamAPlayers.map((p) => _buildPlayerRow(p)),
+        
+        const SizedBox(height: 12),
+        
+        // Team B
+        Row(
+          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+          children: [
+            Text('Team $teamBName', style: const TextStyle(fontWeight: FontWeight.bold)),
+            Text(
+              '${bCounts['accepted']}/${teamBPlayers.length}',
+              style: const TextStyle(fontSize: 12),
+            ),
+          ],
+        ),
+        const SizedBox(height: 4),
+        ...teamBPlayers.map((p) => _buildPlayerRow(p)),
+        
+        const SizedBox(height: 12),
+        
+        // Send reminder (if applicable)
+        if (canSendReminder && myTeamId != null) ...[
+          OutlinedButton.icon(
+            onPressed: () async {
+              await _controller.sendReminderToTeams(
+                requestId: reqId,
+                teamId: myTeamId,
+              );
+              if (!mounted) return;
+              ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(content: Text('Reminder sent')),
+              );
+            },
+            icon: const Icon(Icons.notifications_active_outlined, size: 16),
+            label: const Text('Send reminder'),
+          ),
+          const SizedBox(height: 8),
+        ],
+        
+        // Action buttons
+        Row(
+          children: [
+            Expanded(
+              child: OutlinedButton(
+                onPressed: (myTeamId == null)
+                    ? null
+                    : () => _vote(
+                          requestId: reqId,
+                          teamId: myTeamId,
+                          status: 'accepted',
+                        ),
+                child: const Text('Available'),
+              ),
+            ),
+            const SizedBox(width: 8),
+            Expanded(
+              child: OutlinedButton(
+                onPressed: (myTeamId == null)
+                    ? null
+                    : () => _vote(
+                          requestId: reqId,
+                          teamId: myTeamId,
+                          status: 'declined',
+                        ),
+                child: const Text('Not available'),
+              ),
+            ),
+          ],
+        ),
+        
+        // Switch side button
+        if (canSwitchSide && myTeamId != null) ...[
+          const SizedBox(height: 8),
+          TextButton.icon(
+            onPressed: () {
+              // Determine the other team
+              final otherTeamId = myTeamId == teamAId ? teamBId : teamAId;
+              if (otherTeamId != null) {
+                _switchSide(
+                  requestId: reqId,
+                  newTeamId: otherTeamId,
+                );
+              }
+            },
+            icon: const Icon(Icons.swap_horiz, size: 16),
+            label: const Text('Switch to other team'),
+          ),
+        ],
+      ],
+    );
+  }
+  
+  Widget _buildBasicMatchInfo(Map<String, dynamic> match) {
+    final venue = match['venue'] as String?;
+    final teamAPlayers = (match['team_a_players'] as List?)?.cast<Map<String, dynamic>>() ?? [];
+    final teamBPlayers = (match['team_b_players'] as List?)?.cast<Map<String, dynamic>>() ?? [];
+    final teamAName = match['team_a_name'] as String? ?? 'Team A';
+    final teamBName = match['team_b_name'] as String? ?? 'Team B';
+    
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        if (venue != null && venue.isNotEmpty) ...[
+          Row(
+            children: [
+              const Icon(Icons.place_outlined, size: 14),
+              const SizedBox(width: 4),
+              Expanded(child: Text(venue, style: const TextStyle(fontSize: 13))),
+            ],
+          ),
+          const SizedBox(height: 8),
+        ],
+        
+        Text('Team $teamAName', style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14)),
+        const SizedBox(height: 4),
+        ...teamAPlayers.map((p) => _buildPlayerRow(p)),
+        
+        const SizedBox(height: 12),
+        
+        Text('Team $teamBName', style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14)),
+        const SizedBox(height: 4),
+        ...teamBPlayers.map((p) => _buildPlayerRow(p)),
+      ],
+    );
+  }
+  
+  Widget _buildPlayerRow(Map<String, dynamic> player) {
+    final name = player['name'] as String? ?? 'Unknown';
+    final status = (player['status'] as String?)?.toLowerCase() ?? 'pending';
+    
+    IconData icon;
+    Color color;
+    switch (status) {
+      case 'accepted':
+        icon = Icons.check_circle;
+        color = Colors.green;
+        break;
+      case 'declined':
+        icon = Icons.cancel;
+        color = Colors.red;
+        break;
+      default:
+        icon = Icons.help_outline;
+        color = Colors.orange;
+    }
+    
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 2),
+      child: Row(
+        children: [
+          Icon(icon, size: 16, color: color),
+          const SizedBox(width: 8),
+          Text(name, style: const TextStyle(fontSize: 13)),
+        ],
+      ),
+    );
   }
 
   Widget _buildFullMatchCard(Map<String, dynamic> match) {

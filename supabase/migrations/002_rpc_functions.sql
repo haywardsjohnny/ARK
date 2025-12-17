@@ -62,28 +62,24 @@ BEGIN
     
     -- Create attendance records for requesting team members
     IF v_request_team_members IS NOT NULL THEN
-        INSERT INTO team_match_attendance (request_id, user_id, team_id, status, created_at, updated_at)
+        INSERT INTO team_match_attendance (request_id, user_id, team_id, status)
         SELECT 
             p_request_id,
             user_id,
             v_request_team_id,
-            'pending',
-            NOW(),
-            NOW()
+            'pending'
         FROM UNNEST(v_request_team_members) AS user_id
         ON CONFLICT (request_id, user_id) DO NOTHING;
     END IF;
     
     -- Create attendance records for target team members
     IF v_target_team_members IS NOT NULL THEN
-        INSERT INTO team_match_attendance (request_id, user_id, team_id, status, created_at, updated_at)
+        INSERT INTO team_match_attendance (request_id, user_id, team_id, status)
         SELECT 
             p_request_id,
             user_id,
             p_target_team_id,
-            'pending',
-            NOW(),
-            NOW()
+            'pending'
         FROM UNNEST(v_target_team_members) AS user_id
         ON CONFLICT (request_id, user_id) DO NOTHING;
     END IF;

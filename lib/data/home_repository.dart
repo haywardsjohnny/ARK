@@ -217,6 +217,14 @@ class HomeRepository {
       final st = (req['status'] as String?)?.toLowerCase() ?? '';
       if (st == 'cancelled') continue;
 
+      // Skip if another team has already been matched
+      // (e.g., Team A invited Team B and Team C, Team B accepted, so Team C's invite should disappear)
+      final matchedTeamId = req['matched_team_id'] as String?;
+      final inviteTargetTeamId = inv['target_team_id'] as String?;
+      if (matchedTeamId != null && matchedTeamId != inviteTargetTeamId) {
+        continue; // Another team already accepted this game
+      }
+
       invites.add({
         'id': inv['id'] as String,
         'request_id': reqId,
@@ -251,6 +259,21 @@ class HomeRepository {
   }) async {
     await supa.rpc(
       'accept_pending_admin_match',
+      params: {
+        'p_request_id': requestId,
+        'p_target_team_id': myAdminTeamId,
+        'p_actor_user_id': userId,
+      },
+    );
+  }
+
+  Future<void> denyPendingAdminMatch({
+    required String requestId,
+    required String myAdminTeamId,
+    required String userId,
+  }) async {
+    await supa.rpc(
+      'deny_pending_admin_match',
       params: {
         'p_request_id': requestId,
         'p_target_team_id': myAdminTeamId,
@@ -319,7 +342,19 @@ class HomeRepository {
     required List<Map<String, dynamic>> adminTeams,
     required String? userZipCode,
   }) async {
-    if (adminTeams.isEmpty || userZipCode == null) return [];
+    if (kDebugMode) {
+      print('[DEBUG] getPendingTeamMatchesForAdmin: userId=$userId, adminTeams=${adminTeams.length}, userZipCode=$userZipCode');
+      for (final team in adminTeams) {
+        print('[DEBUG] Admin team: ${team['id']}, sport=${team['sport']}, name=${team['name']}');
+      }
+    }
+    
+    if (adminTeams.isEmpty || userZipCode == null) {
+      if (kDebugMode) {
+        print('[DEBUG] getPendingTeamMatchesForAdmin: Returning empty - adminTeams.isEmpty=${adminTeams.isEmpty}, userZipCode==null=${userZipCode == null}');
+      }
+      return [];
+    }
 
     final adminTeamIds = adminTeams.map((t) => t['id'] as String).toList();
     final adminSports = adminTeams.map((t) => (t['sport'] as String? ?? '').toLowerCase()).toSet();
@@ -332,6 +367,15 @@ class HomeRepository {
         .eq('mode', 'team_vs_team')
         .inFilter('status', ['pending', 'open'])
         .neq('status', 'cancelled');
+
+    if (kDebugMode) {
+      print('[DEBUG] getPendingTeamMatchesForAdmin: Found ${requests is List ? requests.length : 0} total requests');
+      if (requests is List && requests.isNotEmpty) {
+        for (final req in requests.take(5)) {
+          print('[DEBUG] Request: id=${req['id']}, sport=${req['sport']}, status=${req['status']}, visibility=${req['visibility']}, is_public=${req['is_public']}, team_id=${req['team_id']}');
+        }
+      }
+    }
 
     if (requests is! List) return [];
 
@@ -355,81 +399,127 @@ class HomeRepository {
     final pendingMatches = <Map<String, dynamic>>[];
 
     for (final req in requests) {
+      final reqId = req['id'] as String?;
       final reqTeamId = req['team_id'] as String?;
-      if (reqTeamId == null) continue;
+      final reqSport = (req['sport'] as String? ?? '').toLowerCase();
+      final visibility = (req['visibility'] as String?)?.toLowerCase();
+      final isPublic = req['is_public'] as bool? ?? false;
+      
+      if (kDebugMode) {
+        print('[DEBUG] Processing request: id=$reqId, sport=$reqSport, visibility=$visibility, is_public=$isPublic, team_id=$reqTeamId');
+      }
+      
+      if (reqTeamId == null) {
+        if (kDebugMode) print('[DEBUG] Skipping request $reqId: team_id is null');
+        continue;
+      }
 
       // Skip if this request is from one of user's admin teams
-      if (adminTeamIds.contains(reqTeamId)) continue;
+      if (adminTeamIds.contains(reqTeamId)) {
+        if (kDebugMode) print('[DEBUG] Skipping request $reqId: created by user\'s own team');
+        continue;
+      }
 
-      final reqSport = (req['sport'] as String? ?? '').toLowerCase();
-      if (!adminSports.contains(reqSport)) continue;
+      if (!adminSports.contains(reqSport)) {
+        if (kDebugMode) print('[DEBUG] Skipping request $reqId: sport mismatch (reqSport=$reqSport, adminSports=$adminSports)');
+        continue;
+      }
 
       // Check if within radius (using radius_miles from request, default 75)
       final reqZip = req['zip_code'] as String?;
-      if (reqZip == null) continue;
-
       final radiusMiles = req['radius_miles'] as int? ?? 75;
       
-      // Check if within 75 miles radius:
-      // 1. If ZIP codes match (same area), definitely within range
-      // 2. If request radius is 75 miles, it's a wide search that likely includes user's area
-      // 3. For exact distance calculation, you'd need a ZIP code distance API
-      // For now, we'll include if:
-      // - ZIP codes match (same area)
-      // - Request has radius >= 75 (wide search)
-      final isWithinRadius = reqZip == userZipCode || radiusMiles >= 75;
+      // For public games, show to all admins of the same sport (radius check is less strict)
+      // For non-public games, apply stricter radius check
+      bool isWithinRadius;
       
-      if (isWithinRadius) {
-        // Find matching admin team for this sport
-        final matchingAdminTeam = adminTeams.firstWhere(
-          (t) => (t['sport'] as String? ?? '').toLowerCase() == reqSport,
-          orElse: () => <String, dynamic>{},
-        );
-        
-        if (matchingAdminTeam.isEmpty) continue;
-        
-        final adminTeamId = matchingAdminTeam['id'] as String?;
-        if (adminTeamId == null) continue;
-        
-        // Skip if invite already exists for this request and admin team
-        final reqId = req['id'] as String?;
-        if (reqId != null) {
-          final inviteKey = '$reqId:$adminTeamId';
-          if (existingInviteKeys.contains(inviteKey)) {
-            continue; // Skip - invite already exists
-          }
+      if (visibility == 'public' || isPublic) {
+        // Public games: Show to all admins of same sport within the request's radius
+        // Since it's public, we're more lenient - if radius is 75 miles (default), show it
+        // For now, show all public games to admins of same sport (radius check happens at game creation)
+        isWithinRadius = true; // Public games are discoverable by all admins of same sport
+        if (kDebugMode) {
+          print('[DEBUG] Request $reqId: Public game, isWithinRadius=true');
         }
-        
-        // For open challenge games (status='open'), check visibility
-        // Only show if visibility is 'public' or is_public is true
-        final visibility = (req['visibility'] as String?)?.toLowerCase();
-        final isPublic = req['is_public'] as bool? ?? false;
-        final status = (req['status'] as String?)?.toLowerCase();
-        
-        // If status is 'open' (open challenge), it must be public to show to admins
-        if (status == 'open') {
-          if (visibility != 'public' && !isPublic) {
-            continue; // Skip non-public open challenges
+      } else {
+        // Non-public games: Apply radius check
+        if (reqZip == null || userZipCode == null) {
+          if (kDebugMode) {
+            print('[DEBUG] Skipping request $reqId: Missing ZIP codes (reqZip=$reqZip, userZipCode=$userZipCode)');
           }
+          continue; // Need ZIP codes for radius check
         }
-        
-        // Get team info
-        final teamInfo = await supa
-            .from('teams')
-            .select('id, name, sport, zip_code')
-            .eq('id', reqTeamId)
-            .maybeSingle();
+        // If ZIP codes match (same area), definitely within range
+        // If request has radius >= 75 (wide search), include it
+        isWithinRadius = reqZip == userZipCode || radiusMiles >= 75;
+        if (kDebugMode) {
+          print('[DEBUG] Request $reqId: Non-public, isWithinRadius=$isWithinRadius (reqZip=$reqZip, userZipCode=$userZipCode, radius=$radiusMiles)');
+        }
+      }
+      
+      if (!isWithinRadius) {
+        if (kDebugMode) print('[DEBUG] Skipping request $reqId: Not within radius');
+        continue;
+      }
+      
+      // Find matching admin team for this sport
+      final matchingAdminTeam = adminTeams.firstWhere(
+        (t) => (t['sport'] as String? ?? '').toLowerCase() == reqSport,
+        orElse: () => <String, dynamic>{},
+      );
+      
+      if (matchingAdminTeam.isEmpty) {
+        if (kDebugMode) print('[DEBUG] Skipping request $reqId: No matching admin team found');
+        continue;
+      }
+      
+      final adminTeamId = matchingAdminTeam['id'] as String?;
+      if (adminTeamId == null) {
+        if (kDebugMode) print('[DEBUG] Skipping request $reqId: adminTeamId is null');
+        continue;
+      }
+      
+      if (reqId == null) {
+        if (kDebugMode) print('[DEBUG] Skipping request: reqId is null');
+        continue;
+      }
+      
+      // Skip if invite already exists for this request and admin team
+      final inviteKey = '$reqId:$adminTeamId';
+      if (existingInviteKeys.contains(inviteKey)) {
+        if (kDebugMode) print('[DEBUG] Skipping request $reqId: Invite already exists for adminTeamId=$adminTeamId');
+        continue; // Skip - invite already exists
+      }
+      
+      // Visibility check already done above - public games are included
+      
+      // Get team info
+      final teamInfo = await supa
+          .from('teams')
+          .select('id, name, sport, zip_code')
+          .eq('id', reqTeamId)
+          .maybeSingle();
 
-        if (teamInfo != null) {
-          pendingMatches.add({
-            'request': req,
-            'team': teamInfo,
-            'admin_team': matchingAdminTeam,
-          });
+      if (teamInfo != null) {
+        if (kDebugMode) {
+          print('[DEBUG] ✓ Adding pending match: requestId=$reqId, teamName=${teamInfo['name']}, adminTeamId=$adminTeamId');
+        }
+        pendingMatches.add({
+          'request': req,
+          'team': teamInfo,
+          'admin_team': matchingAdminTeam,
+        });
+      } else {
+        if (kDebugMode) {
+          print('[DEBUG] Skipping request $reqId: teamInfo is null');
         }
       }
     }
-
+    
+    if (kDebugMode) {
+      print('[DEBUG] getPendingTeamMatchesForAdmin: Returning ${pendingMatches.length} pending matches');
+    }
+    
     return pendingMatches;
   }
 
