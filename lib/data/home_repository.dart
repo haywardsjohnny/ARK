@@ -1150,7 +1150,7 @@ class HomeRepository {
     final reqs = await supa
         .from('instant_match_requests')
         .select(
-            'id, sport, mode, zip_code, team_id, matched_team_id, start_time_1, start_time_2, venue, status, created_by, creator_id')
+            'id, sport, mode, zip_code, team_id, matched_team_id, start_time_1, start_time_2, venue, details, status, created_by, creator_id')
         .inFilter('id', requestIds)
         .eq('mode', 'team_vs_team')
         .neq('status', 'cancelled')
@@ -1195,13 +1195,18 @@ class HomeRepository {
         .select('request_id, user_id, team_id, status')
         .inFilter('request_id', requestIds);
 
-    // Batch fetch user names
+    // Batch fetch user names (including creators)
     final allUserIds = <String>{};
     if (allAttendance is List) {
       for (final a in allAttendance) {
         final uid = a['user_id'] as String?;
         if (uid != null) allUserIds.add(uid);
       }
+    }
+    // Also add creator IDs
+    for (final r in reqs) {
+      final creatorId = r['created_by'] as String?;
+      if (creatorId != null) allUserIds.add(creatorId);
     }
 
     final users = allUserIds.isEmpty
@@ -1217,6 +1222,27 @@ class HomeRepository {
         final id = u['id'] as String?;
         if (id != null) {
           userNameById[id] = (u['full_name'] as String?) ?? 'Player';
+        }
+      }
+    }
+    
+    // Batch fetch team member roles (to mark admins)
+    final teamMemberRoles = allTeamIds.isEmpty
+        ? <dynamic>[]
+        : await supa
+            .from('team_members')
+            .select('user_id, team_id, role')
+            .inFilter('team_id', allTeamIds.toList());
+    
+    // Map: user_id + team_id => role
+    final Map<String, String> roleByUserTeam = {};
+    if (teamMemberRoles is List) {
+      for (final tm in teamMemberRoles) {
+        final uid = tm['user_id'] as String?;
+        final tid = tm['team_id'] as String?;
+        final role = (tm['role'] as String?)?.toLowerCase() ?? 'member';
+        if (uid != null && tid != null) {
+          roleByUserTeam['$uid-$tid'] = role;
         }
       }
     }
@@ -1306,8 +1332,10 @@ class HomeRepository {
         'start_time': startDt,
         'end_time': endDt,
         'venue': venue,
+        'details': r['details'], // Game details/notes from organizer
         'can_switch_side': canSwitchSide,
         'created_by': createdBy,
+        'creator_name': userNameById[createdBy] ?? 'Unknown', // Creator name
       });
     }
 
