@@ -28,6 +28,12 @@ CREATE INDEX IF NOT EXISTS idx_game_messages_user_id ON game_messages(user_id);
 -- Enable Row Level Security
 ALTER TABLE game_messages ENABLE ROW LEVEL SECURITY;
 
+-- Drop existing policies if they exist (for idempotency)
+DROP POLICY IF EXISTS "Players can read game messages" ON game_messages;
+DROP POLICY IF EXISTS "Players can send game messages" ON game_messages;
+DROP POLICY IF EXISTS "Users can update own messages" ON game_messages;
+DROP POLICY IF EXISTS "Users can delete own messages" ON game_messages;
+
 -- Policy: Users can read messages if they are part of the game (have attendance record)
 CREATE POLICY "Players can read game messages"
   ON game_messages FOR SELECT
@@ -97,6 +103,9 @@ BEGIN
   RETURN NEW;
 END;
 $$ LANGUAGE plpgsql;
+
+-- Drop trigger if it exists (for idempotency)
+DROP TRIGGER IF EXISTS update_game_messages_updated_at ON game_messages;
 
 -- Trigger to auto-update updated_at
 CREATE TRIGGER update_game_messages_updated_at
