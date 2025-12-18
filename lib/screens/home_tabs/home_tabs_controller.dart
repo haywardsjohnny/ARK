@@ -456,23 +456,42 @@ class HomeTabsController extends ChangeNotifier {
       if (matches is List) {
         final List<Map<String, dynamic>> result = [];
 
+        if (kDebugMode) {
+          print('🔍 Discovery: Found ${matches.length} total matches');
+        }
+
         for (final m in matches) {
           final visibility = m['visibility'] as String?;
-          final isPublic = m['is_public'] as bool? ?? true;
+          final isPublic = m['is_public'] as bool?;
           final creatorId = m['created_by'] as String?;
           final mode = m['mode'] as String?;
           final sport = (m['sport'] as String?)?.toLowerCase() ?? '';
+          final matchId = m['id'] as String?;
 
-          // Check visibility (friends-only vs public)
+          // Check visibility - determine if user can see this game
           bool canSee = false;
-          if (visibility == 'friends_only' || isPublic == false) {
-            // Only friends can see
+          
+          // Explicit check for public games
+          if (visibility == 'public' || isPublic == true) {
+            canSee = true;
+          }
+          // Friends-only games
+          else if (visibility == 'friends_only') {
             if (creatorId != null && friendIds.contains(creatorId)) {
               canSee = true;
             }
-          } else {
-            // Public games are visible to everyone
+          }
+          // Legacy handling: null visibility defaults to public
+          else if (visibility == null && (isPublic == null || isPublic == true)) {
             canSee = true;
+          }
+          // 'invited' or other values with is_public = false: not visible in discovery
+          else {
+            canSee = false;
+          }
+
+          if (kDebugMode) {
+            print('🎮 Match: ${sport.toUpperCase()} | Mode: $mode | Visibility: $visibility | isPublic: $isPublic | canSee: $canSee | ID: ${matchId?.substring(0, 8)}');
           }
 
           if (!canSee) continue;
