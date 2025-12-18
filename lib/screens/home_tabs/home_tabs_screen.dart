@@ -4305,6 +4305,24 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
           const SizedBox(height: 8),
         ],
         
+        // Game Details
+        if (match['details'] != null && (match['details'] as String).isNotEmpty) ...[
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Icon(Icons.info_outline, size: 14, color: Colors.blue),
+              const SizedBox(width: 4),
+              Expanded(
+                child: Text(
+                  match['details'] as String,
+                  style: const TextStyle(fontSize: 13, fontStyle: FontStyle.italic),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+        ],
+        
         // Expected players info
         Builder(
           builder: (context) {

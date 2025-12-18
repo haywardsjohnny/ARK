@@ -263,6 +263,7 @@ class _TeamVsTeamFormState extends State<_TeamVsTeamForm> {
   TimeOfDay? _startTime;
   TimeOfDay? _endTime;
   String? _venueText;
+  String? _gameDetails;
   String _visibility = 'invited'; // 'invited', 'nearby', 'public'
   bool _notifyAdmins = true;
   String? _errorText;
@@ -353,6 +354,10 @@ class _TeamVsTeamFormState extends State<_TeamVsTeamForm> {
 
       if (_venueText != null && _venueText!.trim().isNotEmpty) {
         insertMap['venue'] = _venueText!.trim();
+      }
+      
+      if (_gameDetails != null && _gameDetails!.trim().isNotEmpty) {
+        insertMap['details'] = _gameDetails!.trim();
       }
 
       final reqRow = await supa
@@ -680,6 +685,25 @@ class _TeamVsTeamFormState extends State<_TeamVsTeamForm> {
             ),
             const SizedBox(height: 24),
 
+            // Game Details
+            const Row(
+              children: [
+                Text('📝', style: TextStyle(fontSize: 20)),
+                SizedBox(width: 8),
+                Text('Game Details (optional)', style: TextStyle(fontWeight: FontWeight.bold)),
+              ],
+            ),
+            const SizedBox(height: 8),
+            TextField(
+              decoration: const InputDecoration(
+                hintText: 'Add any additional details about the game',
+                border: OutlineInputBorder(),
+              ),
+              maxLines: 3,
+              onChanged: (v) => setState(() => _gameDetails = v),
+            ),
+            const SizedBox(height: 24),
+
             // Expected Players Per Team (Admin only, shown after sport is selected)
             // Note: This is now managed globally in the sport_expected_players table
             // Display info only, editing is done in a separate admin screen
@@ -909,6 +933,7 @@ class _IndividualsFormState extends State<_IndividualsForm> {
   DateTime? _selectedDate;
   TimeOfDay? _selectedTime;
   String? _venueText;
+  String? _gameDetails;
   String _visibility = 'public'; // 'friends_only' or 'public'
   String? _errorText;
   bool _saving = false;
@@ -985,6 +1010,10 @@ class _IndividualsFormState extends State<_IndividualsForm> {
 
       if (_venueText != null && _venueText!.trim().isNotEmpty) {
         insertMap['venue'] = _venueText!.trim();
+      }
+      
+      if (_gameDetails != null && _gameDetails!.trim().isNotEmpty) {
+        insertMap['details'] = _gameDetails!.trim();
       }
 
       await supa.from('instant_match_requests').insert(insertMap);
@@ -1206,6 +1235,25 @@ class _IndividualsFormState extends State<_IndividualsForm> {
                 border: OutlineInputBorder(),
               ),
               onChanged: (v) => setState(() => _venueText = v),
+            ),
+            const SizedBox(height: 24),
+
+            // Game Details
+            const Row(
+              children: [
+                Text('📝', style: TextStyle(fontSize: 20)),
+                SizedBox(width: 8),
+                Text('Game Details (optional)', style: TextStyle(fontWeight: FontWeight.bold)),
+              ],
+            ),
+            const SizedBox(height: 8),
+            TextField(
+              decoration: const InputDecoration(
+                hintText: 'Add any additional details about the game',
+                border: OutlineInputBorder(),
+              ),
+              maxLines: 3,
+              onChanged: (v) => setState(() => _gameDetails = v),
             ),
 
             if (_errorText != null) ...[
