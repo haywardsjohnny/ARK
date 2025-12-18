@@ -7,6 +7,7 @@ import '../teams_screen.dart';
 import '../discover_screen.dart';
 import '../chat_screen.dart';
 import '../create_game_screen.dart';
+import '../game_chat_screen.dart';
 import 'home_tabs_controller.dart';
 import '../../widgets/status_bar.dart';
 import '../../widgets/location_picker_dialog.dart';
@@ -449,6 +450,64 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('You have left the game')),
+      );
+    }
+  }
+  
+  Future<void> _enableChat(String requestId, {required bool enabled}) async {
+    try {
+      final supa = Supabase.instance.client;
+      await supa
+          .from('instant_match_requests')
+          .update({
+            'chat_enabled': enabled,
+            'last_updated_at': DateTime.now().toUtc().toIso8601String(),
+          })
+          .eq('id', requestId);
+      
+      // Reload matches to refresh UI
+      await _controller.loadAllMyMatches();
+      
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(enabled ? 'Chat enabled' : 'Chat disabled'),
+        ),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Failed to update chat: $e')),
+      );
+    }
+  }
+  
+  Future<void> _setChatMode(String requestId, {required String mode}) async {
+    try {
+      final supa = Supabase.instance.client;
+      await supa
+          .from('instant_match_requests')
+          .update({
+            'chat_mode': mode,
+            'last_updated_at': DateTime.now().toUtc().toIso8601String(),
+          })
+          .eq('id', requestId);
+      
+      // Reload matches to refresh UI
+      await _controller.loadAllMyMatches();
+      
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(mode == 'all_users' 
+              ? 'All users can now message' 
+              : 'Only admins can message'),
+        ),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Failed to update chat mode: $e')),
       );
     }
   }
@@ -4286,6 +4345,16 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
 
     final isOrganizer = _controller.isOrganizerForMatch(match);
     final canSendReminder = _controller.canSendReminderForMatch(match);
+    
+    // Check if user is admin of either team
+    final isAdminA = teamAPlayers.any((p) => 
+      p['user_id'] == uid && (p['is_admin'] as bool? ?? false));
+    final isAdminB = teamBPlayers.any((p) => 
+      p['user_id'] == uid && (p['is_admin'] as bool? ?? false));
+    final isAdmin = isAdminA || isAdminB;
+    
+    final chatEnabled = match['chat_enabled'] as bool? ?? false;
+    final chatMode = match['chat_mode'] as String? ?? 'all_users';
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -4304,6 +4373,14 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
                   await _editExpectedPlayers(match);
                 } else if (v == 'cancel') {
                   await _confirmCancelGame(match);
+                } else if (v == 'enable_chat') {
+                  await _enableChat(reqId, enabled: true);
+                } else if (v == 'disable_chat') {
+                  await _enableChat(reqId, enabled: false);
+                } else if (v == 'chat_all_users') {
+                  await _setChatMode(reqId, mode: 'all_users');
+                } else if (v == 'chat_admins_only') {
+                  await _setChatMode(reqId, mode: 'admins_only');
                 }
               },
               itemBuilder: (_) => [
@@ -4326,6 +4403,44 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
                     value: 'cancel',
                     child: Text('Cancel game (both teams)'),
                   ),
+                ],
+                if (isAdmin) ...[
+                  const PopupMenuDivider(),
+                  if (chatEnabled)
+                    const PopupMenuItem(
+                      value: 'disable_chat',
+                      child: Text('Disable Chat'),
+                    )
+                  else
+                    const PopupMenuItem(
+                      value: 'enable_chat',
+                      child: Text('Enable Chat'),
+                    ),
+                  if (chatEnabled) ...[
+                    const PopupMenuDivider(),
+                    PopupMenuItem(
+                      value: 'chat_all_users',
+                      child: Row(
+                        children: [
+                          if (chatMode == 'all_users')
+                            const Icon(Icons.check, size: 16),
+                          const SizedBox(width: 8),
+                          const Text('All Users Can Message'),
+                        ],
+                      ),
+                    ),
+                    PopupMenuItem(
+                      value: 'chat_admins_only',
+                      child: Row(
+                        children: [
+                          if (chatMode == 'admins_only')
+                            const Icon(Icons.check, size: 16),
+                          const SizedBox(width: 8),
+                          const Text('Admins Only'),
+                        ],
+                      ),
+                    ),
+                  ],
                 ],
               ],
             ),
@@ -4539,6 +4654,72 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
                       style: TextStyle(
                         fontSize: 12,
                         color: Colors.orange.shade700,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+            // Chat
+            Expanded(
+              child: InkWell(
+                onTap: () {
+                  final chatEnabled = match['chat_enabled'] as bool? ?? false;
+                  if (chatEnabled) {
+                    Navigator.of(context).push(
+                      MaterialPageRoute(
+                        builder: (_) => GameChatScreen(
+                          requestId: reqId,
+                          chatMode: match['chat_mode'] as String? ?? 'all_users',
+                          teamAId: teamAId,
+                          teamBId: teamBId,
+                        ),
+                      ),
+                    );
+                  } else {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(
+                        content: Text('Chat is not enabled for this game'),
+                        duration: Duration(seconds: 2),
+                      ),
+                    );
+                  }
+                },
+                child: Column(
+                  children: [
+                    Stack(
+                      children: [
+                        Icon(
+                          Icons.chat_bubble_outline,
+                          color: (match['chat_enabled'] as bool? ?? false)
+                              ? Colors.orange.shade700
+                              : Colors.grey.shade400,
+                          size: 24,
+                        ),
+                        if (match['chat_enabled'] as bool? ?? false)
+                          Positioned(
+                            right: 0,
+                            top: 0,
+                            child: Container(
+                              width: 8,
+                              height: 8,
+                              decoration: BoxDecoration(
+                                color: Colors.green,
+                                shape: BoxShape.circle,
+                              ),
+                            ),
+                          ),
+                      ],
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      'Chat',
+                      style: TextStyle(
+                        fontSize: 12,
+                        color: (match['chat_enabled'] as bool? ?? false)
+                            ? Colors.orange.shade700
+                            : Colors.grey.shade400,
                         fontWeight: FontWeight.w600,
                       ),
                     ),

@@ -891,6 +891,8 @@ class HomeRepository {
         'my_team_id': userTeamId,
         'status': matchStatus, // Match request status (e.g., 'cancelled', 'matched', etc.)
         'expected_players_per_team': r['expected_players_per_team'], // Match-specific expected players (can be null, falls back to sport default)
+        'chat_enabled': r['chat_enabled'] as bool? ?? false,
+        'chat_mode': r['chat_mode'] as String? ?? 'all_users',
       });
     }
 
@@ -1150,7 +1152,7 @@ class HomeRepository {
     final reqs = await supa
         .from('instant_match_requests')
         .select(
-            'id, sport, mode, zip_code, team_id, matched_team_id, start_time_1, start_time_2, venue, details, status, created_by, creator_id')
+            'id, sport, mode, zip_code, team_id, matched_team_id, start_time_1, start_time_2, venue, details, status, created_by, creator_id, chat_enabled, chat_mode')
         .inFilter('id', requestIds)
         .eq('mode', 'team_vs_team')
         .neq('status', 'cancelled')
@@ -1336,6 +1338,8 @@ class HomeRepository {
         'can_switch_side': canSwitchSide,
         'created_by': createdBy,
         'creator_name': userNameById[createdBy] ?? 'Unknown', // Creator name
+        'chat_enabled': r['chat_enabled'] as bool? ?? false,
+        'chat_mode': r['chat_mode'] as String? ?? 'all_users',
       });
     }
 
