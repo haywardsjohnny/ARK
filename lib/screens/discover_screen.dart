@@ -252,14 +252,25 @@ class _DiscoverScreenState extends State<DiscoverScreen> {
 
   Widget _buildResultCard(Map<String, dynamic> match) {
     final sport = match['sport'] as String? ?? '';
+    final mode = match['mode'] as String? ?? '';
     final numPlayers = match['num_players'] as int?;
     final startDt = match['start_time'] as DateTime?;
     final zip = match['zip_code'] as String?;
+    final canAccept = match['can_accept'] as bool? ?? true;
     final sportEmoji = _getSportEmoji(sport);
     final distance = _calculateDistance(zip);
-    final format = numPlayers != null ? '$numPlayers v$numPlayers' : 'Pickup';
+    
+    // Determine match type display
+    String matchType;
+    if (mode == 'team_vs_team') {
+      matchType = 'Team Match';
+    } else if (numPlayers != null) {
+      matchType = '$numPlayers v$numPlayers';
+    } else {
+      matchType = 'Pickup';
+    }
+    
     final timeStr = _formatTime(startDt);
-    // TODO: Calculate popularity based on match data
     
     return Card(
       margin: const EdgeInsets.only(bottom: 12),
@@ -272,16 +283,39 @@ class _DiscoverScreenState extends State<DiscoverScreen> {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
+              // Sport, Type, Distance row
               Row(
                 children: [
                   Text('$sportEmoji ${_displaySport(sport)}', 
                     style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
                   const Text(' • '),
-                  Text(format),
+                  Text(matchType),
                   const Text(' • '),
                   Text(distance),
                 ],
               ),
+              
+              // Team match indicator
+              if (mode == 'team_vs_team') ...[
+                const SizedBox(height: 8),
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFF0D7377).withOpacity(0.1),
+                    borderRadius: BorderRadius.circular(4),
+                    border: Border.all(color: const Color(0xFF0D7377)),
+                  ),
+                  child: const Text(
+                    'TEAM GAME',
+                    style: TextStyle(
+                      color: Color(0xFF0D7377),
+                      fontSize: 12,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ),
+              ],
+              
               const SizedBox(height: 8),
               Row(
                 children: [
@@ -300,34 +334,57 @@ class _DiscoverScreenState extends State<DiscoverScreen> {
                   ),
                 ],
               ),
-              // Popular badge can be added here when popularity is calculated
-              // if (isPopular) ...[
-              //   const SizedBox(height: 8),
-              //   Row(
-              //     children: [
-              //       const Icon(Icons.local_fire_department, size: 16, color: Colors.orange),
-              //       const SizedBox(width: 4),
-              //       const Text('Popular', style: TextStyle(color: Colors.orange)),
-              //     ],
-              //   ),
-              // ],
+              
               const SizedBox(height: 12),
-              SizedBox(
-                width: double.infinity,
-                child: ElevatedButton(
-                  onPressed: () {
-                    // TODO: Show join dialog
-                    ScaffoldMessenger.of(context).showSnackBar(
-                      SnackBar(content: Text('Join ${_displaySport(sport)} match')),
-                    );
-                  },
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: Colors.purple,
-                    foregroundColor: Colors.white,
+              
+              // Join/Request button (conditional for team games)
+              if (mode == 'team_vs_team' && !canAccept) ...[
+                // User is not an admin of a team in this sport
+                Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.all(12),
+                  decoration: BoxDecoration(
+                    color: Colors.grey.shade100,
+                    borderRadius: BorderRadius.circular(8),
+                    border: Border.all(color: Colors.grey.shade300),
                   ),
-                  child: const Text('Join'),
+                  child: Row(
+                    children: [
+                      Icon(Icons.info_outline, size: 16, color: Colors.grey[600]),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: Text(
+                          'You must be an admin of a ${_displaySport(sport)} team to accept this match',
+                          style: TextStyle(
+                            fontSize: 13,
+                            color: Colors.grey[700],
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
                 ),
-              ),
+              ] else ...[
+                // Can join/accept
+                SizedBox(
+                  width: double.infinity,
+                  child: ElevatedButton(
+                    onPressed: () {
+                      // TODO: Show join/accept dialog
+                      if (mode == 'team_vs_team') {
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          SnackBar(content: Text('Request to join ${_displaySport(sport)} team match')),
+                        );
+                      } else {
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          SnackBar(content: Text('Join ${_displaySport(sport)} individual match')),
+                        );
+                      }
+                    },
+                    child: Text(mode == 'team_vs_team' ? 'Request to Join' : 'Join Game'),
+                  ),
+                ),
+              ],
             ],
           ),
         ),

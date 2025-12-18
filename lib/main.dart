@@ -90,66 +90,77 @@ class SportsDugApp extends StatelessWidget {
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
         useMaterial3: true,
-        // Clean white background with blue accents (CricClubs style)
+        brightness: Brightness.light,
+        // SPORTSDUG logo colors - dark teal and orange
         colorScheme: ColorScheme.light(
-          primary: Color(0xFF2196F3),           // Clean blue (like CricClubs)
-          secondary: Color(0xFF64B5F6),         // Light blue
-          surface: Colors.white,                 // White surfaces
-          background: Color(0xFFFAFAFA),         // Very light grey background
-          onPrimary: Colors.white,               // White text on blue
-          onSecondary: Colors.white,             // White text on light blue
-          onSurface: Color(0xFF212121),          // Dark grey/black text
-          onBackground: Color(0xFF424242),       // Dark grey text on background
+          primary: Color(0xFFFF6B35),           // Orange (from logo)
+          secondary: Color(0xFF0D7377),         // Dark teal (from logo)
+          surface: Colors.white,                // Pure white surfaces
+          background: Color(0xFFFAFAFA),        // Cool white background
+          onPrimary: Colors.white,              // White text on orange
+          onSecondary: Colors.white,            // White text on teal
+          onSurface: Color(0xFF0D7377),         // Dark teal text on white
+          onBackground: Color(0xFF323E48),      // Dark grey text
         ),
-        scaffoldBackgroundColor: Color(0xFFFAFAFA), // Very light grey (like CricClubs)
+        scaffoldBackgroundColor: Color(0xFFFAFAFA), // Cool white background
         appBarTheme: AppBarTheme(
-          backgroundColor: Colors.white,
-          foregroundColor: Color(0xFF212121),    // Black text in app bar
-          elevation: 0.5,                         // Subtle shadow
+          backgroundColor: Colors.white,        // Pure white app bar
+          foregroundColor: Color(0xFF0D7377),   // Dark teal text
+          elevation: 0.5,
           centerTitle: true,
           titleTextStyle: GoogleFonts.inter(
             fontSize: 20,
             fontWeight: FontWeight.w600,
-            color: Color(0xFF212121),
+            color: Color(0xFF0D7377),
           ),
         ),
         cardTheme: CardThemeData(
-          color: Colors.white,
-          elevation: 1,                           // Subtle shadow like CricClubs
+          color: Colors.white,                  // Pure white cards
+          elevation: 1,
           shadowColor: Colors.black12,
           shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(8), // Slightly rounded corners
+            borderRadius: BorderRadius.circular(12),
           ),
           margin: EdgeInsets.symmetric(horizontal: 8, vertical: 4),
         ),
-        // Apply Inter font with black text (CricClubs style)
+        // Apply Inter font with dark teal text for light theme
         textTheme: GoogleFonts.interTextTheme(
           ThemeData.light().textTheme,
         ).apply(
-          bodyColor: Color(0xFF212121),          // Black text for body
-          displayColor: Color(0xFF212121),        // Black text for headers
+          bodyColor: Color(0xFF0D7377),         // Dark teal text for body
+          displayColor: Color(0xFF0D7377),      // Dark teal text for headers
         ),
         // Keep primary text theme clean
         primaryTextTheme: GoogleFonts.interTextTheme(
           ThemeData.light().primaryTextTheme,
         ),
-        // Button theme to match CricClubs
+        // Button theme
         elevatedButtonTheme: ElevatedButtonThemeData(
           style: ElevatedButton.styleFrom(
-            backgroundColor: Color(0xFF2196F3),   // Blue buttons
+            backgroundColor: Color(0xFFFF6B35),   // Orange buttons (logo color)
             foregroundColor: Colors.white,
             elevation: 1,
             shape: RoundedRectangleBorder(
-              borderRadius: BorderRadius.circular(8),
+              borderRadius: BorderRadius.circular(12),
             ),
-            padding: EdgeInsets.symmetric(horizontal: 24, vertical: 12),
+            padding: EdgeInsets.symmetric(horizontal: 24, vertical: 14),
+          ),
+        ),
+        outlinedButtonTheme: OutlinedButtonThemeData(
+          style: OutlinedButton.styleFrom(
+            foregroundColor: Color(0xFF0D7377),  // Dark teal outline
+            side: BorderSide(color: Color(0xFF0D7377)),
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(12),
+            ),
+            padding: EdgeInsets.symmetric(horizontal: 24, vertical: 14),
           ),
         ),
         // Tab bar theme
         tabBarTheme: TabBarThemeData(
-          labelColor: Color(0xFF2196F3),         // Blue for active tab
+          labelColor: Color(0xFFFF6B35),         // Orange for active tab (logo color)
           unselectedLabelColor: Color(0xFF757575), // Grey for inactive
-          indicatorColor: Color(0xFF2196F3),     // Blue indicator
+          indicatorColor: Color(0xFFFF6B35),     // Orange indicator
           labelStyle: GoogleFonts.inter(
             fontSize: 14,
             fontWeight: FontWeight.w600,
@@ -157,6 +168,41 @@ class SportsDugApp extends StatelessWidget {
           unselectedLabelStyle: GoogleFonts.inter(
             fontSize: 14,
             fontWeight: FontWeight.normal,
+          ),
+        ),
+        // Input decoration theme for text fields
+        inputDecorationTheme: InputDecorationTheme(
+          filled: true,
+          fillColor: Color(0xFFF5F5F5),          // Light grey for inputs
+          border: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(12),
+            borderSide: BorderSide.none,
+          ),
+          enabledBorder: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(12),
+            borderSide: BorderSide.none,
+          ),
+          focusedBorder: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(12),
+            borderSide: BorderSide(color: Color(0xFFFF6B35), width: 2), // Orange focus
+          ),
+          labelStyle: TextStyle(color: Color(0xFF0D7377)),  // Dark teal label
+          hintStyle: TextStyle(color: Color(0xFF9E9E9E)),
+        ),
+        // Dialog theme
+        dialogTheme: DialogThemeData(
+          backgroundColor: Colors.white,         // White dialogs
+          titleTextStyle: GoogleFonts.inter(
+            fontSize: 20,
+            fontWeight: FontWeight.w600,
+            color: Color(0xFF0D7377),            // Dark teal title
+          ),
+          contentTextStyle: GoogleFonts.inter(
+            fontSize: 14,
+            color: Color(0xFF757575),
+          ),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(16),
           ),
         ),
       ),

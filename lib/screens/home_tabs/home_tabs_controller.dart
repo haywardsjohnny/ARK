@@ -15,6 +15,7 @@ class HomeTabsController extends ChangeNotifier {
   String? baseZip;
   String? userName;
   String? userLocation;
+  String? userPhotoUrl;
   List<String> userSports = [];
 
   List<Map<String, dynamic>> adminTeams = [];
@@ -98,6 +99,7 @@ class HomeTabsController extends ChangeNotifier {
       final nameAndLocation = await repo.getUserNameAndLocation(uid);
       userName = nameAndLocation['name'];
       userLocation = nameAndLocation['location'];
+      userPhotoUrl = nameAndLocation['photo_url'];
       notifyListeners();
       
       // Note: We now use GPS coordinates instead of ZIP codes for location
@@ -430,17 +432,26 @@ class HomeTabsController extends ChangeNotifier {
         }
       }
       
-      // Load open pickup/individual matches
-      // These are matches that are not team_vs_team and are open for discovery
+      // Get user's admin teams and their sports for team game eligibility
+      final Map<String, List<String>> adminTeamsBySport = {};
+      for (final team in adminTeams) {
+        final sport = team['sport'] as String?;
+        final teamId = team['id'] as String?;
+        if (sport != null && teamId != null) {
+          adminTeamsBySport.putIfAbsent(sport.toLowerCase(), () => []).add(teamId);
+        }
+      }
+      
+      // Load ALL public matches (individual AND team matches)
+      // Team matches can only be accepted by admins of teams in the same sport
       final matches = await supa
           .from('instant_match_requests')
           .select(
             'id, sport, zip_code, mode, start_time_1, start_time_2, venue, status, created_by, num_players, created_at, visibility, is_public')
-          .neq('mode', 'team_vs_team') // Get pickup/individual matches
           .neq('status', 'cancelled')
           .neq('created_by', uid) // Don't show own matches
           .order('created_at', ascending: false)
-          .limit(50);
+          .limit(100);
       
       if (matches is List) {
         final List<Map<String, dynamic>> result = [];
@@ -449,7 +460,10 @@ class HomeTabsController extends ChangeNotifier {
           final visibility = m['visibility'] as String?;
           final isPublic = m['is_public'] as bool? ?? true;
           final creatorId = m['created_by'] as String?;
+          final mode = m['mode'] as String?;
+          final sport = (m['sport'] as String?)?.toLowerCase() ?? '';
 
+          // Check visibility (friends-only vs public)
           bool canSee = false;
           if (visibility == 'friends_only' || isPublic == false) {
             // Only friends can see
@@ -457,11 +471,18 @@ class HomeTabsController extends ChangeNotifier {
               canSee = true;
             }
           } else {
-            // Public or legacy rows with null visibility
+            // Public games are visible to everyone
             canSee = true;
           }
 
           if (!canSee) continue;
+
+          // For team games, check if user can accept (must be admin of team in same sport)
+          bool canAccept = true;
+          if (mode == 'team_vs_team') {
+            canAccept = adminTeamsBySport.containsKey(sport) && 
+                       (adminTeamsBySport[sport]?.isNotEmpty ?? false);
+          }
 
           DateTime? startDt;
           DateTime? endDt;
@@ -480,6 +501,7 @@ class HomeTabsController extends ChangeNotifier {
             'venue': m['venue'],
             'num_players': m['num_players'],
             'created_by': m['created_by'],
+            'can_accept': canAccept, // Flag indicating if user can accept this game
           });
         }
 

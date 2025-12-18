@@ -24,7 +24,7 @@ class HomeRepository {
   Future<Map<String, String?>> getUserNameAndLocation(String userId) async {
     final row = await supa
         .from('users')
-        .select('full_name, base_zip_code')
+        .select('full_name, base_zip_code, photo_url')
         .eq('id', userId)
         .maybeSingle();
     final zipCode = row?['base_zip_code'] as String?;
@@ -33,6 +33,7 @@ class HomeRepository {
     return {
       'name': row?['full_name'] as String?,
       'location': cityName ?? zipCode ?? 'Location',
+      'photo_url': row?['photo_url'] as String?,
     };
   }
 

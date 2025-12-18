@@ -54,7 +54,7 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
     if (!mounted) return;
 
     setState(() => _initDone = true);
-    
+
     // Load location after init
     _loadCurrentLocation();
   }
@@ -281,12 +281,12 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
     final reqId = match['request_id'] as String;
     final sport = match['sport'] as String? ?? '';
     if (sport.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
+                ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('Invalid sport')),
-      );
-      return;
-    }
-    
+                );
+                return;
+              }
+
     // Get current value: match-specific if exists, otherwise sport default
     final matchSpecific = match['expected_players_per_team'] as int?;
     final currentExpected = matchSpecific ?? await SportDefaults.getExpectedPlayersPerTeam(sport);
@@ -299,20 +299,20 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
       builder: (ctx) => AlertDialog(
         title: const Text('Edit Expected Players'),
         content: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
             Text(
               'Sport: ${_displaySport(sport)}',
               style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w500),
-            ),
-            const SizedBox(height: 8),
+                    ),
+                    const SizedBox(height: 8),
             const Text(
               'This will update the expected players for THIS match only.',
               style: TextStyle(fontSize: 12, color: Colors.blue),
-            ),
-            const SizedBox(height: 8),
-            TextField(
+                    ),
+                    const SizedBox(height: 8),
+                    TextField(
               controller: controller,
               keyboardType: TextInputType.number,
               decoration: InputDecoration(
@@ -332,9 +332,9 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
                 color: Colors.grey.shade600,
                 fontStyle: FontStyle.italic,
               ),
-            ),
-          ],
-        ),
+                        ),
+                      ],
+                    ),
         actions: [
           TextButton(
             onPressed: () => Navigator.of(ctx).pop(),
@@ -369,13 +369,13 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
         // Reload matches to refresh the UI
         await _controller.loadAllMyMatches();
         
-        if (!mounted) return;
-        ScaffoldMessenger.of(context).showSnackBar(
+                if (!mounted) return;
+                ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text('Expected players for this match updated to $result')),
-        );
-      } catch (e) {
-        if (!mounted) return;
-        ScaffoldMessenger.of(context).showSnackBar(
+                );
+              } catch (e) {
+                if (!mounted) return;
+                ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text('Failed to update: $e')),
         );
       }
@@ -391,7 +391,7 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
           'This will cancel the game for everyone.',
         ),
         actions: [
-          TextButton(
+                        TextButton(
             onPressed: () => Navigator.pop(context, false),
             child: const Text('No'),
           ),
@@ -405,8 +405,8 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
 
     if (ok == true) {
       await _controller.cancelGameForBothTeams(match);
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
+                                if (!mounted) return;
+                                ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('Game cancelled')),
       );
     }
@@ -416,7 +416,7 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
 
   Future<void> _showCreateInstantMatchSheet() async {
     if (_controller.currentUserId == null) {
-                ScaffoldMessenger.of(context).showSnackBar(
+                                ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('Please login first.')),
                 );
                 return;
@@ -1617,27 +1617,25 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
           physics: const AlwaysScrollableScrollPhysics(),
           padding: const EdgeInsets.all(16),
           children: [
-            if (kDebugMode) ...[
-              Container(
-                padding: const EdgeInsets.all(8),
-                margin: const EdgeInsets.only(bottom: 8),
-                color: Colors.yellow.shade100,
-                child: Text(
-                  'Debug: pendingAvailabilityTeamMatches=${_controller.pendingAvailabilityTeamMatches.length}, '
-                  'userId=${_controller.currentUserId}, lastError=${_controller.lastError ?? 'none'}',
-                  style: const TextStyle(fontSize: 10),
-                ),
+            // Dark top section with greeting and quick actions
+            Container(
+              color: const Color(0xFF0D7377), // Dark teal background (logo color)
+              padding: const EdgeInsets.all(16),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  _errorBanner(),
+                  if (_controller.lastError != null) const SizedBox(height: 12),
+                  
+                  // Greeting Section
+                  _buildGreetingSection(),
+                  const SizedBox(height: 20),
+                  
+                  // My Active Plans (Join/Create Game)
+                  _buildMyActivePlansSection(),
+                ],
               ),
-            ],
-            _errorBanner(),
-            const SizedBox(height: 12),
-            
-            // [ Greeting ] Section
-            _buildGreetingSection(),
-            const SizedBox(height: 24),
-            
-            // [ Primary CTA ] Section
-            _buildPrimaryCTASection(),
+            ),
             const SizedBox(height: 24),
             
             // [ Smart Cards ] Section
@@ -1669,51 +1667,348 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
     );
   }
   
-  // [ Greeting ] Section
+  // [ Greeting ] Section - Modern banner with profile pic (dark theme)
   Widget _buildGreetingSection() {
     final name = _controller.userName ?? 'User';
     final location = _currentLocation ?? (_loadingLocation ? 'Loading...' : 'Location');
+    final photoUrl = _controller.userPhotoUrl;
+    
+    // Determine greeting based on time of day
+    final hour = DateTime.now().hour;
+    String greeting;
+    if (hour < 12) {
+      greeting = 'Good Morning';
+    } else if (hour < 17) {
+      greeting = 'Good Afternoon';
+    } else {
+      greeting = 'Good Evening';
+    }
     
     return Row(
       children: [
-        const Text('👋', style: TextStyle(fontSize: 24)),
-        const SizedBox(width: 8),
-        Text(
-          'Hi $name',
-          style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+        // Profile Picture
+        GestureDetector(
+          onTap: () {
+            Navigator.of(context).push(
+              MaterialPageRoute(
+                builder: (_) => const UserProfileScreen(),
+              ),
+            );
+          },
+          child: CircleAvatar(
+            radius: 28,
+            backgroundColor: Colors.grey[700],
+            backgroundImage: photoUrl != null && photoUrl.isNotEmpty
+                ? NetworkImage(photoUrl)
+                : null,
+            child: photoUrl == null || photoUrl.isEmpty
+                ? const Icon(Icons.person, size: 28, color: Colors.white)
+                : null,
+          ),
         ),
-        const Text(' | ', style: TextStyle(fontSize: 18, color: Colors.grey)),
-        const SizedBox(width: 4),
-        // Tappable location with change icon
-        InkWell(
-          onTap: _showLocationPicker,
-          borderRadius: BorderRadius.circular(8),
-          child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                const Icon(Icons.location_on, size: 18, color: Colors.blue),
-                const SizedBox(width: 4),
-                Text(
-                  location,
-                  style: const TextStyle(
-                    fontSize: 16,
-                    color: Colors.blue,
-                    decoration: TextDecoration.underline,
+        const SizedBox(width: 12),
+        
+        // Greeting and Name column
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              // Good Morning 👋
+              Text(
+                '$greeting 👋',
+                style: const TextStyle(
+                  fontSize: 14,
+                  color: Colors.white70,
+                  fontWeight: FontWeight.w400,
+                ),
+              ),
+              const SizedBox(height: 2),
+              
+              // User Name
+              Text(
+                name,
+                style: const TextStyle(
+                  fontSize: 20,
+                  fontWeight: FontWeight.w700,
+                  color: Colors.white,
+                ),
+              ),
+              const SizedBox(height: 2),
+              
+              // Location (tappable)
+              InkWell(
+                onTap: _showLocationPicker,
+                borderRadius: BorderRadius.circular(4),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const Icon(
+                      Icons.location_on,
+                      size: 14,
+                      color: Colors.white70,
+                    ),
+                    const SizedBox(width: 4),
+                    Text(
+                      location,
+                      style: const TextStyle(
+                        fontSize: 13,
+                        color: Colors.white70,
+                        fontWeight: FontWeight.w400,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+        
+        // Action Icons on the right
+        IconButton(
+          icon: const Icon(Icons.search, size: 24),
+          color: Colors.white,
+          onPressed: () {
+            _showSearchDialog();
+          },
+        ),
+        IconButton(
+          icon: const Icon(Icons.notifications_outlined, size: 24),
+          color: Colors.white,
+          onPressed: () {
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(
+                content: Text('Notifications coming soon!'),
+              ),
+            );
+          },
+        ),
+      ],
+    );
+  }
+  
+  // Search Dialog for person/team
+  Future<void> _showSearchDialog() async {
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Search'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            TextField(
+              decoration: const InputDecoration(
+                labelText: 'Search person or team',
+                hintText: 'Enter name...',
+                border: OutlineInputBorder(),
+                prefixIcon: Icon(Icons.search),
+              ),
+              autofocus: true,
+              onSubmitted: (value) {
+                // TODO: Implement search logic
+                Navigator.pop(context);
+                ScaffoldMessenger.of(context).showSnackBar(
+                  SnackBar(content: Text('Searching for: $value')),
+                );
+              },
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Cancel'),
+          ),
+        ],
+      ),
+    );
+  }
+  
+  // [ My Active Plans ] Section - Combined Join/Create Game card
+  Widget _buildMyActivePlansSection() {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const Text(
+          'My Quick Actions',
+          style: TextStyle(
+            fontSize: 22,
+            fontWeight: FontWeight.w700,
+            color: Colors.white,
+          ),
+        ),
+        const SizedBox(height: 16),
+        
+        // Combined card with dark background
+        Container(
+          decoration: BoxDecoration(
+            color: const Color(0xFF14919B), // Medium teal card (logo inspired)
+            borderRadius: BorderRadius.circular(16),
+          ),
+          padding: const EdgeInsets.all(16),
+          child: Column(
+            children: [
+              // Join Game row
+              InkWell(
+                onTap: () {
+                  _controller.selectedIndex = 1;
+                  setState(() {});
+                },
+                borderRadius: BorderRadius.circular(12),
+                child: Container(
+                  padding: const EdgeInsets.all(16),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFF1BA8B5), // Light teal for items (logo inspired)
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  child: Row(
+                    children: [
+                      // Icon
+                      Container(
+                        width: 50,
+                        height: 50,
+                        decoration: BoxDecoration(
+                          color: Colors.green.shade700,
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                        child: const Icon(
+                          Icons.sports,
+                          color: Colors.white,
+                          size: 28,
+                        ),
+                      ),
+                      const SizedBox(width: 16),
+                      
+                      // Text
+                      const Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              'JOIN GAME',
+                              style: TextStyle(
+                                fontSize: 12,
+                                color: Colors.white70,
+                                fontWeight: FontWeight.w600,
+                                letterSpacing: 1.2,
+                              ),
+                            ),
+                            SizedBox(height: 4),
+                            Text(
+                              'Discover & Join Games',
+                              style: TextStyle(
+                                fontSize: 16,
+                                color: Colors.white,
+                                fontWeight: FontWeight.w700,
+                              ),
+                            ),
+                            SizedBox(height: 4),
+                            Text(
+                              'Find games near you',
+                              style: TextStyle(
+                                fontSize: 13,
+                                color: Colors.white60,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                      
+                      // Arrow
+                      const Icon(
+                        Icons.arrow_forward_ios,
+                        color: Colors.white54,
+                        size: 20,
+                      ),
+                    ],
                   ),
                 ),
-                const SizedBox(width: 4),
-                const Icon(Icons.edit, size: 14, color: Colors.blue),
-              ],
-            ),
+              ),
+              
+              const SizedBox(height: 12),
+              
+              // Create Game row
+              InkWell(
+                onTap: () {
+                  _showCreateInstantMatchSheet();
+                },
+                borderRadius: BorderRadius.circular(12),
+                child: Container(
+                  padding: const EdgeInsets.all(16),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFF1BA8B5), // Light teal for items (logo inspired)
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  child: Row(
+                    children: [
+                      // Icon
+                      Container(
+                        width: 50,
+                        height: 50,
+                        decoration: BoxDecoration(
+                          color: Colors.blue.shade700,
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                        child: const Icon(
+                          Icons.add_circle_outline,
+                          color: Colors.white,
+                          size: 28,
+                        ),
+                      ),
+                      const SizedBox(width: 16),
+                      
+                      // Text
+                      const Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              'CREATE GAME',
+                              style: TextStyle(
+                                fontSize: 12,
+                                color: Colors.white70,
+                                fontWeight: FontWeight.w600,
+                                letterSpacing: 1.2,
+                              ),
+                            ),
+                            SizedBox(height: 4),
+                            Text(
+                              'Start a New Game',
+                              style: TextStyle(
+                                fontSize: 16,
+                                color: Colors.white,
+                                fontWeight: FontWeight.w700,
+                              ),
+                            ),
+                            SizedBox(height: 4),
+                            Text(
+                              'Organize your match',
+                              style: TextStyle(
+                                fontSize: 13,
+                                color: Colors.white60,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                      
+                      // Arrow
+                      const Icon(
+                        Icons.arrow_forward_ios,
+                        color: Colors.white54,
+                        size: 20,
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ],
           ),
         ),
       ],
     );
   }
   
-  // [ Primary CTA ] Section
+  // [ Primary CTA ] Section (DEPRECATED - now using My Active Plans)
   Widget _buildPrimaryCTASection() {
     return Row(
       children: [
@@ -1798,8 +2093,8 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
               padding: EdgeInsets.all(16),
               child: Text('No smart cards available'),
             ),
-          )
-        else
+                        )
+                      else
           ...cards,
       ],
     );
@@ -2149,8 +2444,8 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Row(
-          children: [
+                        Row(
+                          children: [
             const Icon(Icons.admin_panel_settings, color: Colors.blue, size: 20),
             const SizedBox(width: 8),
             const Text(
@@ -2257,7 +2552,7 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
               children: [
                 Text(sportEmoji, style: const TextStyle(fontSize: 24)),
                 const SizedBox(width: 12),
-                Expanded(
+                            Expanded(
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
@@ -2327,8 +2622,8 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
               mainAxisAlignment: MainAxisAlignment.end,
               children: [
                 OutlinedButton(
-                  onPressed: () async {
-                    try {
+                                onPressed: () async {
+                                  try {
                       await _controller.denyInvite(invite);
                       if (mounted) {
                         ScaffoldMessenger.of(context).showSnackBar(
@@ -2337,7 +2632,7 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
                       }
                     } catch (e) {
                       if (mounted) {
-                        ScaffoldMessenger.of(context).showSnackBar(
+                                    ScaffoldMessenger.of(context).showSnackBar(
                           SnackBar(content: Text('Failed to deny: $e')),
                         );
                       }
@@ -2355,9 +2650,9 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
                           const SnackBar(content: Text('Invite approved')),
                         );
                       }
-                    } catch (e) {
+                                  } catch (e) {
                       if (mounted) {
-                        ScaffoldMessenger.of(context).showSnackBar(
+                                    ScaffoldMessenger.of(context).showSnackBar(
                           SnackBar(content: Text('Failed to approve: $e')),
                         );
                       }
@@ -2464,8 +2759,8 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
               Row(
                 children: [
                   const Icon(Icons.location_on, size: 16, color: Colors.grey),
-                  const SizedBox(width: 8),
-                  Expanded(
+                            const SizedBox(width: 8),
+                            Expanded(
                     child: Text(
                       venue,
                       style: const TextStyle(fontSize: 14),
@@ -2479,7 +2774,7 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
               mainAxisAlignment: MainAxisAlignment.end,
               children: [
                 OutlinedButton(
-                  onPressed: () async {
+                                onPressed: () async {
                     // Deny the pending admin match
                     final req = match['request'] as Map<String, dynamic>?;
                     if (req == null) return;
@@ -2525,10 +2820,10 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
                     }
                   },
                   child: const Text('Deny'),
-                ),
-                const SizedBox(width: 8),
+                            ),
+                            const SizedBox(width: 8),
                 ElevatedButton(
-                  onPressed: () async {
+                                onPressed: () async {
                     // Find matching admin team for this sport
                     final req = match['request'] as Map<String, dynamic>?;
                     if (req == null) return;
@@ -2564,17 +2859,17 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
                       await _controller.loadPendingGamesForAdmin();
                       if (mounted) {
                         setState(() {}); // Refresh UI
-                        ScaffoldMessenger.of(context).showSnackBar(
+                                    ScaffoldMessenger.of(context).showSnackBar(
                           const SnackBar(content: Text('Match request accepted')),
-                        );
+                                    );
                       }
-                    } catch (e) {
+                                  } catch (e) {
                       final errorMsg = e.toString();
                       if (mounted) {
                         // Show friendly message for "already exists" error
                         if (errorMsg.contains('Invite already exists') || 
                             errorMsg.contains('already exists')) {
-                          ScaffoldMessenger.of(context).showSnackBar(
+                                    ScaffoldMessenger.of(context).showSnackBar(
                             const SnackBar(
                               content: Text('This match has already been accepted'),
                               backgroundColor: Colors.orange,
@@ -2589,10 +2884,10 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
                           );
                         }
                       }
-                    }
-                  },
-                  child: const Text('Accept'),
-                ),
+                                  }
+                                },
+                                child: const Text('Accept'),
+                              ),
               ],
             ),
           ],
@@ -2752,11 +3047,11 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             // Header
-            Row(
-              children: [
+                        Row(
+                          children: [
                 Text(sportEmoji, style: const TextStyle(fontSize: 24)),
                 const SizedBox(width: 12),
-                Expanded(
+                            Expanded(
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
@@ -2843,7 +3138,7 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
               mainAxisAlignment: MainAxisAlignment.end,
               children: [
                 OutlinedButton(
-                  onPressed: () async {
+                                onPressed: () async {
                     final requestId = game['request_id'] as String?;
                     final teamId = myTeamId;
                     if (requestId == null || teamId == null) return;
@@ -2894,7 +3189,7 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
       // Just refresh the UI
       setState(() {});
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
+                                    ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Text(
               status == 'accepted'
@@ -2904,9 +3199,9 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
           ),
         );
       }
-    } catch (e) {
+                                  } catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
+                                    ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text('Failed to update availability: $e')),
         );
       }
@@ -2942,103 +3237,297 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
     
     // Calculate pending counts by type:
     // 1. Pending Admin Approval: Games where user is admin and needs to approve/deny
-    //    - Existing team invites (pending)
     final existingPendingInvites = _controller.teamVsTeamInvites
         .where((inv) => inv['status'] == 'pending')
         .length;
-    //    - Team matches where user is admin and can approve (public/discoverable games)
     final pendingAdminMatches = _controller.pendingTeamMatchesForAdmin.length;
-    //    - Individual games from friends that are "friends_only"
     final friendsOnlyGames = _controller.friendsOnlyIndividualGames.length;
     final pendingAdminApprovalCount = existingPendingInvites + pendingAdminMatches + friendsOnlyGames;
     
     // 2. Pending Confirmation: Games where user needs to give availability
-    //    - Confirmed team games where user's attendance is pending
     final pendingConfirmationCount = _controller.pendingAvailabilityTeamMatches.length;
-    
-    final totalPendingCount = pendingAdminApprovalCount + pendingConfirmationCount;
     
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         const Text(
-          'My Games Preview',
-          style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: Colors.grey),
+          'My Games',
+          style: TextStyle(
+            fontSize: 22,
+            fontWeight: FontWeight.w700,
+            color: Colors.white,
+          ),
         ),
-        const SizedBox(height: 12),
-        Card(
-          child: Padding(
-            padding: const EdgeInsets.all(16),
-            child: Column(
-              children: [
-                // Confirmed Games
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                  children: [
-                    Row(
-                      children: [
-                        const Icon(Icons.check_circle, color: Colors.green),
-                        const SizedBox(width: 8),
-                        Text('Confirmed – $confirmedCount'),
-                      ],
-                    ),
-                    TextButton(
-                      onPressed: () {
-                        _controller.selectedIndex = 2; // My Games tab
-                        setState(() {});
-                      },
-                      child: const Text('View All'),
-                    ),
-                  ],
-                ),
-                const Divider(),
-                // Pending Admin Approval
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                  children: [
-                    Row(
-                      children: [
-                        const Icon(Icons.admin_panel_settings, color: Colors.blue),
-                        const SizedBox(width: 8),
-                        Text('Pending Admin Approval – $pendingAdminApprovalCount'),
-                      ],
-                    ),
-                    if (pendingAdminApprovalCount > 0)
-                      TextButton(
-                        onPressed: () {
-                          setState(() {
-                            _pendingAdminExpanded = !_pendingAdminExpanded;
-                          });
-                        },
-                        child: Text(_pendingAdminExpanded ? 'Hide' : 'View All'),
+        const SizedBox(height: 16),
+        
+        // Combined card with dark background (like My Quick Actions)
+        Container(
+          decoration: BoxDecoration(
+            color: const Color(0xFF14919B), // Medium teal card (logo inspired)
+            borderRadius: BorderRadius.circular(16),
+          ),
+          padding: const EdgeInsets.all(16),
+          child: Column(
+            children: [
+              // Confirmed Games
+              InkWell(
+                onTap: () {
+                  _controller.selectedIndex = 2; // Navigate to My Games tab
+                  setState(() {});
+                },
+                borderRadius: BorderRadius.circular(12),
+                child: Container(
+                  padding: const EdgeInsets.all(16),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFF1BA8B5), // Light teal for items (logo inspired)
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  child: Row(
+                    children: [
+                      // Icon
+                      Container(
+                        width: 50,
+                        height: 50,
+                        decoration: BoxDecoration(
+                          color: Colors.green.shade700,
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                        child: const Icon(
+                          Icons.check_circle,
+                          color: Colors.white,
+                          size: 28,
+                        ),
                       ),
-                  ],
-                ),
-                const Divider(),
-                // Pending Confirmation (Availability)
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                  children: [
-                    Row(
-                      children: [
-                        const Icon(Icons.event_available, color: Colors.orange),
-                        const SizedBox(width: 8),
-                        Text('Pending Confirmation – $pendingConfirmationCount'),
-                      ],
-                    ),
-                    if (pendingConfirmationCount > 0)
-                      TextButton(
-                        onPressed: () {
-                          setState(() {
-                            _pendingConfirmationExpanded = !_pendingConfirmationExpanded;
-                          });
-                        },
-                        child: Text(_pendingConfirmationExpanded ? 'Hide' : 'View All'),
+                      const SizedBox(width: 16),
+                      
+                      // Text
+                            Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            const Text(
+                              'CONFIRMED',
+                              style: TextStyle(
+                                fontSize: 12,
+                                color: Colors.white70,
+                                fontWeight: FontWeight.w600,
+                                letterSpacing: 1.2,
+                              ),
+                            ),
+                            const SizedBox(height: 4),
+                            Text(
+                              '$confirmedCount Games',
+                              style: const TextStyle(
+                                fontSize: 16,
+                                color: Colors.white,
+                                fontWeight: FontWeight.w700,
+                              ),
+                            ),
+                            const SizedBox(height: 4),
+                            const Text(
+                              'Tap to view all',
+                              style: TextStyle(
+                                fontSize: 13,
+                                color: Colors.white60,
+                              ),
+                            ),
+                          ],
+                        ),
                       ),
-                  ],
+                      
+                      // Arrow
+                      const Icon(
+                        Icons.arrow_forward_ios,
+                        color: Colors.white54,
+                        size: 20,
+                      ),
+                    ],
+                  ),
                 ),
-              ],
-            ),
+              ),
+              
+              const SizedBox(height: 12),
+              
+              // Pending Admin Approval
+              InkWell(
+                onTap: pendingAdminApprovalCount > 0
+                    ? () {
+                        setState(() {
+                          _pendingAdminExpanded = !_pendingAdminExpanded;
+                        });
+                      }
+                    : null,
+                borderRadius: BorderRadius.circular(12),
+                child: Container(
+                  padding: const EdgeInsets.all(16),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFF1BA8B5), // Light teal for items (logo inspired)
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  child: Row(
+                    children: [
+                      // Icon
+                      Container(
+                        width: 50,
+                        height: 50,
+                        decoration: BoxDecoration(
+                          color: Colors.blue.shade700,
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                        child: const Icon(
+                          Icons.admin_panel_settings,
+                          color: Colors.white,
+                          size: 28,
+                        ),
+                      ),
+                      const SizedBox(width: 16),
+                      
+                      // Text
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            const Text(
+                              'PENDING ADMIN APPROVAL',
+                              style: TextStyle(
+                                fontSize: 12,
+                                color: Colors.white70,
+                                fontWeight: FontWeight.w600,
+                                letterSpacing: 1.2,
+                              ),
+                            ),
+                            const SizedBox(height: 4),
+                            Text(
+                              '$pendingAdminApprovalCount Requests',
+                              style: const TextStyle(
+                                fontSize: 16,
+                                color: Colors.white,
+                                fontWeight: FontWeight.w700,
+                              ),
+                            ),
+                            const SizedBox(height: 4),
+                            Text(
+                              pendingAdminApprovalCount > 0
+                                  ? 'Tap to review'
+                                  : 'No pending approvals',
+                              style: const TextStyle(
+                                fontSize: 13,
+                                color: Colors.white60,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                      
+                      // Arrow or badge
+                      if (pendingAdminApprovalCount > 0)
+                        const Icon(
+                          Icons.arrow_forward_ios,
+                          color: Colors.white54,
+                          size: 20,
+                        )
+                      else
+                        const Icon(
+                          Icons.check,
+                          color: Colors.white38,
+                          size: 20,
+                        ),
+                    ],
+                  ),
+                ),
+              ),
+              
+              const SizedBox(height: 12),
+              
+              // Pending Confirmation
+              InkWell(
+                onTap: pendingConfirmationCount > 0
+                    ? () {
+                        setState(() {
+                          _pendingConfirmationExpanded = !_pendingConfirmationExpanded;
+                        });
+                      }
+                    : null,
+                borderRadius: BorderRadius.circular(12),
+                child: Container(
+                  padding: const EdgeInsets.all(16),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFF1BA8B5), // Light teal for items (logo inspired)
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  child: Row(
+                    children: [
+                      // Icon
+                      Container(
+                        width: 50,
+                        height: 50,
+                        decoration: BoxDecoration(
+                          color: Colors.orange.shade700,
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                        child: const Icon(
+                          Icons.event_available,
+                          color: Colors.white,
+                          size: 28,
+                        ),
+                      ),
+                      const SizedBox(width: 16),
+                      
+                      // Text
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            const Text(
+                              'PENDING CONFIRMATION',
+                              style: TextStyle(
+                                fontSize: 12,
+                                color: Colors.white70,
+                                fontWeight: FontWeight.w600,
+                                letterSpacing: 1.2,
+                              ),
+                            ),
+                            const SizedBox(height: 4),
+                            Text(
+                              '$pendingConfirmationCount Games',
+                              style: const TextStyle(
+                                fontSize: 16,
+                                color: Colors.white,
+                                fontWeight: FontWeight.w700,
+                              ),
+                            ),
+                            const SizedBox(height: 4),
+                            Text(
+                              pendingConfirmationCount > 0
+                                  ? 'Tap to respond'
+                                  : 'All caught up',
+                              style: const TextStyle(
+                                fontSize: 13,
+                                color: Colors.white60,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                      
+                      // Arrow or badge
+                      if (pendingConfirmationCount > 0)
+                        const Icon(
+                          Icons.arrow_forward_ios,
+                          color: Colors.white54,
+                          size: 20,
+                        )
+                      else
+                        const Icon(
+                          Icons.check,
+                          color: Colors.white38,
+                          size: 20,
+                        ),
+                    ],
+                  ),
+                ),
+              ),
+            ],
           ),
         ),
       ],
@@ -3176,7 +3665,7 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
             Padding(
               padding: const EdgeInsets.only(top: 8.0),
               child: TextButton(
-                onPressed: () async {
+                                onPressed: () async {
                   await _controller.loadDiscoveryPickupMatches();
                 },
                 child: const Text('Load more matches'),
@@ -3224,7 +3713,7 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
         trailing: const Icon(Icons.chevron_right),
         onTap: () {
           // TODO: Show match details or join dialog
-          ScaffoldMessenger.of(context).showSnackBar(
+                                    ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(content: Text('Pickup match: ${_displaySport(sport)}')),
           );
         },
@@ -3263,7 +3752,7 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
         onTap: () {
           // Navigate to match details or show more info
           // For now, just show a snackbar
-          ScaffoldMessenger.of(context).showSnackBar(
+                                    ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(content: Text('Match: $teamAName vs $teamBName')),
           );
         },
@@ -3863,7 +4352,7 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
         
         // Send reminder (if applicable)
         if (canSendReminder && myTeamId != null) ...[
-          OutlinedButton.icon(
+                      OutlinedButton.icon(
             onPressed: () async {
               await _controller.sendReminderToTeams(
                 requestId: reqId,
@@ -4231,69 +4720,69 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
                 ],
               ),
             ],
-            if (canSendReminder && myTeamId != null) ...[
-              const SizedBox(height: 10),
-              OutlinedButton.icon(
-                onPressed: () async {
-                  await _controller.sendReminderToTeams(
-                    requestId: reqId,
-                    teamId: myTeamId,
-                  );
-                  if (!mounted) return;
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    const SnackBar(
-                        content: Text('Reminder sent (placeholder)')),
-                  );
-                },
-                icon: const Icon(Icons.notifications_active_outlined),
-                label: const Text('Send reminder to teams'),
-              ),
-            ],
-            const SizedBox(height: 12),
-            Row(
-              children: [
-                Expanded(
-                  child: OutlinedButton(
-                    onPressed: (myTeamId == null)
-                        ? null
-                        : () => _vote(
-                              requestId: reqId,
-                              teamId: myTeamId,
-                              status: 'accepted',
-                            ),
-                    child: const Text('Available'),
-                  ),
-                ),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: OutlinedButton(
-                    onPressed: (myTeamId == null)
-                        ? null
-                        : () => _vote(
-                              requestId: reqId,
-                              teamId: myTeamId,
-                              status: 'declined',
-                            ),
-                    child: const Text('Not available'),
-                  ),
-                ),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: TextButton(
-                    onPressed: (myTeamId == null)
-                        ? null
-                        : () => _vote(
-                              requestId: reqId,
-                              teamId: myTeamId,
-                              status: 'pending',
-                            ),
-                    child: const Text('Reset'),
-                  ),
-                ),
-              ],
-            ),
-            const SizedBox(height: 10),
-            
+                    if (canSendReminder && myTeamId != null) ...[
+                      const SizedBox(height: 10),
+                      OutlinedButton.icon(
+                        onPressed: () async {
+                          await _controller.sendReminderToTeams(
+                            requestId: reqId,
+                            teamId: myTeamId,
+                          );
+                          if (!mounted) return;
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            const SnackBar(
+                                content: Text('Reminder sent (placeholder)')),
+                          );
+                        },
+                        icon: const Icon(Icons.notifications_active_outlined),
+                        label: const Text('Send reminder to teams'),
+                      ),
+                    ],
+                    const SizedBox(height: 12),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: OutlinedButton(
+                            onPressed: (myTeamId == null)
+                                ? null
+                                : () => _vote(
+                                      requestId: reqId,
+                                      teamId: myTeamId,
+                                      status: 'accepted',
+                                    ),
+                            child: const Text('Available'),
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: OutlinedButton(
+                            onPressed: (myTeamId == null)
+                                ? null
+                                : () => _vote(
+                                      requestId: reqId,
+                                      teamId: myTeamId,
+                                      status: 'declined',
+                                    ),
+                            child: const Text('Not available'),
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: TextButton(
+                            onPressed: (myTeamId == null)
+                                ? null
+                                : () => _vote(
+                                      requestId: reqId,
+                                      teamId: myTeamId,
+                                      status: 'pending',
+                                    ),
+                            child: const Text('Reset'),
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 10),
+
             // Team availability info (without status bars)
             Builder(
               builder: (context) {
@@ -4311,59 +4800,59 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
                         // Team A info
-                        Text(
+                    Text(
                           'Team $teamAName: Avail ${aCounts['accepted']}, Not ${aCounts['declined']}, Pending ${aCounts['pending']}',
-                          style: const TextStyle(fontSize: 12, color: Colors.black87),
-                        ),
+                      style: const TextStyle(fontSize: 12, color: Colors.black87),
+                    ),
                         const SizedBox(height: 8),
                         // Team B info
-                        Text(
+                    Text(
                           'Team $teamBName: Avail ${bCounts['accepted']}, Not ${bCounts['declined']}, Pending ${bCounts['pending']}',
-                          style: const TextStyle(fontSize: 12, color: Colors.black87),
-                        ),
-                        const SizedBox(height: 12),
+                      style: const TextStyle(fontSize: 12, color: Colors.black87),
+                    ),
+                    const SizedBox(height: 12),
                       ],
                     );
                   },
                 );
               },
             ),
-            if (canSwitchSide && teamAId != null && teamBId != null)
-              Row(
-                children: [
-                  Expanded(
-                    child: ElevatedButton.icon(
-                      onPressed: () async {
-                        final newTeam =
-                            (myTeamId == teamAId) ? teamBId : teamAId;
-                        await _switchSide(
-                          requestId: reqId,
-                          newTeamId: newTeam,
-                        );
-                      },
-                      icon: const Icon(Icons.swap_horiz),
-                      label: const Text('Switch side'),
-                    ),
-                  ),
-                ],
-              ),
-            const SizedBox(height: 12),
-            Text(teamAName,
-                style: const TextStyle(
-                    fontWeight: FontWeight.w600, fontSize: 13)),
-            const SizedBox(height: 6),
-            Wrap(children: teamAPlayers.map(_playerChip).toList()),
-            const SizedBox(height: 10),
-            Text(teamBName,
-                style: const TextStyle(
-                    fontWeight: FontWeight.w600, fontSize: 13)),
-            const SizedBox(height: 6),
-            Wrap(children: teamBPlayers.map(_playerChip).toList()),
-            const SizedBox(height: 10),
-            Text('Request ID: $reqId',
+                    if (canSwitchSide && teamAId != null && teamBId != null)
+                      Row(
+                        children: [
+                          Expanded(
+                            child: ElevatedButton.icon(
+                              onPressed: () async {
+                                final newTeam =
+                                    (myTeamId == teamAId) ? teamBId : teamAId;
+                                await _switchSide(
+                                  requestId: reqId,
+                                  newTeamId: newTeam,
+                                );
+                              },
+                              icon: const Icon(Icons.swap_horiz),
+                              label: const Text('Switch side'),
+                            ),
+                          ),
+                        ],
+                      ),
+                    const SizedBox(height: 12),
+                    Text(teamAName,
+                        style: const TextStyle(
+                            fontWeight: FontWeight.w600, fontSize: 13)),
+                    const SizedBox(height: 6),
+                    Wrap(children: teamAPlayers.map(_playerChip).toList()),
+                    const SizedBox(height: 10),
+                    Text(teamBName,
+                        style: const TextStyle(
+                            fontWeight: FontWeight.w600, fontSize: 13)),
+                    const SizedBox(height: 6),
+                    Wrap(children: teamBPlayers.map(_playerChip).toList()),
+                    const SizedBox(height: 10),
+                    Text('Request ID: $reqId',
                 style: const TextStyle(fontSize: 11, color: Colors.grey)),
-          ],
-        ),
+                  ],
+                ),
       ),
     );
   }
@@ -4440,9 +4929,9 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
                           ),
                         ),
                       ],
-                    ],
-                  ),
-                ),
+          ],
+        ),
+      ),
               ],
             ),
             const SizedBox(height: 6),
@@ -4456,7 +4945,7 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
             if (venue != null && venue.isNotEmpty) ...[
               const SizedBox(height: 4),
               Row(
-                children: [
+              children: [
                   const Icon(Icons.place_outlined, size: 14),
                   const SizedBox(width: 4),
                   Expanded(
@@ -4532,37 +5021,114 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
       builder: (_, __) {
         return Scaffold(
           body: _buildCurrentTabBody(),
-          bottomNavigationBar: BottomNavigationBar(
-            currentIndex: _controller.selectedIndex,
-            onTap: _onItemTapped,
-            type: BottomNavigationBarType.fixed,
-            selectedItemColor: Colors.blue,
-            unselectedItemColor: Colors.grey,
-            items: const [
-              BottomNavigationBarItem(
-                icon: Icon(Icons.home_filled),
+          bottomNavigationBar: _buildModernBottomNav(),
+        );
+      },
+    );
+  }
+  
+  // Modern Bottom Navigation Bar (fitness app style)
+  Widget _buildModernBottomNav() {
+    const orangeAccent = Color(0xFFFF6B35); // Orange accent color
+    
+    return Container(
+      margin: const EdgeInsets.all(16),
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 12),
+      decoration: BoxDecoration(
+        color: const Color(0xFF0D7377), // Dark teal pill (logo color)
+        borderRadius: BorderRadius.circular(30),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withOpacity(0.3),
+            blurRadius: 10,
+            offset: const Offset(0, 5),
+          ),
+        ],
+      ),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.spaceAround,
+        children: [
+          _buildNavItem(
+            icon: Icons.home_filled,
                 label: 'Home',
-              ),
-              BottomNavigationBarItem(
-                icon: Icon(Icons.explore),
-                label: 'Discover',
-              ),
-              BottomNavigationBarItem(
-                icon: Icon(Icons.sports_esports),
+            index: 0,
+            isSelected: _controller.selectedIndex == 0,
+            accentColor: orangeAccent,
+          ),
+          _buildNavItem(
+            icon: Icons.explore,
+            label: 'Discover',
+            index: 1,
+            isSelected: _controller.selectedIndex == 1,
+            accentColor: orangeAccent,
+          ),
+          _buildNavItem(
+            icon: Icons.sports_esports,
                 label: 'My Games',
-              ),
-              BottomNavigationBarItem(
-                icon: Icon(Icons.chat_bubble_outline),
-                label: 'Chat',
-              ),
-              BottomNavigationBarItem(
-                icon: Icon(Icons.person),
-                label: 'Profile',
+            index: 2,
+            isSelected: _controller.selectedIndex == 2,
+            accentColor: orangeAccent,
+          ),
+          _buildNavItem(
+            icon: Icons.chat_bubble_outline,
+            label: 'Chat',
+            index: 3,
+            isSelected: _controller.selectedIndex == 3,
+            accentColor: orangeAccent,
+          ),
+          _buildNavItem(
+            icon: Icons.person,
+            label: 'Profile',
+            index: 4,
+            isSelected: _controller.selectedIndex == 4,
+            accentColor: orangeAccent,
               ),
             ],
           ),
         );
-      },
+  }
+  
+  Widget _buildNavItem({
+    required IconData icon,
+    required String label,
+    required int index,
+    required bool isSelected,
+    required Color accentColor,
+  }) {
+    return GestureDetector(
+      onTap: () => _onItemTapped(index),
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 200),
+        padding: EdgeInsets.symmetric(
+          horizontal: isSelected ? 16 : 12,
+          vertical: 8,
+        ),
+        decoration: BoxDecoration(
+          color: isSelected ? accentColor : Colors.transparent,
+          borderRadius: BorderRadius.circular(20),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(
+              icon,
+              color: Colors.white,
+              size: 24,
+            ),
+            if (isSelected) ...[
+              const SizedBox(width: 8),
+              Text(
+                label,
+                style: const TextStyle(
+                  color: Colors.white,
+                  fontWeight: FontWeight.w600,
+                  fontSize: 14,
+                ),
+              ),
+            ],
+          ],
+        ),
+      ),
     );
   }
 }
