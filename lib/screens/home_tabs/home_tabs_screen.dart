@@ -9,7 +9,9 @@ import '../chat_screen.dart';
 import '../create_game_screen.dart';
 import 'home_tabs_controller.dart';
 import '../../widgets/status_bar.dart';
+import '../../widgets/location_picker_dialog.dart';
 import '../../utils/sport_defaults.dart';
+import '../../services/location_service.dart';
 
 class HomeTabsScreen extends StatefulWidget {
   const HomeTabsScreen({super.key});
@@ -25,6 +27,8 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
   bool _pendingConfirmationExpanded = false;
   String _myGamesFilter = 'Current'; // 'Current', 'Past', 'Cancelled', 'Hidden'
   final Set<String> _expandedMatchIds = {}; // Track which matches are expanded
+  String? _currentLocation; // Device/manual location display
+  bool _loadingLocation = false;
 
   final List<String> _allSportsOptions = const [
     'badminton',
@@ -50,6 +54,75 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
     if (!mounted) return;
 
     setState(() => _initDone = true);
+    
+    // Load location after init
+    _loadCurrentLocation();
+  }
+
+  Future<void> _loadCurrentLocation() async {
+    if (_loadingLocation) return;
+    
+    setState(() {
+      _loadingLocation = true;
+    });
+
+    try {
+      if (kDebugMode) {
+        print('[HomeTabsScreen] Starting location load - using device GPS');
+      }
+      
+      // Try to get device location directly (no timeout, let it try)
+      final deviceLocation = await LocationService.getCurrentLocationDisplay();
+      
+      if (kDebugMode) {
+        print('[HomeTabsScreen] Got location: $deviceLocation');
+      }
+      
+      if (mounted) {
+        setState(() {
+          _currentLocation = deviceLocation;
+          _loadingLocation = false;
+        });
+      }
+      
+    } catch (e) {
+      if (kDebugMode) {
+        print('[HomeTabsScreen] Location loading error: $e');
+      }
+      
+      // Wait a bit for profile location to load as fallback
+      int retries = 0;
+      while (_controller.userLocation == null && retries < 10 && mounted) {
+        await Future.delayed(const Duration(milliseconds: 100));
+        retries++;
+      }
+      
+      if (mounted) {
+        setState(() {
+          // Fallback to profile location if available
+          _currentLocation = _controller.userLocation ?? 'Location';
+          _loadingLocation = false;
+        });
+      }
+    }
+  }
+
+  Future<void> _showLocationPicker() async {
+    final result = await showDialog<bool>(
+      context: context,
+      builder: (context) => const LocationPickerDialog(),
+    );
+
+    // If location was changed, reload it
+    if (result == true) {
+      await _loadCurrentLocation();
+      // Optionally reload games based on new location
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Location updated')),
+        );
+      }
+    }
   }
 
   @override
@@ -1599,7 +1672,7 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
   // [ Greeting ] Section
   Widget _buildGreetingSection() {
     final name = _controller.userName ?? 'User';
-    final location = _controller.userLocation ?? 'Location';
+    final location = _currentLocation ?? (_loadingLocation ? 'Loading...' : 'Location');
     
     return Row(
       children: [
@@ -1610,10 +1683,31 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
           style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
         ),
         const Text(' | ', style: TextStyle(fontSize: 18, color: Colors.grey)),
-        const Icon(Icons.location_on, size: 18, color: Colors.grey),
-        Text(
-          location,
-          style: const TextStyle(fontSize: 18, color: Colors.grey),
+        const SizedBox(width: 4),
+        // Tappable location with change icon
+        InkWell(
+          onTap: _showLocationPicker,
+          borderRadius: BorderRadius.circular(8),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Icon(Icons.location_on, size: 18, color: Colors.blue),
+                const SizedBox(width: 4),
+                Text(
+                  location,
+                  style: const TextStyle(
+                    fontSize: 16,
+                    color: Colors.blue,
+                    decoration: TextDecoration.underline,
+                  ),
+                ),
+                const SizedBox(width: 4),
+                const Icon(Icons.edit, size: 14, color: Colors.blue),
+              ],
+            ),
+          ),
         ),
       ],
     );

@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:sentry_flutter/sentry_flutter.dart';
+import 'package:google_fonts/google_fonts.dart';
 
 import 'core/app_config.dart';
 import 'core/error_handler.dart';
@@ -89,7 +90,75 @@ class SportsDugApp extends StatelessWidget {
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
         useMaterial3: true,
-        colorScheme: ColorScheme.fromSeed(seedColor: Colors.green),
+        // Clean white background with blue accents (CricClubs style)
+        colorScheme: ColorScheme.light(
+          primary: Color(0xFF2196F3),           // Clean blue (like CricClubs)
+          secondary: Color(0xFF64B5F6),         // Light blue
+          surface: Colors.white,                 // White surfaces
+          background: Color(0xFFFAFAFA),         // Very light grey background
+          onPrimary: Colors.white,               // White text on blue
+          onSecondary: Colors.white,             // White text on light blue
+          onSurface: Color(0xFF212121),          // Dark grey/black text
+          onBackground: Color(0xFF424242),       // Dark grey text on background
+        ),
+        scaffoldBackgroundColor: Color(0xFFFAFAFA), // Very light grey (like CricClubs)
+        appBarTheme: AppBarTheme(
+          backgroundColor: Colors.white,
+          foregroundColor: Color(0xFF212121),    // Black text in app bar
+          elevation: 0.5,                         // Subtle shadow
+          centerTitle: true,
+          titleTextStyle: GoogleFonts.inter(
+            fontSize: 20,
+            fontWeight: FontWeight.w600,
+            color: Color(0xFF212121),
+          ),
+        ),
+        cardTheme: CardThemeData(
+          color: Colors.white,
+          elevation: 1,                           // Subtle shadow like CricClubs
+          shadowColor: Colors.black12,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(8), // Slightly rounded corners
+          ),
+          margin: EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+        ),
+        // Apply Inter font with black text (CricClubs style)
+        textTheme: GoogleFonts.interTextTheme(
+          ThemeData.light().textTheme,
+        ).apply(
+          bodyColor: Color(0xFF212121),          // Black text for body
+          displayColor: Color(0xFF212121),        // Black text for headers
+        ),
+        // Keep primary text theme clean
+        primaryTextTheme: GoogleFonts.interTextTheme(
+          ThemeData.light().primaryTextTheme,
+        ),
+        // Button theme to match CricClubs
+        elevatedButtonTheme: ElevatedButtonThemeData(
+          style: ElevatedButton.styleFrom(
+            backgroundColor: Color(0xFF2196F3),   // Blue buttons
+            foregroundColor: Colors.white,
+            elevation: 1,
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(8),
+            ),
+            padding: EdgeInsets.symmetric(horizontal: 24, vertical: 12),
+          ),
+        ),
+        // Tab bar theme
+        tabBarTheme: TabBarThemeData(
+          labelColor: Color(0xFF2196F3),         // Blue for active tab
+          unselectedLabelColor: Color(0xFF757575), // Grey for inactive
+          indicatorColor: Color(0xFF2196F3),     // Blue indicator
+          labelStyle: GoogleFonts.inter(
+            fontSize: 14,
+            fontWeight: FontWeight.w600,
+          ),
+          unselectedLabelStyle: GoogleFonts.inter(
+            fontSize: 14,
+            fontWeight: FontWeight.normal,
+          ),
+        ),
       ),
       home: const AuthGate(),
       navigatorObservers: [

@@ -2,6 +2,7 @@ import 'package:flutter/foundation.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
 import '../../data/home_repository.dart';
+import '../../services/location_service.dart';
 
 class HomeTabsController extends ChangeNotifier {
   final HomeRepository repo;
@@ -89,12 +90,19 @@ class HomeTabsController extends ChangeNotifier {
     if (uid == null) return;
 
     try {
-      baseZip = await repo.getBaseZip(uid);
+      // Load critical user data first (name, sports, profile ZIP for backward compatibility)
+      final profileZip = await repo.getBaseZip(uid);
+      baseZip = profileZip; // Keep for backward compatibility
+      
       userSports = await repo.getUserSports(uid);
       final nameAndLocation = await repo.getUserNameAndLocation(uid);
       userName = nameAndLocation['name'];
       userLocation = nameAndLocation['location'];
       notifyListeners();
+      
+      // Note: We now use GPS coordinates instead of ZIP codes for location
+      // baseZip is kept only for backward compatibility with existing code
+      
     } catch (e) {
       lastError = 'loadUserBasics failed: $e';
       notifyListeners();
