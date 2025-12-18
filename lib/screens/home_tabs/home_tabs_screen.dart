@@ -411,6 +411,47 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
       );
     }
   }
+  
+  Future<void> _showLeaveGameDialog(String requestId) async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: const Text('Leave this game?'),
+        content: const Text(
+          'This will mark you as "Not Available" and you will no longer be part of this game.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancel'),
+          ),
+          ElevatedButton(
+            onPressed: () => Navigator.pop(context, true),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: Colors.red,
+            ),
+            child: const Text('Leave Game'),
+          ),
+        ],
+      ),
+    );
+
+    if (ok == true) {
+      // Mark user as declined for this game
+      final myTeamId = _controller.allMyMatches
+          .firstWhere((m) => m['request_id'] == requestId, 
+                     orElse: () => {'my_team_id': null})['my_team_id'] as String?;
+      
+      if (myTeamId != null) {
+        await _vote(requestId: requestId, teamId: myTeamId, status: 'declined');
+      }
+      
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('You have left the game')),
+      );
+    }
+  }
 
   // ---------- CREATE INSTANT MATCH ----------
 
@@ -4305,6 +4346,19 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
           const SizedBox(height: 8),
         ],
         
+        // Creator Info
+        Row(
+          children: [
+            const Icon(Icons.person_outline, size: 14, color: Colors.grey),
+            const SizedBox(width: 4),
+            Text(
+              'Created by: ${match['creator_name'] ?? 'Unknown'}',
+              style: TextStyle(fontSize: 12, color: Colors.grey.shade700, fontWeight: FontWeight.w500),
+            ),
+          ],
+        ),
+        const SizedBox(height: 8),
+        
         // Game Details
         if (match['details'] != null && (match['details'] as String).isNotEmpty) ...[
           Row(
@@ -4436,6 +4490,87 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
             label: const Text('Switch to other team'),
           ),
         ],
+        
+        // Game Action Buttons
+        const SizedBox(height: 16),
+        const Divider(),
+        const SizedBox(height: 8),
+        Row(
+          mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+          children: [
+            // Open Map
+            Expanded(
+              child: InkWell(
+                onTap: () {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(content: Text('Opening map...')),
+                  );
+                },
+                child: Column(
+                  children: [
+                    Icon(Icons.map_outlined, color: Colors.orange.shade700, size: 24),
+                    const SizedBox(height: 4),
+                    Text(
+                      'Open Map',
+                      style: TextStyle(
+                        fontSize: 12,
+                        color: Colors.orange.shade700,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+            // Reminder
+            Expanded(
+              child: InkWell(
+                onTap: () {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(content: Text('Setting reminder...')),
+                  );
+                },
+                child: Column(
+                  children: [
+                    Icon(Icons.notifications_outlined, color: Colors.orange.shade700, size: 24),
+                    const SizedBox(height: 4),
+                    Text(
+                      'Reminder',
+                      style: TextStyle(
+                        fontSize: 12,
+                        color: Colors.orange.shade700,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+            // Leave/Cancel
+            Expanded(
+              child: InkWell(
+                onTap: () {
+                  _showLeaveGameDialog(reqId);
+                },
+                child: Column(
+                  children: [
+                    Icon(Icons.exit_to_app, color: Colors.orange.shade700, size: 24),
+                    const SizedBox(height: 4),
+                    Text(
+                      'Leave',
+                      style: TextStyle(
+                        fontSize: 12,
+                        color: Colors.orange.shade700,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 8),
       ],
     );
   }
@@ -4477,6 +4612,7 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
   Widget _buildPlayerRow(Map<String, dynamic> player) {
     final name = player['name'] as String? ?? 'Unknown';
     final status = (player['status'] as String?)?.toLowerCase() ?? 'pending';
+    final isAdmin = player['is_admin'] as bool? ?? false;
     
     IconData icon;
     Color color;
@@ -4501,6 +4637,25 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
           Icon(icon, size: 16, color: color),
           const SizedBox(width: 8),
           Text(name, style: const TextStyle(fontSize: 13)),
+          if (isAdmin) ...[
+            const SizedBox(width: 6),
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+              decoration: BoxDecoration(
+                color: Colors.blue.shade100,
+                borderRadius: BorderRadius.circular(4),
+                border: Border.all(color: Colors.blue.shade300, width: 1),
+              ),
+              child: Text(
+                'Admin',
+                style: TextStyle(
+                  fontSize: 10,
+                  fontWeight: FontWeight.w600,
+                  color: Colors.blue.shade800,
+                ),
+              ),
+            ),
+          ],
         ],
       ),
     );

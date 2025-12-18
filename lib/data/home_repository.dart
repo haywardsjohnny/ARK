@@ -734,13 +734,18 @@ class HomeRepository {
         .select('request_id, user_id, team_id, status')
         .inFilter('request_id', requestIds);
 
-    // Batch fetch user names
+    // Batch fetch user names (including creators)
     final allUserIds = <String>{};
     if (allAttendance is List) {
       for (final a in allAttendance) {
         final uid = a['user_id'] as String?;
         if (uid != null) allUserIds.add(uid);
       }
+    }
+    // Also add creator IDs
+    for (final r in reqs) {
+      final creatorId = r['created_by'] as String?;
+      if (creatorId != null) allUserIds.add(creatorId);
     }
 
     final users = allUserIds.isEmpty
@@ -756,6 +761,27 @@ class HomeRepository {
         final id = u['id'] as String?;
         if (id != null) {
           userNameById[id] = (u['full_name'] as String?) ?? 'Player';
+        }
+      }
+    }
+    
+    // Batch fetch team member roles (to mark admins)
+    final teamMemberRoles = allTeamIds.isEmpty
+        ? <dynamic>[]
+        : await supa
+            .from('team_members')
+            .select('user_id, team_id, role')
+            .inFilter('team_id', allTeamIds.toList());
+    
+    // Map: user_id + team_id => role
+    final Map<String, String> roleByUserTeam = {};
+    if (teamMemberRoles is List) {
+      for (final tm in teamMemberRoles) {
+        final uid = tm['user_id'] as String?;
+        final tid = tm['team_id'] as String?;
+        final role = (tm['role'] as String?)?.toLowerCase() ?? 'member';
+        if (uid != null && tid != null) {
+          roleByUserTeam['$uid-$tid'] = role;
         }
       }
     }
@@ -806,10 +832,16 @@ class HomeRepository {
         final st = (a['status'] as String?)?.toLowerCase() ?? 'pending';
         if (uid == null || tid == null) continue;
 
+        // Get role for this user in this team
+        final role = roleByUserTeam['$uid-$tid'] ?? 'member';
+        final isAdmin = role == 'admin';
+
         final item = {
           'user_id': uid,
           'name': userNameById[uid] ?? 'Player',
           'status': st,
+          'role': role,
+          'is_admin': isAdmin,
         };
 
         if (tid == teamAId) teamAPlayers.add(item);
@@ -851,8 +883,10 @@ class HomeRepository {
         'start_time': startDt,
         'end_time': endDt,
         'venue': venue,
+        'details': r['details'], // Game details/notes from organizer
         'can_switch_side': canSwitchSide,
         'created_by': createdBy,
+        'creator_name': userNameById[createdBy] ?? 'Unknown', // Creator name
         'my_attendance_status': userAttendanceStatus, // 'accepted' or 'declined'
         'my_team_id': userTeamId,
         'status': matchStatus, // Match request status (e.g., 'cancelled', 'matched', etc.)
@@ -1231,10 +1265,16 @@ class HomeRepository {
         final st = (a['status'] as String?)?.toLowerCase() ?? 'pending';
         if (uid == null || tid == null) continue;
 
+        // Get role for this user in this team
+        final role = roleByUserTeam['$uid-$tid'] ?? 'member';
+        final isAdmin = role == 'admin';
+
         final item = {
           'user_id': uid,
           'name': userNameById[uid] ?? 'Player',
           'status': st,
+          'role': role,
+          'is_admin': isAdmin,
         };
 
         if (tid == teamAId) teamAPlayers.add(item);
