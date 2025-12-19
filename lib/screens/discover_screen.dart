@@ -70,6 +70,183 @@ class _DiscoverScreenState extends State<DiscoverScreen> {
     return '2 miles';
   }
   
+  Future<void> _showInviteFriendsDialog(String requestId, String sport) async {
+    final supa = Supabase.instance.client;
+    final userId = supa.auth.currentUser?.id;
+    if (userId == null) return;
+
+    final selectedFriendIds = <String>{};
+
+    // Load user's friends
+    final friendRows = await supa
+        .from('friends')
+        .select('friend_id')
+        .eq('user_id', userId)
+        .eq('status', 'accepted');
+
+    final friendIds = <String>[];
+    if (friendRows is List) {
+      for (final r in friendRows) {
+        final fid = r['friend_id'] as String?;
+        if (fid != null) friendIds.add(fid);
+      }
+    }
+
+    if (friendIds.isEmpty) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('You don\'t have any friends to invite')),
+      );
+      return;
+    }
+
+    // Get friend details
+    final friends = await supa
+        .from('users')
+        .select('id, full_name, photo_url')
+        .inFilter('id', friendIds);
+
+    // Get already invited users
+    final existingAttendance = await supa
+        .from('individual_game_attendance')
+        .select('user_id')
+        .eq('request_id', requestId);
+
+    final alreadyInvitedIds = <String>{};
+    if (existingAttendance is List) {
+      for (final row in existingAttendance) {
+        final uid = row['user_id'] as String?;
+        if (uid != null) alreadyInvitedIds.add(uid);
+      }
+    }
+
+    // Filter out already invited friends
+    final availableFriends = (friends is List ? friends : []).where((f) {
+      final fid = f['id'] as String?;
+      return fid != null && !alreadyInvitedIds.contains(fid) && fid != userId;
+    }).toList();
+
+    if (availableFriends.isEmpty) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('All your friends are already invited or part of this game')),
+      );
+      return;
+    }
+
+    if (!mounted) return;
+
+    await showDialog(
+      context: context,
+      builder: (context) {
+        return StatefulBuilder(
+          builder: (context, setDialogState) {
+            return AlertDialog(
+              title: Text('Invite Friends to ${_displaySport(sport)} Game'),
+              content: SizedBox(
+                width: double.maxFinite,
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const Text(
+                      'Select friends to invite:',
+                      style: TextStyle(fontWeight: FontWeight.bold),
+                    ),
+                    const SizedBox(height: 8),
+                    SizedBox(
+                      height: 200,
+                      child: ListView.builder(
+                        itemCount: availableFriends.length,
+                        itemBuilder: (context, index) {
+                          final friend = availableFriends[index];
+                          final friendId = friend['id'] as String;
+                          final friendName = friend['full_name'] as String? ?? 'Unknown';
+                          final photoUrl = friend['photo_url'] as String?;
+                          final isSelected = selectedFriendIds.contains(friendId);
+
+                          return CheckboxListTile(
+                            leading: CircleAvatar(
+                              backgroundImage: photoUrl != null && photoUrl.isNotEmpty
+                                  ? NetworkImage(photoUrl)
+                                  : null,
+                              child: photoUrl == null || photoUrl.isEmpty
+                                  ? Text(friendName.isNotEmpty ? friendName[0].toUpperCase() : '?')
+                                  : null,
+                            ),
+                            title: Text(friendName),
+                            value: isSelected,
+                            onChanged: (value) {
+                              setDialogState(() {
+                                if (value == true) {
+                                  selectedFriendIds.add(friendId);
+                                } else {
+                                  selectedFriendIds.remove(friendId);
+                                }
+                              });
+                            },
+                          );
+                        },
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.pop(context),
+                  child: const Text('Cancel'),
+                ),
+                ElevatedButton(
+                  onPressed: selectedFriendIds.isEmpty
+                      ? null
+                      : () async {
+                          await _inviteFriendsToGame(requestId, selectedFriendIds.toList());
+                          if (context.mounted) Navigator.pop(context);
+                        },
+                  child: Text('Invite (${selectedFriendIds.length})'),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
+  }
+  
+  Future<void> _inviteFriendsToGame(String requestId, List<String> friendIds) async {
+    final supa = Supabase.instance.client;
+    final userId = supa.auth.currentUser?.id;
+    if (userId == null) return;
+
+    try {
+      // Create pending attendance records for invited friends
+      final inviteRecords = friendIds.map((friendId) => {
+        'request_id': requestId,
+        'user_id': friendId,
+        'status': 'pending',
+        'invited_by': userId,
+      }).toList();
+
+      await supa.from('individual_game_attendance').insert(inviteRecords);
+
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Invited ${friendIds.length} friend(s)! They will see this in their pending games.'),
+          duration: const Duration(seconds: 3),
+        ),
+      );
+      
+      // Refresh discovery matches to update spots left
+      widget.controller.loadDiscoveryPickupMatches();
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Failed to invite friends: $e')),
+      );
+    }
+  }
+  
   Future<void> _requestToJoinIndividualGame(String requestId) async {
     final supa = Supabase.instance.client;
     final userId = supa.auth.currentUser?.id;
@@ -472,6 +649,15 @@ class _DiscoverScreenState extends State<DiscoverScreen> {
                     ),
                     textAlign: TextAlign.center,
                   ),
+                  // Invite Friends button (for all_friends visibility)
+                  if (match['visibility'] == 'all_friends') ...[
+                    const SizedBox(height: 8),
+                    OutlinedButton.icon(
+                      onPressed: () => _showInviteFriendsDialog(requestId!, sport),
+                      icon: const Icon(Icons.person_add, size: 16),
+                      label: const Text('Invite Your Friends'),
+                    ),
+                  ],
                 ],
               ],
             ],
