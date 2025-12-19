@@ -22,12 +22,14 @@ class HomeTabsController extends ChangeNotifier {
   List<Map<String, dynamic>> teamVsTeamInvites = [];
   List<Map<String, dynamic>> confirmedTeamMatches = [];
   List<Map<String, dynamic>> allMyMatches = []; // All matches including cancelled
+  List<Map<String, dynamic>> allMyIndividualMatches = []; // All individual games
   List<Map<String, dynamic>> discoveryPickupMatches = [];
   List<Map<String, dynamic>> pendingTeamMatchesForAdmin = [];
   List<Map<String, dynamic>> friendsOnlyIndividualGames = [];
   List<Map<String, dynamic>> pendingAvailabilityTeamMatches = [];
   bool loadingConfirmedMatches = false;
   bool loadingAllMatches = false;
+  bool loadingIndividualMatches = false;
   bool loadingDiscoveryMatches = false;
 
   String? lastError;
@@ -266,6 +268,154 @@ class HomeTabsController extends ChangeNotifier {
       }
     } finally {
       loadingAllMatches = false;
+      notifyListeners();
+    }
+  }
+
+  Future<void> loadAllMyIndividualMatches() async {
+    final uid = currentUserId;
+    if (uid == null) return;
+
+    loadingIndividualMatches = true;
+    lastError = null;
+    notifyListeners();
+
+    try {
+      final supa = Supabase.instance.client;
+
+      // Get all individual games where user has attendance (accepted, declined, or pending)
+      final attendanceRows = await supa
+          .from('individual_game_attendance')
+          .select('request_id, status, created_at')
+          .eq('user_id', uid)
+          .order('created_at', ascending: false);
+
+      if (attendanceRows is! List || attendanceRows.isEmpty) {
+        allMyIndividualMatches = [];
+        loadingIndividualMatches = false;
+        notifyListeners();
+        return;
+      }
+
+      final requestIds = attendanceRows
+          .map<String>((r) => r['request_id'] as String)
+          .toSet()
+          .toList();
+
+      // Load game details
+      final games = await supa
+          .from('instant_match_requests')
+          .select('id, sport, mode, zip_code, start_time_1, start_time_2, venue, details, status, created_by, num_players, visibility, friends_group_id, chat_enabled, chat_mode')
+          .inFilter('id', requestIds)
+          .neq('mode', 'team_vs_team')
+          .order('created_at', ascending: false);
+
+      if (games is List) {
+        // Get creator names
+        final creatorIds = games
+            .map<String?>((g) => g['created_by'] as String?)
+            .where((id) => id != null)
+            .cast<String>()
+            .toSet()
+            .toList();
+
+        final creators = creatorIds.isEmpty
+            ? <dynamic>[]
+            : await supa
+                .from('users')
+                .select('id, full_name')
+                .inFilter('id', creatorIds);
+
+        final Map<String, String> creatorNames = {};
+        if (creators is List) {
+          for (final c in creators) {
+            final id = c['id'] as String?;
+            final name = c['full_name'] as String?;
+            if (id != null) {
+              creatorNames[id] = name ?? 'Unknown';
+            }
+          }
+        }
+
+        // Get attendance status for each game
+        final Map<String, String> attendanceStatusByRequest = {};
+        for (final row in attendanceRows) {
+          final reqId = row['request_id'] as String?;
+          final status = (row['status'] as String?)?.toLowerCase() ?? 'pending';
+          if (reqId != null) {
+            attendanceStatusByRequest[reqId] = status;
+          }
+        }
+
+        // Get accepted count for each game
+        final acceptedCounts = await supa
+            .from('individual_game_attendance')
+            .select('request_id')
+            .inFilter('request_id', requestIds)
+            .eq('status', 'accepted');
+
+        final Map<String, int> acceptedCountByRequest = {};
+        if (acceptedCounts is List) {
+          for (final row in acceptedCounts) {
+            final reqId = row['request_id'] as String?;
+            if (reqId != null) {
+              acceptedCountByRequest[reqId] = (acceptedCountByRequest[reqId] ?? 0) + 1;
+            }
+          }
+        }
+
+        // Build enriched match list
+        final List<Map<String, dynamic>> enriched = [];
+        for (final game in games) {
+          final reqId = game['id'] as String?;
+          if (reqId == null) continue;
+
+          final startTime1 = game['start_time_1'];
+          final startTime2 = game['start_time_2'];
+          DateTime? startDt;
+          DateTime? endDt;
+          if (startTime1 is String) startDt = DateTime.tryParse(startTime1);
+          if (startTime2 is String) endDt = DateTime.tryParse(startTime2);
+
+          final createdBy = game['created_by'] as String?;
+          final numPlayers = game['num_players'] as int? ?? 4;
+          final acceptedCount = acceptedCountByRequest[reqId] ?? 0;
+          final spotsLeft = numPlayers - acceptedCount;
+
+          enriched.add({
+            'request_id': reqId,
+            'sport': game['sport'],
+            'zip_code': game['zip_code'],
+            'start_time': startDt,
+            'end_time': endDt,
+            'venue': game['venue'],
+            'details': game['details'],
+            'status': game['status'],
+            'created_by': createdBy,
+            'creator_name': creatorNames[createdBy] ?? 'Unknown',
+            'num_players': numPlayers,
+            'accepted_count': acceptedCount,
+            'spots_left': spotsLeft,
+            'my_attendance_status': attendanceStatusByRequest[reqId] ?? 'pending',
+            'visibility': game['visibility'],
+            'friends_group_id': game['friends_group_id'],
+            'chat_enabled': game['chat_enabled'] as bool? ?? false,
+            'chat_mode': game['chat_mode'] as String? ?? 'all_users',
+          });
+        }
+
+        allMyIndividualMatches = enriched;
+      } else {
+        allMyIndividualMatches = [];
+      }
+    } catch (e) {
+      lastError = 'loadAllMyIndividualMatches failed: $e';
+      if (kDebugMode) {
+        print('[DEBUG] loadAllMyIndividualMatches ERROR: $e');
+      }
+      allMyIndividualMatches = [];
+    } finally {
+      loadingIndividualMatches = false;
       notifyListeners();
     }
   }

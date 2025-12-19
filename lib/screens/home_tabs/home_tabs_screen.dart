@@ -27,6 +27,7 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
   bool _pendingAdminExpanded = false;
   bool _pendingConfirmationExpanded = false;
   String _myGamesFilter = 'Current'; // 'Current', 'Past', 'Cancelled', 'Hidden'
+  String _myGamesType = 'Team'; // 'Team' or 'Individual'
   final Set<String> _expandedMatchIds = {}; // Track which matches are expanded
   String? _currentLocation; // Device/manual location display
   bool _loadingLocation = false;
@@ -447,8 +448,8 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
         await _vote(requestId: requestId, teamId: myTeamId, status: 'declined');
       }
       
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
+                                if (!mounted) return;
+                                ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('You have left the game')),
       );
     }
@@ -468,15 +469,15 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
       // Reload matches to refresh UI
       await _controller.loadAllMyMatches();
       
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
+                                if (!mounted) return;
+                                ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text(enabled ? 'Chat enabled' : 'Chat disabled'),
         ),
-      );
-    } catch (e) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
+                                );
+                              } catch (e) {
+                                if (!mounted) return;
+                                ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text('Failed to update chat: $e')),
       );
     }
@@ -496,17 +497,17 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
       // Reload matches to refresh UI
       await _controller.loadAllMyMatches();
       
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
+                                if (!mounted) return;
+                                ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text(mode == 'all_users' 
               ? 'All users can now message' 
               : 'Only admins can message'),
         ),
-      );
-    } catch (e) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
+                                );
+                              } catch (e) {
+                                if (!mounted) return;
+                                ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text('Failed to update chat mode: $e')),
       );
     }
@@ -3867,15 +3868,39 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
         _controller.loadAllMyMatches();
       });
     }
+    
+    // Also load individual games
+    if (_controller.allMyIndividualMatches.isEmpty && !_controller.loadingIndividualMatches) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        _controller.loadAllMyIndividualMatches();
+      });
+    }
 
     return Scaffold(
       appBar: AppBar(
         title: const Text(''), // Empty title since tab already says "My Games"
         automaticallyImplyLeading: false,
+        bottom: PreferredSize(
+          preferredSize: const Size.fromHeight(48),
+          child: Container(
+            color: Colors.white,
+            child: Row(
+              children: [
+                Expanded(
+                  child: _buildGameTypeTab('Team', _myGamesType == 'Team'),
+                ),
+                Expanded(
+                  child: _buildGameTypeTab('Individual', _myGamesType == 'Individual'),
+                ),
+              ],
+            ),
+          ),
+        ),
       ),
       body: RefreshIndicator(
         onRefresh: () async {
           await _controller.loadAllMyMatches();
+          await _controller.loadAllMyIndividualMatches();
         },
         child: AnimatedBuilder(
           animation: _controller,
@@ -3901,6 +3926,37 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
               ],
             );
           },
+        ),
+      ),
+    );
+  }
+  
+  Widget _buildGameTypeTab(String label, bool isSelected) {
+    return InkWell(
+      onTap: () {
+        setState(() {
+          _myGamesType = label;
+        });
+      },
+      child: Container(
+        padding: const EdgeInsets.symmetric(vertical: 12),
+        decoration: BoxDecoration(
+          color: isSelected ? Colors.orange.shade700 : Colors.transparent,
+          border: Border(
+            bottom: BorderSide(
+              color: isSelected ? Colors.orange.shade700 : Colors.grey.shade300,
+              width: 2,
+            ),
+          ),
+        ),
+        child: Text(
+          label,
+          textAlign: TextAlign.center,
+          style: TextStyle(
+            color: isSelected ? Colors.white : Colors.grey.shade700,
+            fontWeight: isSelected ? FontWeight.w600 : FontWeight.normal,
+            fontSize: 14,
+          ),
         ),
       ),
     );
@@ -3966,7 +4022,11 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
   }
 
   Widget _buildFilteredMatchesSection() {
-    if (_controller.loadingAllMatches) {
+    final isLoading = _myGamesType == 'Team' 
+        ? _controller.loadingAllMatches 
+        : _controller.loadingIndividualMatches;
+        
+    if (isLoading) {
       return const Padding(
         padding: EdgeInsets.all(16),
         child: Center(child: CircularProgressIndicator()),
@@ -3986,7 +4046,9 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
       );
     }
 
-    return _buildMatchesList(filteredMatches);
+    return _myGamesType == 'Team' 
+        ? _buildMatchesList(filteredMatches)
+        : _buildIndividualMatchesList(filteredMatches);
   }
 
   List<Map<String, dynamic>> _getFilteredMatches() {
@@ -3995,10 +4057,12 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
     final today = DateTime(now.year, now.month, now.day);
     final hiddenIds = _controller.hiddenRequestIds;
 
-    // Use allMyMatches if available, otherwise fall back to confirmedTeamMatches
-    final matchesToFilter = _controller.allMyMatches.isNotEmpty
-        ? _controller.allMyMatches
-        : _controller.confirmedTeamMatches;
+    // Filter by game type
+    final matchesToFilter = _myGamesType == 'Team'
+        ? (_controller.allMyMatches.isNotEmpty
+            ? _controller.allMyMatches
+            : _controller.confirmedTeamMatches)
+        : _controller.allMyIndividualMatches;
 
     if (kDebugMode) {
       print('[DEBUG] _getFilteredMatches: Filter=$_myGamesFilter, allMyMatches=${_controller.allMyMatches.length}, confirmedTeamMatches=${_controller.confirmedTeamMatches.length}, using=${matchesToFilter.length}');
@@ -4127,8 +4191,8 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
                     Text(
                       _getSportEmoji(sport),
                       style: const TextStyle(fontSize: 20),
-                    ),
-                    const SizedBox(width: 8),
+                            ),
+                            const SizedBox(width: 8),
                     Text(
                       _displaySport(sport),
                       style: const TextStyle(
@@ -4164,6 +4228,639 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
     
     // Show compact summary by default, expandable to full details
     return _buildCollapsibleMatchCard(match, isExpanded);
+  }
+  
+  Widget _buildIndividualMatchesList(List<Map<String, dynamic>> matches) {
+    // Group matches by sport and sort by date
+    final groupedMatches = <String, List<Map<String, dynamic>>>{};
+    
+    for (final match in matches) {
+      final sport = (match['sport'] as String?)?.toLowerCase() ?? 'other';
+      if (!groupedMatches.containsKey(sport)) {
+        groupedMatches[sport] = [];
+      }
+      groupedMatches[sport]!.add(match);
+    }
+    
+    // Sort matches within each sport by date (earliest first)
+    for (final sportMatches in groupedMatches.values) {
+      sportMatches.sort((a, b) {
+        final aTime = a['start_time'] as DateTime?;
+        final bTime = b['start_time'] as DateTime?;
+        if (aTime == null && bTime == null) return 0;
+        if (aTime == null) return 1;
+        if (bTime == null) return -1;
+        return aTime.compareTo(bTime);
+      });
+    }
+    
+    // Sort sports alphabetically
+    final sortedSports = groupedMatches.keys.toList()..sort();
+    
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 16, 16, 0),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            'Your games (${matches.length})',
+            style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+          ),
+          const SizedBox(height: 16),
+          
+          // Display matches grouped by sport
+          ...sortedSports.expand((sport) {
+            final sportMatches = groupedMatches[sport]!;
+            return [
+              // Sport header
+              Padding(
+                padding: const EdgeInsets.only(bottom: 8, top: 8),
+                child: Row(
+                  children: [
+                    Text(
+                      _getSportEmoji(sport),
+                      style: const TextStyle(fontSize: 20),
+                    ),
+                    const SizedBox(width: 8),
+                    Text(
+                      _displaySport(sport),
+                      style: const TextStyle(
+                        fontSize: 16,
+                        fontWeight: FontWeight.bold,
+                        color: Colors.blue,
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Text(
+                      '(${sportMatches.length})',
+                      style: TextStyle(
+                        fontSize: 14,
+                        color: Colors.grey.shade600,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              // Matches for this sport
+              ...sportMatches.map((m) => _buildIndividualMatchCardForFilter(m)),
+              const SizedBox(height: 12),
+            ];
+          }),
+        ],
+      ),
+    );
+  }
+  
+  Widget _buildIndividualMatchCardForFilter(Map<String, dynamic> match) {
+    final reqId = match['request_id'] as String;
+    final isExpanded = _expandedMatchIds.contains(reqId);
+    
+    // Show compact summary by default, expandable to full details
+    return _buildCollapsibleIndividualMatchCard(match, isExpanded);
+  }
+  
+  Widget _buildCollapsibleIndividualMatchCard(Map<String, dynamic> match, bool isExpanded) {
+    final reqId = match['request_id'] as String;
+    final sport = match['sport'] as String? ?? '';
+    final startDt = match['start_time'] as DateTime?;
+    final endDt = match['end_time'] as DateTime?;
+    final status = (match['status'] as String?)?.toLowerCase() ?? '';
+    final numPlayers = match['num_players'] as int? ?? 4;
+    final acceptedCount = match['accepted_count'] as int? ?? 0;
+    final spotsLeft = match['spots_left'] as int? ?? numPlayers;
+    final percentage = numPlayers > 0 ? (acceptedCount / numPlayers * 100).round() : 0;
+    
+    return Card(
+      margin: const EdgeInsets.only(bottom: 12),
+      color: status == 'cancelled' ? Colors.grey.shade100 : null,
+      child: InkWell(
+        onTap: () {
+          setState(() {
+            if (isExpanded) {
+              _expandedMatchIds.remove(reqId);
+            } else {
+              _expandedMatchIds.add(reqId);
+            }
+          });
+        },
+        child: Padding(
+          padding: const EdgeInsets.all(16),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              // Compact Summary (always visible)
+              Row(
+                children: [
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        // Game Title
+                        Text(
+                          '${_displaySport(sport)} Individual Game',
+                          style: const TextStyle(
+                            fontSize: 16,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                        const SizedBox(height: 4),
+                        // Date & Time
+                        if (startDt != null) ...[
+                          Row(
+                            children: [
+                              const Icon(Icons.calendar_today, size: 14, color: Colors.grey),
+                              const SizedBox(width: 4),
+                              Text(
+                                '${startDt.year}-${startDt.month.toString().padLeft(2, '0')}-${startDt.day.toString().padLeft(2, '0')}',
+                                style: TextStyle(fontSize: 13, color: Colors.grey.shade700),
+                              ),
+                              if (endDt != null) ...[
+                                const SizedBox(width: 8),
+                                const Icon(Icons.access_time, size: 14, color: Colors.grey),
+                                const SizedBox(width: 4),
+                                Text(
+                                  '${_formatTime(startDt)} - ${_formatTime(endDt)}',
+                                  style: TextStyle(fontSize: 13, color: Colors.grey.shade700),
+                                ),
+                              ],
+                            ],
+                          ),
+                        ],
+                      ],
+                    ),
+                  ),
+                  Icon(
+                    isExpanded ? Icons.expand_less : Icons.expand_more,
+                    color: Colors.grey,
+                  ),
+                ],
+              ),
+              const SizedBox(height: 8),
+              // Percentage Bar and Spots Left
+              Row(
+                children: [
+                  Expanded(
+                    child: StatusBar(
+                      percentage: percentage / 100.0,
+                      height: 8,
+                      showPercentage: false,
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Text(
+                    '$percentage%',
+                    style: TextStyle(
+                      fontSize: 12,
+                      fontWeight: FontWeight.bold,
+                      color: _getPercentageColor(percentage / 100.0),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Text(
+                    '$spotsLeft spots left',
+                    style: TextStyle(
+                      fontSize: 12,
+                      color: Colors.grey.shade600,
+                    ),
+                  ),
+                ],
+              ),
+              
+              // Full Details (only when expanded)
+              if (isExpanded) ...[
+                const SizedBox(height: 16),
+                const Divider(),
+                const SizedBox(height: 8),
+                _buildExpandedIndividualMatchDetails(match),
+              ],
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+  
+  Widget _buildExpandedIndividualMatchDetails(Map<String, dynamic> match) {
+    final reqId = match['request_id'] as String;
+    final sport = match['sport'] as String? ?? '';
+    final startDt = match['start_time'] as DateTime?;
+    final endDt = match['end_time'] as DateTime?;
+    final venue = match['venue'] as String?;
+    final details = match['details'] as String?;
+    final creatorName = match['creator_name'] as String? ?? 'Unknown';
+    final numPlayers = match['num_players'] as int? ?? 4;
+    final acceptedCount = match['accepted_count'] as int? ?? 0;
+    final spotsLeft = match['spots_left'] as int? ?? numPlayers;
+    final myStatus = match['my_attendance_status'] as String? ?? 'pending';
+    final isOrganizer = _controller.isOrganizerForMatch(match);
+    final chatEnabled = match['chat_enabled'] as bool? ?? false;
+    final chatMode = match['chat_mode'] as String? ?? 'all_users';
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        // Menu options
+        Row(
+          mainAxisAlignment: MainAxisAlignment.end,
+          children: [
+            PopupMenuButton<String>(
+              onSelected: (v) async {
+                if (v == 'hide') {
+                  await _confirmHideGame(reqId);
+                } else if (v == 'unhide') {
+                  await _confirmUnhideGame(reqId);
+                } else if (v == 'cancel') {
+                  await _confirmCancelIndividualGame(match);
+                } else if (v == 'enable_chat') {
+                  await _enableChat(reqId, enabled: true);
+                } else if (v == 'disable_chat') {
+                  await _enableChat(reqId, enabled: false);
+                } else if (v == 'chat_all_users') {
+                  await _setChatMode(reqId, mode: 'all_users');
+                } else if (v == 'chat_admins_only') {
+                  await _setChatMode(reqId, mode: 'admins_only');
+                }
+              },
+              itemBuilder: (_) => [
+                if (_myGamesFilter == 'Hidden')
+                  const PopupMenuItem(
+                    value: 'unhide',
+                    child: Text('Unhide game'),
+                  )
+                else
+                  const PopupMenuItem(
+                    value: 'hide',
+                    child: Text('Hide from My Games'),
+                  ),
+                if (isOrganizer) ...[
+                  if (chatEnabled)
+                    const PopupMenuItem(
+                      value: 'disable_chat',
+                      child: Text('Disable Chat'),
+                    )
+                  else
+                    const PopupMenuItem(
+                      value: 'enable_chat',
+                      child: Text('Enable Chat'),
+                    ),
+                  if (chatEnabled) ...[
+                    const PopupMenuDivider(),
+                    PopupMenuItem(
+                      value: 'chat_all_users',
+                      child: Row(
+                        children: [
+                          if (chatMode == 'all_users')
+                            const Icon(Icons.check, size: 16),
+                          const SizedBox(width: 8),
+                          const Text('All Users Can Message'),
+                        ],
+                      ),
+                    ),
+                    PopupMenuItem(
+                      value: 'chat_admins_only',
+                      child: Row(
+                        children: [
+                          if (chatMode == 'admins_only')
+                            const Icon(Icons.check, size: 16),
+                          const SizedBox(width: 8),
+                          const Text('Admins Only'),
+                        ],
+                      ),
+                    ),
+                  ],
+                  const PopupMenuDivider(),
+                  const PopupMenuItem(
+                    value: 'cancel',
+                    child: Text('Cancel game'),
+                  ),
+                ],
+              ],
+            ),
+          ],
+        ),
+        
+        // Creator Info
+        Row(
+          children: [
+            const Icon(Icons.person_outline, size: 14, color: Colors.grey),
+            const SizedBox(width: 4),
+            Text(
+              'Created by: $creatorName',
+              style: TextStyle(fontSize: 12, color: Colors.grey.shade700, fontWeight: FontWeight.w500),
+            ),
+          ],
+        ),
+        const SizedBox(height: 8),
+        
+        // Venue
+        if (venue != null && venue.isNotEmpty) ...[
+          Row(
+            children: [
+              const Icon(Icons.place_outlined, size: 14),
+              const SizedBox(width: 4),
+              Expanded(
+                child: Text(venue, style: const TextStyle(fontSize: 13)),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+        ],
+        
+        // Game Details
+        if (details != null && details.isNotEmpty) ...[
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Icon(Icons.info_outline, size: 14, color: Colors.blue),
+              const SizedBox(width: 4),
+              Expanded(
+                child: Text(
+                  details,
+                  style: const TextStyle(fontSize: 13, fontStyle: FontStyle.italic),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+        ],
+        
+        // Player Count Info
+        Text(
+          'Looking for $numPlayers players • $acceptedCount accepted • $spotsLeft spots left',
+          style: TextStyle(fontSize: 12, color: Colors.grey.shade600),
+        ),
+        const SizedBox(height: 12),
+        
+        // Action buttons (Available/Not Available)
+        if (myStatus != 'accepted' && !isOrganizer) ...[
+          Row(
+            children: [
+              Expanded(
+                child: OutlinedButton(
+                  onPressed: () => _respondToIndividualGame(reqId, 'accepted'),
+                  child: const Text('Available'),
+                ),
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: OutlinedButton(
+                  onPressed: () => _respondToIndividualGame(reqId, 'declined'),
+                  child: const Text('Not Available'),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 12),
+        ],
+        
+        // Game Action Buttons
+        const SizedBox(height: 8),
+        const Divider(),
+        const SizedBox(height: 8),
+        Row(
+          mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+          children: [
+            // Open Map
+            Expanded(
+              child: InkWell(
+                onTap: () {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(content: Text('Opening map...')),
+                  );
+                },
+                child: Column(
+                  children: [
+                    Icon(Icons.map_outlined, color: Colors.orange.shade700, size: 24),
+                    const SizedBox(height: 4),
+                    Text(
+                      'Open Map',
+                      style: TextStyle(
+                        fontSize: 12,
+                        color: Colors.orange.shade700,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+            // Reminder
+            Expanded(
+              child: InkWell(
+                onTap: () {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(content: Text('Setting reminder...')),
+                  );
+                },
+                child: Column(
+                  children: [
+                    Icon(Icons.notifications_outlined, color: Colors.orange.shade700, size: 24),
+                    const SizedBox(height: 4),
+                    Text(
+                      'Reminder',
+                      style: TextStyle(
+                        fontSize: 12,
+                        color: Colors.orange.shade700,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+            // Chat
+            Expanded(
+              child: InkWell(
+                onTap: () {
+                  if (chatEnabled) {
+                    Navigator.of(context).push(
+                      MaterialPageRoute(
+                        builder: (_) => GameChatScreen(
+                          requestId: reqId,
+                          chatMode: chatMode,
+                        ),
+                      ),
+                    );
+                  } else {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(
+                        content: Text('Chat is not enabled for this game'),
+                        duration: Duration(seconds: 2),
+                      ),
+                    );
+                  }
+                },
+                child: Column(
+                  children: [
+                    Stack(
+                      children: [
+                        Icon(
+                          Icons.chat_bubble_outline,
+                          color: chatEnabled
+                              ? Colors.orange.shade700
+                              : Colors.grey.shade400,
+                          size: 24,
+                        ),
+                        if (chatEnabled)
+                          Positioned(
+                            right: 0,
+                            top: 0,
+                            child: Container(
+                              width: 8,
+                              height: 8,
+                              decoration: const BoxDecoration(
+                                color: Colors.green,
+                                shape: BoxShape.circle,
+                              ),
+                            ),
+                          ),
+                      ],
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      'Chat',
+                      style: TextStyle(
+                        fontSize: 12,
+                        color: chatEnabled
+                            ? Colors.orange.shade700
+                            : Colors.grey.shade400,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+            // Leave
+            Expanded(
+              child: InkWell(
+                onTap: () {
+                  _showLeaveIndividualGameDialog(reqId);
+                },
+                child: Column(
+                  children: [
+                    Icon(Icons.exit_to_app, color: Colors.orange.shade700, size: 24),
+                    const SizedBox(height: 4),
+                    Text(
+                      'Leave',
+                      style: TextStyle(
+                        fontSize: 12,
+                        color: Colors.orange.shade700,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 8),
+      ],
+    );
+  }
+  
+  Future<void> _respondToIndividualGame(String requestId, String status) async {
+    final supa = Supabase.instance.client;
+    final userId = _controller.currentUserId;
+    if (userId == null) return;
+
+    try {
+      await supa
+          .from('individual_game_attendance')
+          .upsert({
+            'request_id': requestId,
+            'user_id': userId,
+            'status': status,
+          });
+
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(status == 'accepted' ? 'You are now available!' : 'Marked as not available'),
+        ),
+      );
+      
+      await _controller.loadAllMyIndividualMatches();
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Failed to update availability: $e')),
+      );
+    }
+  }
+  
+  Future<void> _confirmCancelIndividualGame(Map<String, dynamic> match) async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: const Text('Cancel this game?'),
+        content: const Text('This will cancel the game for everyone.'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('No'),
+          ),
+          ElevatedButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Yes, cancel'),
+          ),
+        ],
+      ),
+    );
+
+    if (ok == true) {
+      final supa = Supabase.instance.client;
+      final reqId = match['request_id'] as String;
+      
+      try {
+        await supa
+            .from('instant_match_requests')
+            .update({
+              'status': 'cancelled',
+              'last_updated_at': DateTime.now().toUtc().toIso8601String(),
+            })
+            .eq('id', reqId);
+        
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Game cancelled')),
+        );
+        await _controller.loadAllMyIndividualMatches();
+      } catch (e) {
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Failed to cancel game: $e')),
+        );
+      }
+    }
+  }
+  
+  Future<void> _showLeaveIndividualGameDialog(String requestId) async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: const Text('Leave this game?'),
+        content: const Text('This will mark you as "Not Available" and you will no longer be part of this game.'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancel'),
+          ),
+          ElevatedButton(
+            onPressed: () => Navigator.pop(context, true),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: Colors.red,
+            ),
+            child: const Text('Leave Game'),
+          ),
+        ],
+      ),
+    );
+
+    if (ok == true) {
+      await _respondToIndividualGame(requestId, 'declined');
+    }
   }
   
   Widget _buildCollapsibleMatchCard(Map<String, dynamic> match, bool isExpanded) {
@@ -4209,7 +4906,7 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
               // Compact Summary (always visible)
               Row(
                 children: [
-                  Expanded(
+                            Expanded(
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
@@ -4540,13 +5237,13 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
         // Send reminder (if applicable)
         if (canSendReminder && myTeamId != null) ...[
                       OutlinedButton.icon(
-            onPressed: () async {
+                                onPressed: () async {
               await _controller.sendReminderToTeams(
                 requestId: reqId,
                 teamId: myTeamId,
-              );
-              if (!mounted) return;
-              ScaffoldMessenger.of(context).showSnackBar(
+                                    );
+                                    if (!mounted) return;
+                                    ScaffoldMessenger.of(context).showSnackBar(
                 const SnackBar(content: Text('Reminder sent')),
               );
             },
@@ -4617,7 +5314,7 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
             Expanded(
               child: InkWell(
                 onTap: () {
-                  ScaffoldMessenger.of(context).showSnackBar(
+                                    ScaffoldMessenger.of(context).showSnackBar(
                     const SnackBar(content: Text('Opening map...')),
                   );
                 },
@@ -4683,9 +5380,9 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
                         content: Text('Chat is not enabled for this game'),
                         duration: Duration(seconds: 2),
                       ),
-                    );
-                  }
-                },
+                                    );
+                                  }
+                                },
                 child: Column(
                   children: [
                     Stack(
@@ -4708,10 +5405,10 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
                                 color: Colors.green,
                                 shape: BoxShape.circle,
                               ),
+                              ),
                             ),
-                          ),
-                      ],
-                    ),
+                          ],
+                        ),
                     const SizedBox(height: 4),
                     Text(
                       'Chat',
