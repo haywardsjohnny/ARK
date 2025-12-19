@@ -27,6 +27,7 @@ class HomeTabsController extends ChangeNotifier {
   List<Map<String, dynamic>> pendingTeamMatchesForAdmin = [];
   List<Map<String, dynamic>> friendsOnlyIndividualGames = [];
   List<Map<String, dynamic>> pendingAvailabilityTeamMatches = [];
+  List<Map<String, dynamic>> pendingIndividualGames = []; // Individual games with pending requests
   bool loadingConfirmedMatches = false;
   bool loadingAllMatches = false;
   bool loadingIndividualMatches = false;
@@ -56,6 +57,7 @@ class HomeTabsController extends ChangeNotifier {
       await loadPendingGamesForAdmin();
       await loadFriendsOnlyIndividualGames();
       await loadMyPendingAvailabilityMatches();
+      await loadPendingIndividualGames();
       setupRealtimeAttendance();
     } catch (e) {
       lastError = 'Init failed: $e';
@@ -582,6 +584,20 @@ class HomeTabsController extends ChangeNotifier {
         }
       }
       
+      // Get friends group IDs user is member of
+      final groupRows = await supa
+          .from('friends_group_members')
+          .select('group_id')
+          .eq('user_id', uid);
+      
+      final Set<String> userGroupIds = {};
+      if (groupRows is List) {
+        for (final r in groupRows) {
+          final gid = r['group_id'] as String?;
+          if (gid != null) userGroupIds.add(gid);
+        }
+      }
+      
       // Get user's admin teams and their sports for team game eligibility
       final Map<String, List<String>> adminTeamsBySport = {};
       for (final team in adminTeams) {
@@ -597,7 +613,7 @@ class HomeTabsController extends ChangeNotifier {
       final matches = await supa
           .from('instant_match_requests')
           .select(
-            'id, sport, zip_code, mode, start_time_1, start_time_2, venue, status, created_by, num_players, created_at, visibility, is_public')
+            'id, sport, zip_code, mode, start_time_1, start_time_2, venue, status, created_by, num_players, created_at, visibility, is_public, friends_group_id')
           .neq('status', 'cancelled')
           .neq('created_by', uid) // Don't show own matches
           .order('created_at', ascending: false)
@@ -620,12 +636,25 @@ class HomeTabsController extends ChangeNotifier {
 
           // Check visibility - determine if user can see this game
           bool canSee = false;
+          final friendsGroupId = m['friends_group_id'] as String?;
           
-          // Explicit check for public games
+          // Public games - visible to all within radius
           if (visibility == 'public' || isPublic == true) {
             canSee = true;
           }
-          // Friends-only games
+          // All Friends - visible to friends of creator
+          else if (visibility == 'all_friends') {
+            if (creatorId != null && friendIds.contains(creatorId)) {
+              canSee = true;
+            }
+          }
+          // Friends Group - only visible to members of that group
+          else if (visibility == 'friends_group') {
+            if (friendsGroupId != null && userGroupIds.contains(friendsGroupId)) {
+              canSee = true;
+            }
+          }
+          // Legacy friends_only (for backward compatibility)
           else if (visibility == 'friends_only') {
             if (creatorId != null && friendIds.contains(creatorId)) {
               canSee = true;
@@ -672,6 +701,41 @@ class HomeTabsController extends ChangeNotifier {
             'created_by': m['created_by'],
             'can_accept': canAccept, // Flag indicating if user can accept this game
           });
+        }
+
+        // Batch fetch accepted counts for individual games
+        final individualGameIds = result
+            .where((r) => r['mode'] != 'team_vs_team')
+            .map<String>((r) => r['request_id'] as String)
+            .toList();
+        
+        final Map<String, int> acceptedCountByRequest = {};
+        if (individualGameIds.isNotEmpty) {
+          final attendanceRows = await supa
+              .from('individual_game_attendance')
+              .select('request_id')
+              .inFilter('request_id', individualGameIds)
+              .eq('status', 'accepted');
+          
+          if (attendanceRows is List) {
+            for (final row in attendanceRows) {
+              final reqId = row['request_id'] as String?;
+              if (reqId != null) {
+                acceptedCountByRequest[reqId] = (acceptedCountByRequest[reqId] ?? 0) + 1;
+              }
+            }
+          }
+        }
+        
+        // Add accepted count and spots left to individual games
+        for (final r in result) {
+          if (r['mode'] != 'team_vs_team') {
+            final reqId = r['request_id'] as String;
+            final numPlayers = r['num_players'] as int? ?? 4;
+            final acceptedCount = acceptedCountByRequest[reqId] ?? 0;
+            r['accepted_count'] = acceptedCount;
+            r['spots_left'] = numPlayers - acceptedCount;
+          }
         }
 
         discoveryPickupMatches = result;
@@ -733,6 +797,216 @@ class HomeTabsController extends ChangeNotifier {
     } catch (e) {
       lastError = 'loadMyPendingAvailabilityMatches failed: $e';
       notifyListeners();
+    }
+  }
+  
+  /// Load individual games where user has pending attendance request
+  Future<void> loadPendingIndividualGames() async {
+    final uid = currentUserId;
+    if (uid == null) return;
+
+    try {
+      final supa = Supabase.instance.client;
+      
+      // Get pending attendance records
+      final pendingRows = await supa
+          .from('individual_game_attendance')
+          .select('request_id, created_at')
+          .eq('user_id', uid)
+          .eq('status', 'pending')
+          .order('created_at', ascending: false);
+
+      if (pendingRows is! List || pendingRows.isEmpty) {
+        pendingIndividualGames = [];
+        notifyListeners();
+        return;
+      }
+
+      final requestIds = pendingRows
+          .map<String>((r) => r['request_id'] as String)
+          .toList();
+
+      // Load game details
+      final games = await supa
+          .from('instant_match_requests')
+          .select('id, sport, mode, zip_code, start_time_1, start_time_2, venue, details, status, created_by, num_players, visibility, friends_group_id')
+          .inFilter('id', requestIds)
+          .neq('mode', 'team_vs_team')
+          .neq('status', 'cancelled')
+          .order('created_at', ascending: false);
+
+      if (games is List) {
+        // Get creator names
+        final creatorIds = games
+            .map<String?>((g) => g['created_by'] as String?)
+            .where((id) => id != null)
+            .cast<String>()
+            .toSet()
+            .toList();
+
+        final creators = creatorIds.isEmpty
+            ? <dynamic>[]
+            : await supa
+                .from('users')
+                .select('id, full_name')
+                .inFilter('id', creatorIds);
+
+        final Map<String, String> creatorNames = {};
+        if (creators is List) {
+          for (final c in creators) {
+            final id = c['id'] as String?;
+            final name = c['full_name'] as String?;
+            if (id != null) {
+              creatorNames[id] = name ?? 'Unknown';
+            }
+          }
+        }
+
+        // Get accepted count for each game
+        final acceptedCounts = await supa
+            .from('individual_game_attendance')
+            .select('request_id')
+            .inFilter('request_id', requestIds)
+            .eq('status', 'accepted');
+
+        final Map<String, int> acceptedCountByRequest = {};
+        if (acceptedCounts is List) {
+          for (final row in acceptedCounts) {
+            final reqId = row['request_id'] as String?;
+            if (reqId != null) {
+              acceptedCountByRequest[reqId] = (acceptedCountByRequest[reqId] ?? 0) + 1;
+            }
+          }
+        }
+
+        // Build enriched match list
+        final List<Map<String, dynamic>> enriched = [];
+        for (final game in games) {
+          final reqId = game['id'] as String?;
+          if (reqId == null) continue;
+
+          final startTime1 = game['start_time_1'];
+          final startTime2 = game['start_time_2'];
+          DateTime? startDt;
+          DateTime? endDt;
+          if (startTime1 is String) startDt = DateTime.tryParse(startTime1);
+          if (startTime2 is String) endDt = DateTime.tryParse(startTime2);
+
+          final createdBy = game['created_by'] as String?;
+          final numPlayers = game['num_players'] as int? ?? 4;
+          final acceptedCount = acceptedCountByRequest[reqId] ?? 0;
+          final spotsLeft = numPlayers - acceptedCount;
+
+          enriched.add({
+            'request_id': reqId,
+            'sport': game['sport'],
+            'zip_code': game['zip_code'],
+            'start_time': startDt,
+            'end_time': endDt,
+            'venue': game['venue'],
+            'details': game['details'],
+            'status': game['status'],
+            'created_by': createdBy,
+            'creator_name': creatorNames[createdBy] ?? 'Unknown',
+            'num_players': numPlayers,
+            'accepted_count': acceptedCount,
+            'spots_left': spotsLeft,
+            'my_attendance_status': 'pending',
+            'visibility': game['visibility'],
+            'friends_group_id': game['friends_group_id'],
+          });
+        }
+
+        pendingIndividualGames = enriched;
+      } else {
+        pendingIndividualGames = [];
+      }
+    } catch (e) {
+      lastError = 'loadPendingIndividualGames failed: $e';
+      pendingIndividualGames = [];
+    } finally {
+      notifyListeners();
+    }
+  }
+  
+  /// Load individual games where organizer needs to approve requests
+  Future<void> loadIndividualGamesForOrganizerApproval() async {
+    final uid = currentUserId;
+    if (uid == null) return;
+
+    try {
+      final supa = Supabase.instance.client;
+      
+      // Get games created by user
+      final myGames = await supa
+          .from('instant_match_requests')
+          .select('id')
+          .eq('created_by', uid)
+          .neq('mode', 'team_vs_team')
+          .neq('status', 'cancelled');
+
+      if (myGames is! List || myGames.isEmpty) {
+        // No games to approve
+        return;
+      }
+
+      final requestIds = myGames.map<String>((g) => g['id'] as String).toList();
+
+      // Get pending attendance requests
+      final pendingRequests = await supa
+          .from('individual_game_attendance')
+          .select('request_id, user_id, created_at')
+          .inFilter('request_id', requestIds)
+          .eq('status', 'pending')
+          .order('created_at', ascending: false);
+
+      // This will be used in the UI to show approval dialogs
+      // For now, we'll handle approvals directly in the UI when viewing games
+    } catch (e) {
+      lastError = 'loadIndividualGamesForOrganizerApproval failed: $e';
+    }
+  }
+  
+  /// Approve or deny individual game request (organizer only)
+  Future<void> approveIndividualGameRequest({
+    required String requestId,
+    required String userId,
+    required bool approve,
+  }) async {
+    final uid = currentUserId;
+    if (uid == null) return;
+
+    try {
+      final supa = Supabase.instance.client;
+      
+      // Verify user is organizer
+      final game = await supa
+          .from('instant_match_requests')
+          .select('created_by')
+          .eq('id', requestId)
+          .maybeSingle();
+      
+      if (game == null || game['created_by'] != uid) {
+        throw Exception('Only the organizer can approve requests');
+      }
+
+      // Update attendance status
+      await supa
+          .from('individual_game_attendance')
+          .update({
+            'status': approve ? 'accepted' : 'declined',
+            'updated_at': DateTime.now().toUtc().toIso8601String(),
+          })
+          .eq('request_id', requestId)
+          .eq('user_id', userId);
+
+      // Refresh individual games
+      await loadAllMyIndividualMatches();
+      notifyListeners();
+    } catch (e) {
+      lastError = 'approveIndividualGameRequest failed: $e';
+      notifyListeners();
+      rethrow;
     }
   }
 

@@ -69,6 +69,68 @@ class _DiscoverScreenState extends State<DiscoverScreen> {
     // TODO: Implement actual distance calculation
     return '2 miles';
   }
+  
+  Future<void> _requestToJoinIndividualGame(String requestId) async {
+    final supa = Supabase.instance.client;
+    final userId = supa.auth.currentUser?.id;
+    if (userId == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Please login to join games')),
+      );
+      return;
+    }
+
+    try {
+      // Check if already requested
+      final existing = await supa
+          .from('individual_game_attendance')
+          .select('id, status')
+          .eq('request_id', requestId)
+          .eq('user_id', userId)
+          .maybeSingle();
+
+      if (existing != null) {
+        final status = (existing['status'] as String?)?.toLowerCase() ?? 'pending';
+        if (status == 'accepted') {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('You are already part of this game!')),
+          );
+        } else if (status == 'pending') {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Request already sent. Waiting for organizer approval.')),
+          );
+        } else {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('You previously declined this game.')),
+          );
+        }
+        return;
+      }
+
+      // Create pending attendance record
+      await supa.from('individual_game_attendance').insert({
+        'request_id': requestId,
+        'user_id': userId,
+        'status': 'pending',
+      });
+
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Join request sent! Organizer will review your request.'),
+          duration: Duration(seconds: 3),
+        ),
+      );
+      
+      // Refresh discovery matches
+      widget.controller.loadDiscoveryPickupMatches();
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Failed to join game: $e')),
+      );
+    }
+  }
 
   @override
   void dispose() {
@@ -257,6 +319,9 @@ class _DiscoverScreenState extends State<DiscoverScreen> {
     final startDt = match['start_time'] as DateTime?;
     final zip = match['zip_code'] as String?;
     final canAccept = match['can_accept'] as bool? ?? true;
+    final spotsLeft = match['spots_left'] as int?;
+    final acceptedCount = match['accepted_count'] as int? ?? 0;
+    final requestId = match['request_id'] as String?;
     final sportEmoji = _getSportEmoji(sport);
     final distance = _calculateDistance(zip);
     
@@ -265,7 +330,7 @@ class _DiscoverScreenState extends State<DiscoverScreen> {
     if (mode == 'team_vs_team') {
       matchType = 'Team Match';
     } else if (numPlayers != null) {
-      matchType = '$numPlayers v$numPlayers';
+      matchType = 'Individual ($numPlayers players)';
     } else {
       matchType = 'Pickup';
     }
@@ -325,13 +390,26 @@ class _DiscoverScreenState extends State<DiscoverScreen> {
                     timeStr,
                     style: const TextStyle(color: Colors.orange, fontWeight: FontWeight.w600),
                   ),
-                  const Text(' | '),
-                  const Icon(Icons.attach_money, size: 16, color: Colors.blue),
-                  const SizedBox(width: 4),
-                  const Text(
-                    '\$10',
-                    style: TextStyle(color: Colors.blue, fontWeight: FontWeight.w600),
-                  ),
+                  if (mode != 'team_vs_team' && spotsLeft != null) ...[
+                    const Text(' | '),
+                    Icon(Icons.people, size: 16, color: spotsLeft! > 0 ? Colors.green : Colors.red),
+                    const SizedBox(width: 4),
+                    Text(
+                      '$spotsLeft spots left',
+                      style: TextStyle(
+                        color: spotsLeft! > 0 ? Colors.green : Colors.red,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ] else ...[
+                    const Text(' | '),
+                    const Icon(Icons.attach_money, size: 16, color: Colors.blue),
+                    const SizedBox(width: 4),
+                    const Text(
+                      '\$10',
+                      style: TextStyle(color: Colors.blue, fontWeight: FontWeight.w600),
+                    ),
+                  ],
                 ],
               ),
               
@@ -369,21 +447,32 @@ class _DiscoverScreenState extends State<DiscoverScreen> {
                 SizedBox(
                   width: double.infinity,
                   child: ElevatedButton(
-                    onPressed: () {
-                      // TODO: Show join/accept dialog
+                    onPressed: () async {
                       if (mode == 'team_vs_team') {
                         ScaffoldMessenger.of(context).showSnackBar(
                           SnackBar(content: Text('Request to join ${_displaySport(sport)} team match')),
                         );
                       } else {
-                        ScaffoldMessenger.of(context).showSnackBar(
-                          SnackBar(content: Text('Join ${_displaySport(sport)} individual match')),
-                        );
+                        // Individual game - request to join
+                        await _requestToJoinIndividualGame(requestId!);
                       }
                     },
-                    child: Text(mode == 'team_vs_team' ? 'Request to Join' : 'Join Game'),
+                    child: Text(mode == 'team_vs_team' ? 'Request to Join' : 'Request to Join'),
                   ),
                 ),
+                // Show organizer approval message for individual games
+                if (mode != 'team_vs_team') ...[
+                  const SizedBox(height: 4),
+                  Text(
+                    'Organizer must approve your request',
+                    style: TextStyle(
+                      fontSize: 11,
+                      color: Colors.grey.shade600,
+                      fontStyle: FontStyle.italic,
+                    ),
+                    textAlign: TextAlign.center,
+                  ),
+                ],
               ],
             ],
           ),

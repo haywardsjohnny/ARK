@@ -2572,8 +2572,13 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
   // [ Pending Confirmation ] Section (expanded with details)
   Widget _buildPendingConfirmationSection() {
     final pendingAvailabilityGames = _controller.pendingAvailabilityTeamMatches;
+    final pendingIndividualGames = _controller.pendingIndividualGames;
+    final allPending = [
+      ...pendingAvailabilityGames.map((g) => {...g, 'game_type': 'team'}),
+      ...pendingIndividualGames.map((g) => {...g, 'game_type': 'individual'}),
+    ];
 
-    if (pendingAvailabilityGames.isEmpty) {
+    if (allPending.isEmpty) {
       return Card(
         child: Padding(
           padding: const EdgeInsets.all(16),
@@ -2602,10 +2607,125 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
         ),
         const SizedBox(height: 12),
         
-        // Confirmed Team Games where MY availability is pending
-        ...pendingAvailabilityGames
-            .map((game) => _buildPendingAvailabilityTeamCard(game)),
+        // All pending games (team + individual)
+        ...allPending.map((game) {
+          if (game['game_type'] == 'team') {
+            return _buildPendingAvailabilityTeamCard(game);
+          } else {
+            return _buildPendingIndividualGameCard(game);
+          }
+        }),
       ],
+    );
+  }
+  
+  Widget _buildPendingIndividualGameCard(Map<String, dynamic> game) {
+    final reqId = game['request_id'] as String;
+    final sport = game['sport'] as String? ?? '';
+    final startDt = game['start_time'] as DateTime?;
+    final venue = game['venue'] as String?;
+    final creatorName = game['creator_name'] as String? ?? 'Unknown';
+    final numPlayers = game['num_players'] as int? ?? 4;
+    final spotsLeft = game['spots_left'] as int? ?? numPlayers;
+
+    return Card(
+      margin: const EdgeInsets.only(bottom: 12),
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Text(
+                  _getSportEmoji(sport),
+                  style: const TextStyle(fontSize: 24),
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        '${_displaySport(sport)} Individual Game',
+                        style: const TextStyle(
+                          fontSize: 16,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                      Text(
+                        'Created by: $creatorName',
+                        style: TextStyle(
+                          fontSize: 12,
+                          color: Colors.grey.shade600,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            if (startDt != null)
+              Row(
+                children: [
+                  const Icon(Icons.calendar_today, size: 14, color: Colors.grey),
+                  const SizedBox(width: 4),
+                  Text(
+                    '${startDt.year}-${startDt.month.toString().padLeft(2, '0')}-${startDt.day.toString().padLeft(2, '0')}',
+                    style: TextStyle(fontSize: 13, color: Colors.grey.shade700),
+                  ),
+                  const SizedBox(width: 8),
+                  const Icon(Icons.access_time, size: 14, color: Colors.grey),
+                  const SizedBox(width: 4),
+                  Text(
+                    _formatTime(startDt),
+                    style: TextStyle(fontSize: 13, color: Colors.grey.shade700),
+                  ),
+                ],
+              ),
+            if (venue != null && venue.isNotEmpty) ...[
+              const SizedBox(height: 4),
+              Row(
+                children: [
+                  const Icon(Icons.place_outlined, size: 14, color: Colors.grey),
+                  const SizedBox(width: 4),
+                  Expanded(
+                    child: Text(
+                      venue,
+                      style: TextStyle(fontSize: 13, color: Colors.grey.shade700),
+                    ),
+                  ),
+                ],
+              ),
+            ],
+            const SizedBox(height: 8),
+            Container(
+              padding: const EdgeInsets.all(8),
+              decoration: BoxDecoration(
+                color: Colors.orange.shade50,
+                borderRadius: BorderRadius.circular(4),
+                border: Border.all(color: Colors.orange.shade200),
+              ),
+              child: Row(
+                children: [
+                  Icon(Icons.info_outline, size: 16, color: Colors.orange.shade700),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      'Waiting for organizer approval • $spotsLeft spots left',
+                      style: TextStyle(
+                        fontSize: 12,
+                        color: Colors.orange.shade900,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
     );
   }
 
@@ -4591,6 +4711,71 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
         ),
         const SizedBox(height: 12),
         
+        // Pending Requests (Organizer only)
+        if (isOrganizer) ...[
+          FutureBuilder<List<Map<String, dynamic>>>(
+            future: _loadPendingRequestsForGame(reqId),
+            builder: (context, snapshot) {
+              if (!snapshot.hasData || snapshot.data!.isEmpty) {
+                return const SizedBox.shrink();
+              }
+              
+              final pendingRequests = snapshot.data!;
+              
+              return Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Divider(),
+                  const SizedBox(height: 8),
+                  Text(
+                    'Pending Requests (${pendingRequests.length})',
+                    style: const TextStyle(
+                      fontSize: 14,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  ...pendingRequests.map((request) {
+                    final userId = request['user_id'] as String?;
+                    final userName = request['user_name'] as String? ?? 'Unknown';
+                    final photoUrl = request['photo_url'] as String?;
+                    
+                    return Card(
+                      margin: const EdgeInsets.only(bottom: 8),
+                      child: ListTile(
+                        leading: CircleAvatar(
+                          backgroundImage: photoUrl != null && photoUrl.isNotEmpty
+                              ? NetworkImage(photoUrl)
+                              : null,
+                          child: photoUrl == null || photoUrl.isEmpty
+                              ? Text(userName.isNotEmpty ? userName[0].toUpperCase() : '?')
+                              : null,
+                        ),
+                        title: Text(userName),
+                        subtitle: Text('Wants to join this game'),
+                        trailing: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            IconButton(
+                              icon: const Icon(Icons.check, color: Colors.green),
+                              onPressed: () => _approveIndividualRequest(reqId, userId!),
+                            ),
+                            IconButton(
+                              icon: const Icon(Icons.close, color: Colors.red),
+                              onPressed: () => _denyIndividualRequest(reqId, userId!),
+                            ),
+                          ],
+                        ),
+                      ),
+                    );
+                  }),
+                  const SizedBox(height: 8),
+                ],
+              );
+            },
+          ),
+        ],
+        
         // Action buttons (Available/Not Available)
         if (myStatus != 'accepted' && !isOrganizer) ...[
           Row(
@@ -4833,6 +5018,118 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
           SnackBar(content: Text('Failed to cancel game: $e')),
         );
       }
+    }
+  }
+  
+  Future<List<Map<String, dynamic>>> _loadPendingRequestsForGame(String requestId) async {
+    final supa = Supabase.instance.client;
+    
+    try {
+      // Get pending attendance records
+      final pendingRows = await supa
+          .from('individual_game_attendance')
+          .select('user_id')
+          .eq('request_id', requestId)
+          .eq('status', 'pending');
+
+      if (pendingRows is! List || pendingRows.isEmpty) {
+        return [];
+      }
+
+      final userIds = pendingRows
+          .map<String>((r) => r['user_id'] as String?)
+          .where((id) => id != null)
+          .cast<String>()
+          .toList();
+
+      if (userIds.isEmpty) return [];
+
+      // Get user details
+      final users = await supa
+          .from('users')
+          .select('id, full_name, photo_url')
+          .inFilter('id', userIds);
+
+      if (users is List) {
+        return users.map((u) => {
+          'user_id': u['id'],
+          'user_name': u['full_name'] ?? 'Unknown',
+          'photo_url': u['photo_url'],
+        }).toList();
+      }
+
+      return [];
+    } catch (e) {
+      return [];
+    }
+  }
+  
+  Future<void> _approveIndividualRequest(String requestId, String userId) async {
+    try {
+      await _controller.approveIndividualGameRequest(
+        requestId: requestId,
+        userId: userId,
+        approve: true,
+      );
+      
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Request approved!')),
+      );
+      
+      // Refresh the game view
+      await _controller.loadAllMyIndividualMatches();
+      setState(() {}); // Refresh UI
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Failed to approve: $e')),
+      );
+    }
+  }
+  
+  Future<void> _denyIndividualRequest(String requestId, String userId) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: const Text('Deny Request?'),
+        content: const Text('Are you sure you want to deny this join request?'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancel'),
+          ),
+          ElevatedButton(
+            onPressed: () => Navigator.pop(context, true),
+            style: ElevatedButton.styleFrom(backgroundColor: Colors.red),
+            child: const Text('Deny'),
+          ),
+        ],
+      ),
+    );
+
+    if (confirmed != true) return;
+
+    try {
+      await _controller.approveIndividualGameRequest(
+        requestId: requestId,
+        userId: userId,
+        approve: false,
+      );
+      
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Request denied')),
+      );
+      
+      // Refresh the game view
+      await _controller.loadAllMyIndividualMatches();
+      setState(() {}); // Refresh UI
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Failed to deny: $e')),
+      );
     }
   }
   
