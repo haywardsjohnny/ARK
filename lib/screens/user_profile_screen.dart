@@ -27,6 +27,7 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
   List<Map<String, dynamic>> _teams = [];
   List<Map<String, dynamic>> _friends = [];
   List<Map<String, dynamic>> _incomingRequests = [];
+  List<Map<String, dynamic>> _friendsGroups = [];
 
   String? _effectiveUserId; // profile being viewed
   String? _currentUserId; // logged-in user
@@ -315,6 +316,35 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
         _incomingRequests = incomingRequests;
         _friendRelationship = relationship;
         _friendRequestIdForProfile = relReqId;
+        
+        // 8) Load friends groups (only for self)
+        if (_isSelf) {
+          final groupsRows = await supa
+              .from('friends_groups')
+              .select('id, name, created_by')
+              .or('created_by.eq.$userId,id.in.(select group_id from friends_group_members where user_id.eq.$userId)')
+              .order('name');
+          
+          List<Map<String, dynamic>> groups = [];
+          if (groupsRows is List) {
+            for (final g in groupsRows) {
+              // Get member count for each group
+              final memberRows = await supa
+                  .from('friends_group_members')
+                  .select('id')
+                  .eq('group_id', g['id']);
+              
+              groups.add({
+                'id': g['id'],
+                'name': g['name'],
+                'created_by': g['created_by'],
+                'member_count': memberRows is List ? memberRows.length : 0,
+              });
+            }
+          }
+          _friendsGroups = groups;
+        }
+        
         _loading = false;
       });
     } catch (e) {
@@ -1283,6 +1313,465 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
     );
   }
 
+  // ========== FRIENDS GROUPS MANAGEMENT ==========
+  
+  Future<void> _showCreateFriendsGroupDialog() async {
+    final nameController = TextEditingController();
+    final selectedFriendIds = <String>{};
+
+    await showDialog(
+      context: context,
+      builder: (context) {
+        return StatefulBuilder(
+          builder: (context, setDialogState) {
+            return AlertDialog(
+              title: const Text('Create Friends Group'),
+              content: SizedBox(
+                width: double.maxFinite,
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    TextField(
+                      controller: nameController,
+                      decoration: const InputDecoration(
+                        labelText: 'Group Name',
+                        border: OutlineInputBorder(),
+                      ),
+                    ),
+                    const SizedBox(height: 16),
+                    const Text(
+                      'Select friends to add:',
+                      style: TextStyle(fontWeight: FontWeight.bold),
+                    ),
+                    const SizedBox(height: 8),
+                    SizedBox(
+                      height: 200,
+                      child: _friends.isEmpty
+                          ? const Center(
+                              child: Text('No friends to add'),
+                            )
+                          : ListView.builder(
+                              itemCount: _friends.length,
+                              itemBuilder: (context, index) {
+                                final friend = _friends[index];
+                                final friendId = friend['id'] as String;
+                                final friendName = friend['full_name'] as String? ?? 'Unknown';
+                                final isSelected = selectedFriendIds.contains(friendId);
+
+                                return CheckboxListTile(
+                                  title: Text(friendName),
+                                  value: isSelected,
+                                  onChanged: (value) {
+                                    setDialogState(() {
+                                      if (value == true) {
+                                        selectedFriendIds.add(friendId);
+                                      } else {
+                                        selectedFriendIds.remove(friendId);
+                                      }
+                                    });
+                                  },
+                                );
+                              },
+                            ),
+                    ),
+                  ],
+                ),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.pop(context),
+                  child: const Text('Cancel'),
+                ),
+                ElevatedButton(
+                  onPressed: () async {
+                    if (nameController.text.trim().isEmpty) {
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        const SnackBar(content: Text('Please enter a group name')),
+                      );
+                      return;
+                    }
+
+                    await _createFriendsGroup(
+                      nameController.text.trim(),
+                      selectedFriendIds.toList(),
+                    );
+                    if (context.mounted) Navigator.pop(context);
+                  },
+                  child: const Text('Create'),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
+  }
+
+  Future<void> _createFriendsGroup(String name, List<String> friendIds) async {
+    final supa = Supabase.instance.client;
+    final userId = _currentUserId;
+    if (userId == null) return;
+
+    try {
+      // Create group
+      final groupResult = await supa
+          .from('friends_groups')
+          .insert({'name': name, 'created_by': userId})
+          .select('id')
+          .maybeSingle();
+
+      final groupId = groupResult?['id'] as String?;
+      if (groupId == null) {
+        throw Exception('Failed to create group');
+      }
+
+      // Add members
+      if (friendIds.isNotEmpty) {
+        final memberRecords = friendIds.map((friendId) => {
+          'group_id': groupId,
+          'user_id': friendId,
+          'added_by': userId,
+        }).toList();
+
+        await supa.from('friends_group_members').insert(memberRecords);
+      }
+
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Friends group created!')),
+      );
+      await _loadProfile();
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Failed to create group: $e')),
+      );
+    }
+  }
+
+  Future<void> _showEditFriendsGroupDialog(Map<String, dynamic> group) async {
+    final groupId = group['id'] as String;
+    final nameController = TextEditingController(text: group['name'] as String? ?? '');
+
+    await showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Edit Friends Group'),
+        content: TextField(
+          controller: nameController,
+          decoration: const InputDecoration(
+            labelText: 'Group Name',
+            border: OutlineInputBorder(),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Cancel'),
+          ),
+          ElevatedButton(
+            onPressed: () async {
+              if (nameController.text.trim().isEmpty) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(content: Text('Please enter a group name')),
+                );
+                return;
+              }
+
+              await _updateFriendsGroup(groupId, nameController.text.trim());
+              if (context.mounted) Navigator.pop(context);
+            },
+            child: const Text('Save'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _updateFriendsGroup(String groupId, String name) async {
+    final supa = Supabase.instance.client;
+    try {
+      await supa
+          .from('friends_groups')
+          .update({'name': name})
+          .eq('id', groupId);
+
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Group updated!')),
+      );
+      await _loadProfile();
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Failed to update group: $e')),
+      );
+    }
+  }
+
+  Future<void> _leaveFriendsGroup(String groupId, String groupName) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Leave Group?'),
+        content: Text('Are you sure you want to leave "$groupName"?'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancel'),
+          ),
+          ElevatedButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Leave'),
+          ),
+        ],
+      ),
+    );
+
+    if (confirmed != true) return;
+
+    final supa = Supabase.instance.client;
+    final userId = _currentUserId;
+    if (userId == null) return;
+
+    try {
+      await supa
+          .from('friends_group_members')
+          .delete()
+          .match({'group_id': groupId, 'user_id': userId});
+
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Left "$groupName"')),
+      );
+      await _loadProfile();
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Failed to leave group: $e')),
+      );
+    }
+  }
+
+  Future<void> _showFriendsGroupDetails(Map<String, dynamic> group) async {
+    final groupId = group['id'] as String;
+    final groupName = group['name'] as String? ?? 'Unnamed Group';
+    final isCreator = group['created_by'] as String? == _currentUserId;
+
+    final supa = Supabase.instance.client;
+    
+    // Load members
+    final membersRows = await supa
+        .from('friends_group_members')
+        .select('user_id')
+        .eq('group_id', groupId);
+
+    final memberIds = <String>[];
+    if (membersRows is List) {
+      for (final row in membersRows) {
+        final uid = row['user_id'] as String?;
+        if (uid != null) memberIds.add(uid);
+      }
+    }
+
+    // Load user details
+    final users = memberIds.isEmpty
+        ? <dynamic>[]
+        : await supa
+            .from('users')
+            .select('id, full_name, photo_url')
+            .inFilter('id', memberIds);
+
+    if (!mounted) return;
+
+    await showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text(groupName),
+        content: SizedBox(
+          width: double.maxFinite,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              if (users is List && users.isNotEmpty)
+                ...users.map((user) {
+                  final userId = user['id'] as String;
+                  final userName = user['full_name'] as String? ?? 'Unknown';
+                  final photoUrl = user['photo_url'] as String?;
+
+                  return ListTile(
+                    leading: CircleAvatar(
+                      backgroundImage: photoUrl != null && photoUrl.isNotEmpty
+                          ? NetworkImage(photoUrl)
+                          : null,
+                      child: photoUrl == null || photoUrl.isEmpty
+                          ? Text(userName.isNotEmpty ? userName[0].toUpperCase() : '?')
+                          : null,
+                    ),
+                    title: Text(userName),
+                    trailing: isCreator && userId != _currentUserId
+                        ? IconButton(
+                            icon: const Icon(Icons.remove_circle_outline),
+                            onPressed: () async {
+                              await supa
+                                  .from('friends_group_members')
+                                  .delete()
+                                  .match({'group_id': groupId, 'user_id': userId});
+                              if (context.mounted) {
+                                Navigator.pop(context);
+                                await _showFriendsGroupDetails(group);
+                              }
+                            },
+                          )
+                        : null,
+                  );
+                }).toList()
+              else
+                const Text('No members yet'),
+              if (isCreator) ...[
+                const Divider(),
+                ListTile(
+                  leading: const Icon(Icons.person_add),
+                  title: const Text('Add Members'),
+                  onTap: () async {
+                    Navigator.pop(context);
+                    await _showAddMembersToGroup(group);
+                  },
+                ),
+              ],
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Close'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _showAddMembersToGroup(Map<String, dynamic> group) async {
+    final groupId = group['id'] as String;
+    final selectedFriendIds = <String>{};
+
+    // Get current members
+    final supa = Supabase.instance.client;
+    final currentMembersRows = await supa
+        .from('friends_group_members')
+        .select('user_id')
+        .eq('group_id', groupId);
+
+    final currentMemberIds = <String>{};
+    if (currentMembersRows is List) {
+      for (final row in currentMembersRows) {
+        final uid = row['user_id'] as String?;
+        if (uid != null) currentMemberIds.add(uid);
+      }
+    }
+
+    // Filter out current members from friends list
+    final availableFriends = _friends.where((f) {
+      final friendId = f['id'] as String;
+      return !currentMemberIds.contains(friendId);
+    }).toList();
+
+    if (!mounted) return;
+
+    await showDialog(
+      context: context,
+      builder: (context) {
+        return StatefulBuilder(
+          builder: (context, setDialogState) {
+            return AlertDialog(
+              title: const Text('Add Members'),
+              content: SizedBox(
+                width: double.maxFinite,
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    if (availableFriends.isEmpty)
+                      const Text('All friends are already in this group')
+                    else
+                      SizedBox(
+                        height: 200,
+                        child: ListView.builder(
+                          itemCount: availableFriends.length,
+                          itemBuilder: (context, index) {
+                            final friend = availableFriends[index];
+                            final friendId = friend['id'] as String;
+                            final friendName = friend['full_name'] as String? ?? 'Unknown';
+                            final isSelected = selectedFriendIds.contains(friendId);
+
+                            return CheckboxListTile(
+                              title: Text(friendName),
+                              value: isSelected,
+                              onChanged: (value) {
+                                setDialogState(() {
+                                  if (value == true) {
+                                    selectedFriendIds.add(friendId);
+                                  } else {
+                                    selectedFriendIds.remove(friendId);
+                                  }
+                                });
+                              },
+                            );
+                          },
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.pop(context),
+                  child: const Text('Cancel'),
+                ),
+                ElevatedButton(
+                  onPressed: selectedFriendIds.isEmpty
+                      ? null
+                      : () async {
+                          await _addMembersToGroup(groupId, selectedFriendIds.toList());
+                          if (context.mounted) Navigator.pop(context);
+                        },
+                  child: const Text('Add'),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
+  }
+
+  Future<void> _addMembersToGroup(String groupId, List<String> friendIds) async {
+    final supa = Supabase.instance.client;
+    final userId = _currentUserId;
+    if (userId == null) return;
+
+    try {
+      final memberRecords = friendIds.map((friendId) => {
+        'group_id': groupId,
+        'user_id': friendId,
+        'added_by': userId,
+      }).toList();
+
+      await supa.from('friends_group_members').insert(memberRecords);
+
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Added ${friendIds.length} member(s)')),
+      );
+      await _loadProfile();
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Failed to add members: $e')),
+      );
+    }
+  }
+
   /// Friend action bar when viewing someone else's profile.
   Widget _buildFriendHeaderAction() {
     if (_isSelf || _currentUserId == null || _effectiveUserId == null) {
@@ -1807,6 +2296,96 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
                             ),
 
                           const SizedBox(height: 24),
+
+                          // Friends Groups section (self only)
+                          if (_isSelf) ...[
+                            Row(
+                              mainAxisAlignment:
+                                  MainAxisAlignment.spaceBetween,
+                              children: [
+                                Text(
+                                  'Friends Groups',
+                                  style: Theme.of(context)
+                                      .textTheme
+                                      .titleMedium
+                                      ?.copyWith(
+                                        fontWeight: FontWeight.bold,
+                                      ),
+                                ),
+                                TextButton.icon(
+                                  onPressed: _showCreateFriendsGroupDialog,
+                                  icon: const Icon(
+                                    Icons.group_add,
+                                    size: 18,
+                                  ),
+                                  label: const Text('Create Group'),
+                                ),
+                              ],
+                            ),
+                            const SizedBox(height: 8),
+                            if (_friendsGroups.isEmpty)
+                              const Align(
+                                alignment: Alignment.centerLeft,
+                                child: Text(
+                                  'No friends groups yet. Create one to easily invite multiple friends to games!',
+                                  style: TextStyle(
+                                    fontSize: 13,
+                                    color: Colors.grey,
+                                  ),
+                                ),
+                              )
+                            else
+                              Column(
+                                children: _friendsGroups.map((group) {
+                                  final groupId = group['id'] as String;
+                                  final groupName = group['name'] as String? ?? 'Unnamed Group';
+                                  final memberCount = group['member_count'] as int? ?? 0;
+                                  final isCreator = group['created_by'] as String? == _effectiveUserId;
+
+                                  return Card(
+                                    margin: const EdgeInsets.symmetric(
+                                      vertical: 4,
+                                    ),
+                                    child: ListTile(
+                                      leading: CircleAvatar(
+                                        backgroundColor: Colors.blue.shade100,
+                                        child: Icon(
+                                          Icons.group,
+                                          color: Colors.blue.shade700,
+                                        ),
+                                      ),
+                                      title: Text(
+                                        groupName,
+                                        style: const TextStyle(
+                                          fontWeight: FontWeight.w600,
+                                        ),
+                                      ),
+                                      subtitle: Text(
+                                        '$memberCount ${memberCount == 1 ? 'member' : 'members'}',
+                                      ),
+                                      trailing: Row(
+                                        mainAxisSize: MainAxisSize.min,
+                                        children: [
+                                          IconButton(
+                                            icon: const Icon(Icons.edit),
+                                            tooltip: 'Edit group',
+                                            onPressed: () => _showEditFriendsGroupDialog(group),
+                                          ),
+                                          if (!isCreator)
+                                            IconButton(
+                                              icon: const Icon(Icons.exit_to_app),
+                                              tooltip: 'Leave group',
+                                              onPressed: () => _leaveFriendsGroup(groupId, groupName),
+                                            ),
+                                        ],
+                                      ),
+                                      onTap: () => _showFriendsGroupDetails(group),
+                                    ),
+                                  );
+                                }).toList(),
+                              ),
+                            const SizedBox(height: 24),
+                          ],
 
                           // Teams section (grouped by sport)
                           Row(
