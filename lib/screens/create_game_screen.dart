@@ -934,9 +934,18 @@ class _IndividualsFormState extends State<_IndividualsForm> {
   TimeOfDay? _selectedTime;
   String? _venueText;
   String? _gameDetails;
-  String _visibility = 'public'; // 'friends_only' or 'public'
+  String _visibility = 'public'; // 'all_friends', 'friends_group', 'public'
+  String? _selectedFriendsGroupId;
+  List<Map<String, dynamic>> _friendsGroups = [];
+  bool _loadingGroups = false;
   String? _errorText;
   bool _saving = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadFriendsGroups();
+  }
 
   String _displaySport(String key) {
     final withSpaces = key.replaceAll('_', ' ');
@@ -945,6 +954,39 @@ class _IndividualsFormState extends State<_IndividualsForm> {
         .map((w) =>
             w.isEmpty ? w : w[0].toUpperCase() + w.substring(1).toLowerCase())
         .join(' ');
+  }
+
+  Future<void> _loadFriendsGroups() async {
+    final supa = Supabase.instance.client;
+    final userId = widget.controller.currentUserId;
+    if (userId == null) return;
+
+    setState(() => _loadingGroups = true);
+
+    try {
+      // Get groups created by user or groups user is member of
+      final groups = await supa
+          .from('friends_groups')
+          .select('id, name, created_by')
+          .or('created_by.eq.$userId,id.in.(select group_id from friends_group_members where user_id.eq.$userId)')
+          .order('name');
+
+      if (groups is List) {
+        setState(() {
+          _friendsGroups = groups.map((g) => Map<String, dynamic>.from(g)).toList();
+        });
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Failed to load friends groups: $e')),
+        );
+      }
+    } finally {
+      if (mounted) {
+        setState(() => _loadingGroups = false);
+      }
+    }
   }
 
   Future<void> _submit() async {
@@ -958,6 +1000,12 @@ class _IndividualsFormState extends State<_IndividualsForm> {
     }
     if (_selectedTime == null) {
       setState(() => _errorText = 'Please select time.');
+      return;
+    }
+    
+    // Validate friends group selection
+    if (_visibility == 'friends_group' && _selectedFriendsGroupId == null) {
+      setState(() => _errorText = 'Please select a friends group.');
       return;
     }
 
@@ -990,6 +1038,9 @@ class _IndividualsFormState extends State<_IndividualsForm> {
       final startUtc = startLocal.toUtc().toIso8601String();
       final endUtc = endLocal.toUtc().toIso8601String();
 
+      // Set radius: 100 miles for public, 75 for others
+      final radiusMiles = _visibility == 'public' ? 100 : 75;
+
       final insertMap = <String, dynamic>{
         'creator_id': userId,
         'created_by': userId,
@@ -997,7 +1048,7 @@ class _IndividualsFormState extends State<_IndividualsForm> {
         'match_type': 'pickup',
         'sport': _selectedSport,
         'zip_code': widget.controller.baseZip,
-        'radius_miles': 75, // Required field - default radius for all match types
+        'radius_miles': radiusMiles,
         'num_players': _numPlayers,
         'proficiency_level': _skillLevel,
         'status': 'open',
@@ -1015,8 +1066,49 @@ class _IndividualsFormState extends State<_IndividualsForm> {
       if (_gameDetails != null && _gameDetails!.trim().isNotEmpty) {
         insertMap['details'] = _gameDetails!.trim();
       }
+      
+      if (_visibility == 'friends_group' && _selectedFriendsGroupId != null) {
+        insertMap['friends_group_id'] = _selectedFriendsGroupId;
+      }
 
-      await supa.from('instant_match_requests').insert(insertMap);
+      final result = await supa.from('instant_match_requests').insert(insertMap).select('id').maybeSingle();
+      final requestId = result?['id'] as String?;
+      
+      if (requestId == null) {
+        throw Exception('Failed to create game');
+      }
+
+      // Create attendance record for organizer (auto-accepted)
+      await supa.from('individual_game_attendance').insert({
+        'request_id': requestId,
+        'user_id': userId,
+        'status': 'accepted',
+      });
+
+      // If friends_group visibility, create pending attendance for all group members
+      if (_visibility == 'friends_group' && _selectedFriendsGroupId != null) {
+        final groupMembers = await supa
+            .from('friends_group_members')
+            .select('user_id')
+            .eq('group_id', _selectedFriendsGroupId);
+        
+        if (groupMembers is List && groupMembers.isNotEmpty) {
+          final attendanceRecords = (groupMembers as List).map((member) {
+            final memberId = member['user_id'] as String?;
+            if (memberId == null || memberId == userId) return null; // Skip organizer
+            return {
+              'request_id': requestId,
+              'user_id': memberId,
+              'status': 'pending',
+              'invited_by': userId,
+            };
+          }).where((r) => r != null).toList();
+          
+          if (attendanceRecords.isNotEmpty) {
+            await supa.from('individual_game_attendance').insert(attendanceRecords);
+          }
+        }
+      }
 
       if (!mounted) return;
       Navigator.of(context).pop();
@@ -1204,19 +1296,105 @@ class _IndividualsFormState extends State<_IndividualsForm> {
             ),
             const SizedBox(height: 8),
             RadioListTile<String>(
-              title: const Text('Friends only'),
-              subtitle: const Text('Only your friends can see this game'),
-              value: 'friends_only',
+              title: const Text('All Friends'),
+              subtitle: const Text('Visible to all your friends. They can invite their friends too.'),
+              value: 'all_friends',
               groupValue: _visibility,
-              onChanged: (v) =>
-                  setState(() => _visibility = v ?? 'friends_only'),
+              onChanged: (v) {
+                setState(() {
+                  _visibility = v ?? 'all_friends';
+                  _selectedFriendsGroupId = null;
+                });
+              },
             ),
             RadioListTile<String>(
+              title: const Text('Friends Group'),
+              subtitle: const Text('Send to a specific friends group'),
+              value: 'friends_group',
+              groupValue: _visibility,
+              onChanged: (v) {
+                setState(() {
+                  _visibility = v ?? 'friends_group';
+                  if (_friendsGroups.isEmpty) {
+                    _selectedFriendsGroupId = null;
+                  }
+                });
+              },
+            ),
+            // Friends Group Dropdown
+            if (_visibility == 'friends_group') ...[
+              const SizedBox(height: 8),
+              if (_loadingGroups)
+                const Padding(
+                  padding: EdgeInsets.all(16),
+                  child: Center(child: CircularProgressIndicator()),
+                )
+              else if (_friendsGroups.isEmpty)
+                Container(
+                  padding: const EdgeInsets.all(16),
+                  decoration: BoxDecoration(
+                    color: Colors.orange.shade50,
+                    borderRadius: BorderRadius.circular(8),
+                    border: Border.all(color: Colors.orange.shade200),
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        'You currently do not have any friends groups.',
+                        style: TextStyle(
+                          color: Colors.orange.shade900,
+                          fontWeight: FontWeight.w500,
+                        ),
+                      ),
+                      const SizedBox(height: 8),
+                      InkWell(
+                        onTap: () {
+                          Navigator.of(context).pushNamed('/profile').then((_) {
+                            _loadFriendsGroups(); // Reload groups when returning
+                          });
+                        },
+                        child: Text(
+                          'Create Friends Group',
+                          style: TextStyle(
+                            color: Colors.orange.shade700,
+                            fontWeight: FontWeight.w600,
+                            decoration: TextDecoration.underline,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                )
+              else
+                DropdownButtonFormField<String>(
+                  value: _selectedFriendsGroupId,
+                  decoration: const InputDecoration(
+                    labelText: 'Select Friends Group',
+                    border: OutlineInputBorder(),
+                  ),
+                  items: _friendsGroups.map((group) {
+                    return DropdownMenuItem<String>(
+                      value: group['id'] as String,
+                      child: Text(group['name'] as String? ?? 'Unnamed Group'),
+                    );
+                  }).toList(),
+                  onChanged: (value) {
+                    setState(() => _selectedFriendsGroupId = value);
+                  },
+                ),
+            ],
+            RadioListTile<String>(
               title: const Text('Public'),
-              subtitle: const Text('Visible to all players'),
+              subtitle: const Text('Visible to all players within 100 miles'),
               value: 'public',
               groupValue: _visibility,
-              onChanged: (v) => setState(() => _visibility = v ?? 'public'),
+              onChanged: (v) {
+                setState(() {
+                  _visibility = v ?? 'public';
+                  _selectedFriendsGroupId = null;
+                });
+              },
             ),
             const SizedBox(height: 24),
 
