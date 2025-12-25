@@ -23,6 +23,7 @@ class _TeamProfileScreenState extends State<TeamProfileScreen> {
   List<Map<String, dynamic>> _members = [];
   bool _isAdmin = false; // admin or (legacy) captain
   List<Map<String, dynamic>> _joinRequests = [];
+  int _teamNotificationRadius = 50; // Default 50 miles
 
   String? _currentUserId;
   bool _isMember = false;
@@ -41,11 +42,11 @@ class _TeamProfileScreenState extends State<TeamProfileScreen> {
     final user = supa.auth.currentUser;
 
     try {
-      // 1) Load team details
+      // 1) Load team details (including notification preferences)
       final teamRow = await supa
           .from('teams')
           .select(
-            'id, name, sport, description, proficiency_level, zip_code, team_number, created_by',
+            'id, name, sport, description, proficiency_level, zip_code, team_number, created_by, notification_radius_miles',
           )
           .eq('id', widget.teamId)
           .maybeSingle();
@@ -207,6 +208,10 @@ class _TeamProfileScreenState extends State<TeamProfileScreen> {
         _currentUserId = currentUserId;
         _isMember = isMember;
         _hasPendingJoinRequest = hasPendingJoinRequest;
+        
+        // Load notification preferences
+        _teamNotificationRadius = (teamRow['notification_radius_miles'] as int?) ?? 50;
+        
         _loading = false;
       });
     } catch (e) {
@@ -401,9 +406,6 @@ class _TeamProfileScreenState extends State<TeamProfileScreen> {
                               Text(
                                 'Proficiency: ${_team!['proficiency_level'] ?? '-'}',
                               ),
-                              Text(
-                                'ZIP: ${_team!['zip_code'] ?? '-'}',
-                              ),
                               if (_team!['team_number'] != null)
                                 Text(
                                   'Team ID: #${_team!['team_number']}',
@@ -511,7 +513,6 @@ class _TeamProfileScreenState extends State<TeamProfileScreen> {
                                 crossAxisAlignment:
                                     CrossAxisAlignment.start,
                                 children: [
-                                  if (zip != null) Text('ZIP: $zip'),
                                   if (message != null &&
                                       message.trim().isNotEmpty)
                                     Text(
@@ -590,7 +591,7 @@ class _TeamProfileScreenState extends State<TeamProfileScreen> {
                               ),
                               title: Text(name),
                               subtitle:
-                                  zip != null ? Text('ZIP: $zip') : null,
+                                  null,
                               trailing: _buildRoleChip(role),
 
                               // 👇 Tap member → open their profile
@@ -606,9 +607,118 @@ class _TeamProfileScreenState extends State<TeamProfileScreen> {
                             ),
                           );
                         }).toList(),
+                      
+                      // Notification Preferences Section (admin only)
+                      if (_isAdmin) ...[
+                        const SizedBox(height: 24),
+                        _buildTeamNotificationPreferencesSection(),
+                      ],
                     ],
                   ),
                 ),
     );
+  }
+
+  Widget _buildTeamNotificationPreferencesSection() {
+    return Card(
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(16),
+      ),
+      elevation: 3,
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                const Icon(Icons.notifications_active, color: Colors.orange),
+                const SizedBox(width: 8),
+                const Text(
+                  'Team Notification Preferences',
+                  style: TextStyle(
+                    fontSize: 18,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            Text(
+              'Sport: ${_team?['sport'] ?? 'N/A'}',
+              style: TextStyle(
+                fontSize: 12,
+                color: Colors.grey.shade600,
+                fontStyle: FontStyle.italic,
+              ),
+            ),
+            const SizedBox(height: 16),
+            
+            // Notification Radius
+            Text(
+              'Notification Radius: $_teamNotificationRadius miles',
+              style: const TextStyle(
+                fontSize: 14,
+                fontWeight: FontWeight.w500,
+              ),
+            ),
+            const SizedBox(height: 8),
+            Slider(
+              value: _teamNotificationRadius.toDouble(),
+              min: 5,
+              max: 100,
+              divisions: 19,
+              label: '$_teamNotificationRadius miles',
+              onChanged: (value) {
+                setState(() {
+                  _teamNotificationRadius = value.round();
+                });
+              },
+            ),
+            const SizedBox(height: 8),
+            Text(
+              'Your team will be notified about ${_team?['sport'] ?? 'team'} games within $_teamNotificationRadius miles.',
+              style: TextStyle(
+                fontSize: 12,
+                color: Colors.grey.shade600,
+              ),
+            ),
+            const SizedBox(height: 16),
+            
+            // Save button
+            ElevatedButton.icon(
+              onPressed: _saveTeamNotificationPreferences,
+              icon: const Icon(Icons.save),
+              label: const Text('Save Preferences'),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: Colors.orange,
+                foregroundColor: Colors.white,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future<void> _saveTeamNotificationPreferences() async {
+    final supa = Supabase.instance.client;
+    if (widget.teamId.isEmpty) return;
+
+    try {
+      await supa.from('teams').update({
+        'notification_radius_miles': _teamNotificationRadius,
+      }).eq('id', widget.teamId);
+
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Team notification preferences saved!')),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Failed to save preferences: $e')),
+      );
+    }
   }
 }

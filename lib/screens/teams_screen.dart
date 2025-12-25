@@ -242,8 +242,7 @@ class _TeamsScreenState extends State<TeamsScreen> {
                           title: Text(t['name'] as String? ?? ''),
                           subtitle: Text(
                             '${t['sport'] ?? ''} • '
-                            '${t['proficiency_level'] ?? 'N/A'} • '
-                            'ZIP ${t['zip_code'] ?? '-'}',
+                            '${t['proficiency_level'] ?? 'N/A'}',
                           ),
                           onTap: () {
                             Navigator.of(context).push(
@@ -313,7 +312,6 @@ class _TeamManagementScreenState extends State<TeamManagementScreen> {
 
   final _nameCtrl = TextEditingController();
   final _descCtrl = TextEditingController();
-  final _zipCtrl = TextEditingController();
   String _proficiency = 'Recreational';
 
   @override
@@ -326,7 +324,6 @@ class _TeamManagementScreenState extends State<TeamManagementScreen> {
   void dispose() {
     _nameCtrl.dispose();
     _descCtrl.dispose();
-    _zipCtrl.dispose();
     super.dispose();
   }
 
@@ -428,7 +425,6 @@ class _TeamManagementScreenState extends State<TeamManagementScreen> {
 
       _nameCtrl.text = teamRow['name'] as String? ?? '';
       _descCtrl.text = teamRow['description'] as String? ?? '';
-      _zipCtrl.text = teamRow['zip_code'] as String? ?? '';
 
       // normalize DB value into safe dropdown value
       _proficiency =
@@ -457,7 +453,6 @@ class _TeamManagementScreenState extends State<TeamManagementScreen> {
       await supa.from('teams').update({
         'name': _nameCtrl.text.trim(),
         'description': _descCtrl.text.trim(),
-        'zip_code': _zipCtrl.text.trim(),
         'proficiency_level': _proficiency,
       }).eq('id', widget.teamId);
 
@@ -591,8 +586,6 @@ class _TeamManagementScreenState extends State<TeamManagementScreen> {
   Future<void> _addMember() async {
     final supa = Supabase.instance.client;
     final nameCtrl = TextEditingController();
-    final zipCtrl = TextEditingController();
-
     List<Map<String, dynamic>> results = [];
     bool searching = false;
 
@@ -604,19 +597,15 @@ class _TeamManagementScreenState extends State<TeamManagementScreen> {
           builder: (ctx, setSheetState) {
             Future<void> doSearch() async {
               final name = nameCtrl.text.trim();
-              final zip = zipCtrl.text.trim();
 
               setSheetState(() => searching = true);
               try {
                 var query = supa
                     .from('users')
-                    .select('id, full_name, photo_url, base_zip_code');
+                    .select('id, full_name, photo_url');
 
                 if (name.isNotEmpty) {
                   query = query.ilike('full_name', '%$name%');
-                }
-                if (zip.isNotEmpty) {
-                  query = query.eq('base_zip_code', zip);
                 }
 
                 final rows = await query;
@@ -703,15 +692,6 @@ class _TeamManagementScreenState extends State<TeamManagementScreen> {
                     ),
                   ),
                   const SizedBox(height: 8),
-                  TextField(
-                    controller: zipCtrl,
-                    decoration: const InputDecoration(
-                      labelText: 'ZIP (optional)',
-                      prefixIcon: Icon(Icons.location_on_outlined),
-                    ),
-                    keyboardType: TextInputType.number,
-                  ),
-                  const SizedBox(height: 8),
                   Align(
                     alignment: Alignment.centerRight,
                     child: ElevatedButton.icon(
@@ -725,7 +705,7 @@ class _TeamManagementScreenState extends State<TeamManagementScreen> {
                     const Align(
                       alignment: Alignment.centerLeft,
                       child: Text(
-                        'Search players by name and optional ZIP to add to this team.',
+                        'Search players by name to add to this team.',
                         style: TextStyle(
                           fontSize: 12,
                           color: Colors.grey,
@@ -745,8 +725,6 @@ class _TeamManagementScreenState extends State<TeamManagementScreen> {
                                 final name =
                                     r['full_name'] as String? ?? 'Unknown';
                                 final photoUrl = r['photo_url'] as String?;
-                                final zip = r['base_zip_code'] as String?;
-
                                 return Card(
                                   child: ListTile(
                                     leading: CircleAvatar(
@@ -764,8 +742,7 @@ class _TeamManagementScreenState extends State<TeamManagementScreen> {
                                           : null,
                                     ),
                                     title: Text(name),
-                                    subtitle:
-                                        zip != null ? Text('ZIP: $zip') : null,
+                                    subtitle: null,
                                     trailing: IconButton(
                                       icon:
                                           const Icon(Icons.person_add_alt_1),
@@ -840,14 +817,6 @@ class _TeamManagementScreenState extends State<TeamManagementScreen> {
                             maxLines: 3,
                           ),
                           const SizedBox(height: 8),
-                          TextField(
-                            controller: _zipCtrl,
-                            decoration: const InputDecoration(
-                              labelText: 'ZIP code',
-                            ),
-                            keyboardType: TextInputType.number,
-                          ),
-                          const SizedBox(height: 8),
                           DropdownButtonFormField<String>(
                             value: _proficiency,
                             decoration: const InputDecoration(
@@ -907,7 +876,6 @@ class _TeamManagementScreenState extends State<TeamManagementScreen> {
                                 final name =
                                     m['full_name'] as String? ?? 'Unknown';
                                 final photoUrl = m['photo_url'] as String?;
-                                final zip = m['base_zip_code'] as String?;
                                 final role = (m['role'] as String?) ?? 'member';
                                 final userId = m['user_id'] as String;
 
@@ -933,8 +901,7 @@ class _TeamManagementScreenState extends State<TeamManagementScreen> {
                                           : null,
                                     ),
                                     title: Text(name),
-                                    subtitle:
-                                        zip != null ? Text('ZIP: $zip') : null,
+                                    subtitle: null,
                                     trailing: Wrap(
                                       spacing: 4,
                                       children: [

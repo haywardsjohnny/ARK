@@ -28,10 +28,14 @@ class HomeTabsController extends ChangeNotifier {
   List<Map<String, dynamic>> friendsOnlyIndividualGames = [];
   List<Map<String, dynamic>> pendingAvailabilityTeamMatches = [];
   List<Map<String, dynamic>> pendingIndividualGames = []; // Individual games with pending requests
+  List<Map<String, dynamic>> awaitingOpponentConfirmationGames = []; // Team games awaiting opponent acceptance
+  List<Map<String, dynamic>> publicPendingGames = []; // Public games matching notification preferences
   bool loadingConfirmedMatches = false;
   bool loadingAllMatches = false;
   bool loadingIndividualMatches = false;
   bool loadingDiscoveryMatches = false;
+  bool loadingAwaitingOpponentGames = false;
+  bool myGamesTabLoadInitiated = false; // Prevent infinite loops
 
   String? lastError;
 
@@ -58,6 +62,8 @@ class HomeTabsController extends ChangeNotifier {
       await loadFriendsOnlyIndividualGames();
       await loadMyPendingAvailabilityMatches();
       await loadPendingIndividualGames();
+      await loadAwaitingOpponentConfirmationGames();
+      await loadPublicPendingGames();
       setupRealtimeAttendance();
     } catch (e) {
       lastError = 'Init failed: $e';
@@ -84,6 +90,7 @@ class HomeTabsController extends ChangeNotifier {
           callback: (_) async {
             await loadConfirmedTeamMatches();
             await loadMyPendingAvailabilityMatches();
+            // Don't reload awaiting games here - they're only affected by invite acceptance, not attendance changes
             notifyListeners();
           },
         )
@@ -235,6 +242,9 @@ class HomeTabsController extends ChangeNotifier {
   Future<void> loadAllMyMatches() async {
     final uid = currentUserId;
     if (uid == null) return;
+    
+    // Prevent multiple simultaneous loads
+    if (loadingAllMatches) return;
 
     loadingAllMatches = true;
     lastError = null;
@@ -277,6 +287,9 @@ class HomeTabsController extends ChangeNotifier {
   Future<void> loadAllMyIndividualMatches() async {
     final uid = currentUserId;
     if (uid == null) return;
+    
+    // Prevent multiple simultaneous loads
+    if (loadingIndividualMatches) return;
 
     loadingIndividualMatches = true;
     lastError = null;
@@ -292,22 +305,55 @@ class HomeTabsController extends ChangeNotifier {
           .eq('user_id', uid)
           .order('created_at', ascending: false);
 
-      if (attendanceRows is! List || attendanceRows.isEmpty) {
+      if (kDebugMode) {
+        print('[DEBUG] loadAllMyIndividualMatches: Found ${attendanceRows is List ? attendanceRows.length : 0} attendance records');
+      }
+
+      // Also get games created by the user (even if no attendance record exists)
+      final createdGames = await supa
+          .from('instant_match_requests')
+          .select('id')
+          .eq('created_by', uid)
+          .neq('mode', 'team_vs_team')
+          .neq('status', 'cancelled');
+
+      final Set<String> allRequestIds = {};
+      
+      if (attendanceRows is List) {
+        for (final row in attendanceRows) {
+          final reqId = row['request_id'] as String?;
+          if (reqId != null) {
+            allRequestIds.add(reqId);
+          }
+        }
+      }
+      
+      if (createdGames is List) {
+        for (final game in createdGames) {
+          final gameId = game['id'] as String?;
+          if (gameId != null) {
+            allRequestIds.add(gameId);
+          }
+        }
+      }
+
+      if (kDebugMode) {
+        print('[DEBUG] loadAllMyIndividualMatches: Total unique game IDs: ${allRequestIds.length}');
+      }
+
+      if (allRequestIds.isEmpty) {
         allMyIndividualMatches = [];
         loadingIndividualMatches = false;
         notifyListeners();
         return;
       }
 
-      final requestIds = attendanceRows
-          .map<String>((r) => r['request_id'] as String)
-          .toSet()
-          .toList();
+      final requestIds = allRequestIds.toList();
 
       // Load game details
       final games = await supa
           .from('instant_match_requests')
-          .select('id, sport, mode, zip_code, start_time_1, start_time_2, venue, details, status, created_by, num_players, visibility, friends_group_id, chat_enabled, chat_mode')
+          .select('id, sport, mode, zip_code, start_time_1, start_time_2, venue, details, status, created_by, num_players, visibility, friends_group_id, chat_enabled, chat_mode, created_at')
           .inFilter('id', requestIds)
           .neq('mode', 'team_vs_team')
           .order('created_at', ascending: false);
@@ -341,11 +387,22 @@ class HomeTabsController extends ChangeNotifier {
 
         // Get attendance status for each game
         final Map<String, String> attendanceStatusByRequest = {};
-        for (final row in attendanceRows) {
-          final reqId = row['request_id'] as String?;
-          final status = (row['status'] as String?)?.toLowerCase() ?? 'pending';
-          if (reqId != null) {
-            attendanceStatusByRequest[reqId] = status;
+        if (attendanceRows is List) {
+          for (final row in attendanceRows) {
+            final reqId = row['request_id'] as String?;
+            final status = (row['status'] as String?)?.toLowerCase() ?? 'pending';
+            if (reqId != null) {
+              attendanceStatusByRequest[reqId] = status;
+            }
+          }
+        }
+        
+        // For games created by user without attendance record, set status to 'accepted'
+        for (final game in games) {
+          final gameId = game['id'] as String?;
+          final createdBy = game['created_by'] as String?;
+          if (gameId != null && createdBy == uid && !attendanceStatusByRequest.containsKey(gameId)) {
+            attendanceStatusByRequest[gameId] = 'accepted';
           }
         }
 
@@ -376,8 +433,14 @@ class HomeTabsController extends ChangeNotifier {
           final startTime2 = game['start_time_2'];
           DateTime? startDt;
           DateTime? endDt;
-          if (startTime1 is String) startDt = DateTime.tryParse(startTime1);
-          if (startTime2 is String) endDt = DateTime.tryParse(startTime2);
+          if (startTime1 is String) {
+            final parsed = DateTime.tryParse(startTime1);
+            startDt = parsed?.toLocal();
+          }
+          if (startTime2 is String) {
+            final parsed = DateTime.tryParse(startTime2);
+            endDt = parsed?.toLocal();
+          }
 
           final createdBy = game['created_by'] as String?;
           final numPlayers = game['num_players'] as int? ?? 4;
@@ -428,8 +491,33 @@ class HomeTabsController extends ChangeNotifier {
   bool isOrganizerForMatch(Map<String, dynamic> match) {
     final uid = currentUserId;
     if (uid == null) return false;
+    
+    // Check if user is the creator (created_by or creator_id)
     final createdBy = match['created_by'] as String?;
-    return createdBy == uid;
+    final creatorId = match['creator_id'] as String?;
+    if (createdBy == uid || creatorId == uid) {
+      if (kDebugMode) {
+        print('[DEBUG] isOrganizerForMatch: User is creator (created_by=$createdBy, creator_id=$creatorId)');
+      }
+      return true;
+    }
+    
+    // For team games, also check if user is an admin of the creating team
+    final teamId = match['team_id'] as String?;
+    if (teamId != null) {
+      final isAdmin = _adminTeamIds.contains(teamId);
+      if (kDebugMode) {
+        print('[DEBUG] isOrganizerForMatch: teamId=$teamId, isAdmin=$isAdmin, adminTeamIds=$_adminTeamIds');
+      }
+      if (isAdmin) {
+        return true;
+      }
+    }
+    
+    if (kDebugMode) {
+      print('[DEBUG] isOrganizerForMatch: User is NOT organizer. created_by=$createdBy, creator_id=$creatorId, teamId=$teamId');
+    }
+    return false;
   }
 
   /// ✅ Rule: Send reminder only if Admin in either team
@@ -458,6 +546,8 @@ class HomeTabsController extends ChangeNotifier {
 
       await loadAdminTeamsAndInvites();
       await loadConfirmedTeamMatches();
+      await loadAwaitingOpponentConfirmationGames();
+      await loadAllMyMatches(); // Refresh confirmed games
     } catch (e) {
       lastError = 'approveInvite failed: $e';
       notifyListeners();
@@ -471,8 +561,18 @@ class HomeTabsController extends ChangeNotifier {
 
     try {
       final inviteId = invite['id'] as String;
+      final requestId = invite['request_id'] as String?;
       await repo.denyInvite(inviteId: inviteId, deniedBy: uid);
       await loadAdminTeamsAndInvites();
+      // Also reload awaiting opponent confirmation games to remove denied games
+      // This ensures team members don't see games their team has denied
+      await loadAwaitingOpponentConfirmationGames();
+      
+      // Also remove from awaiting games list immediately if present
+      if (requestId != null) {
+        awaitingOpponentConfirmationGames.removeWhere((m) => m['request_id'] == requestId);
+        notifyListeners();
+      }
     } catch (e) {
       lastError = 'denyInvite failed: $e';
       notifyListeners();
@@ -493,7 +593,12 @@ class HomeTabsController extends ChangeNotifier {
 
     try {
       await repo.cancelGameSoft(requestId: requestId, cancelledBy: uid);
+      // Remove from confirmed matches
       confirmedTeamMatches.removeWhere((m) => m['request_id'] == requestId);
+      // Remove from awaiting opponent confirmation games
+      awaitingOpponentConfirmationGames.removeWhere((m) => m['request_id'] == requestId);
+      // Remove from all matches
+      allMyMatches.removeWhere((m) => m['request_id'] == requestId);
       notifyListeners();
     } catch (e) {
       lastError = 'cancelGameForBothTeams failed: $e';
@@ -561,13 +666,22 @@ class HomeTabsController extends ChangeNotifier {
   Future<void> loadDiscoveryPickupMatches() async {
     final uid = currentUserId;
     if (uid == null) return;
-    
+
     loadingDiscoveryMatches = true;
     lastError = null;
     notifyListeners();
-    
+
     try {
       final supa = Supabase.instance.client;
+      
+      // Get user's current ZIP code for distance calculation
+      final userZipCode = await LocationService.getCurrentZipCode();
+      if (kDebugMode) {
+        print('[DEBUG] User ZIP code for discovery: $userZipCode');
+        if (userZipCode == null) {
+          print('[DEBUG] ⚠️  WARNING: User ZIP code is null - distance calculation will be skipped');
+        }
+      }
 
       // Get friend ids for friends-only visibility
       final friendRows = await supa
@@ -610,12 +724,13 @@ class HomeTabsController extends ChangeNotifier {
       
       // Load ALL public matches (individual AND team matches)
       // Team matches can only be accepted by admins of teams in the same sport
+      // Note: We exclude user's own matches from discovery, but they should see them in "My Games"
       final matches = await supa
           .from('instant_match_requests')
           .select(
-            'id, sport, zip_code, mode, start_time_1, start_time_2, venue, status, created_by, num_players, created_at, visibility, is_public, friends_group_id')
+            'id, sport, zip_code, mode, start_time_1, start_time_2, venue, status, created_by, num_players, created_at, visibility, is_public, friends_group_id, proficiency_level')
           .neq('status', 'cancelled')
-          .neq('created_by', uid) // Don't show own matches
+          .neq('created_by', uid) // Don't show own matches in discovery
           .order('created_at', ascending: false)
           .limit(100);
       
@@ -624,6 +739,10 @@ class HomeTabsController extends ChangeNotifier {
 
         if (kDebugMode) {
           print('🔍 Discovery: Found ${matches.length} total matches');
+          // Debug: Print visibility and is_public for each match
+          for (final m in matches.take(5)) {
+            print('🔍 Match: visibility=${m['visibility']}, is_public=${m['is_public']}, mode=${m['mode']}, sport=${m['sport']}');
+          }
         }
 
         for (final m in matches) {
@@ -638,21 +757,14 @@ class HomeTabsController extends ChangeNotifier {
           bool canSee = false;
           final friendsGroupId = m['friends_group_id'] as String?;
           
+          // Friends Group games should NEVER appear in Discover tab
+          // They should only appear in Pending Approval and My Games
+          if (visibility == 'friends_group') {
+            canSee = false; // Explicitly exclude friends_group games from Discover
+          }
           // Public games - visible to all within radius
-          if (visibility == 'public' || isPublic == true) {
+          else if (visibility == 'public' || isPublic == true) {
             canSee = true;
-          }
-          // All Friends - visible to friends of creator
-          else if (visibility == 'all_friends') {
-            if (creatorId != null && friendIds.contains(creatorId)) {
-              canSee = true;
-            }
-          }
-          // Friends Group - only visible to members of that group
-          else if (visibility == 'friends_group') {
-            if (friendsGroupId != null && userGroupIds.contains(friendsGroupId)) {
-              canSee = true;
-            }
           }
           // Legacy friends_only (for backward compatibility)
           else if (visibility == 'friends_only') {
@@ -671,6 +783,9 @@ class HomeTabsController extends ChangeNotifier {
 
           if (kDebugMode) {
             print('🎮 Match: ${sport.toUpperCase()} | Mode: $mode | Visibility: $visibility | isPublic: $isPublic | canSee: $canSee | ID: ${matchId?.substring(0, 8)}');
+            if (!canSee) {
+              print('   ⚠️  Match filtered out - visibility check failed');
+            }
           }
 
           if (!canSee) continue;
@@ -686,8 +801,64 @@ class HomeTabsController extends ChangeNotifier {
           DateTime? endDt;
           final st1 = m['start_time_1'];
           final st2 = m['start_time_2'];
-          if (st1 is String) startDt = DateTime.tryParse(st1);
-          if (st2 is String) endDt = DateTime.tryParse(st2);
+          if (st1 is String) {
+            final parsed = DateTime.tryParse(st1);
+            startDt = parsed?.toLocal();
+          }
+          if (st2 is String) {
+            final parsed = DateTime.tryParse(st2);
+            endDt = parsed?.toLocal();
+          }
+          
+          // Calculate distance from user's ZIP code to game's ZIP code
+          double? distanceMiles;
+          final gameZip = m['zip_code'] as String?;
+          
+          if (userZipCode != null && gameZip != null) {
+            // Normalize ZIP codes for comparison
+            final normalizedUserZip = userZipCode.trim();
+            final normalizedGameZip = gameZip.trim();
+            
+            if (kDebugMode) {
+              print('[DEBUG] Comparing ZIP codes - User: "$normalizedUserZip", Game: "$normalizedGameZip"');
+            }
+            
+            try {
+              distanceMiles = await LocationService.calculateDistanceBetweenZipCodes(
+                zip1: normalizedUserZip,
+                zip2: normalizedGameZip,
+              );
+              
+              if (kDebugMode) {
+                if (distanceMiles != null) {
+                  print('[DEBUG] ✅ Distance from user ZIP "$normalizedUserZip" to game ZIP "$normalizedGameZip": ${distanceMiles.toStringAsFixed(1)} miles');
+                } else {
+                  print('[DEBUG] ❌ Distance calculation returned null for ZIPs: "$normalizedUserZip" -> "$normalizedGameZip"');
+                }
+              }
+            } catch (e) {
+              if (kDebugMode) {
+                print('[DEBUG] ❌ Error calculating distance between ZIP codes: $e');
+                print('[DEBUG] Stack trace: ${StackTrace.current}');
+              }
+            }
+          } else {
+            if (kDebugMode) {
+              print('[DEBUG] ⚠️  Cannot calculate distance - userZipCode: $userZipCode, gameZip: $gameZip');
+            }
+          }
+          
+          // Initial load: Only include games within 100 miles to limit data size
+          // User can then filter within this 100-mile range using the distance filter
+          if (distanceMiles != null && distanceMiles > 100) {
+            if (kDebugMode) {
+              print('[DEBUG] Game ${m['id']?.toString().substring(0, 8)} filtered out - distance ${distanceMiles.toStringAsFixed(1)} miles > 100 miles');
+            }
+            continue; // Skip games beyond 100 miles
+          }
+          
+          // If distance couldn't be calculated, include it (might be nearby)
+          // User can filter it out using the distance filter if needed
           
           result.add({
             'request_id': m['id'] as String,
@@ -700,7 +871,17 @@ class HomeTabsController extends ChangeNotifier {
             'num_players': m['num_players'],
             'created_by': m['created_by'],
             'can_accept': canAccept, // Flag indicating if user can accept this game
+            'proficiency_level': m['proficiency_level'], // For readiness filtering
+            'distance_miles': distanceMiles, // Distance in miles from user ZIP to game ZIP
           });
+        }
+
+        if (kDebugMode) {
+          print('🔍 Discovery: After filtering, ${result.length} matches will be shown');
+          if (result.isEmpty && matches.isNotEmpty) {
+            print('   ⚠️  WARNING: Found ${matches.length} matches in DB but none passed visibility check!');
+            print('   Check if games have visibility="public" or is_public=true');
+          }
         }
 
         // Batch fetch accepted counts for individual games
@@ -816,6 +997,10 @@ class HomeTabsController extends ChangeNotifier {
           .eq('status', 'pending')
           .order('created_at', ascending: false);
 
+      if (kDebugMode) {
+        print('[DEBUG] loadPendingIndividualGames: Found ${pendingRows is List ? pendingRows.length : 0} pending attendance records for user $uid');
+      }
+
       if (pendingRows is! List || pendingRows.isEmpty) {
         pendingIndividualGames = [];
         notifyListeners();
@@ -826,14 +1011,77 @@ class HomeTabsController extends ChangeNotifier {
           .map<String>((r) => r['request_id'] as String)
           .toList();
 
-      // Load game details
-      final games = await supa
-          .from('instant_match_requests')
-          .select('id, sport, mode, zip_code, start_time_1, start_time_2, venue, details, status, created_by, num_players, visibility, friends_group_id')
-          .inFilter('id', requestIds)
-          .neq('mode', 'team_vs_team')
-          .neq('status', 'cancelled')
-          .order('created_at', ascending: false);
+      if (kDebugMode) {
+        print('[DEBUG] loadPendingIndividualGames: Request IDs: $requestIds');
+      }
+
+      // Load game details - try querying with and without filters to debug
+      List<dynamic> games = [];
+      try {
+        // First, try querying without the mode filter to see if that's the issue
+        final allGames = await supa
+            .from('instant_match_requests')
+            .select('id, sport, mode, zip_code, start_time_1, start_time_2, venue, details, status, created_by, num_players, visibility, friends_group_id, is_public')
+            .inFilter('id', requestIds);
+        
+        if (kDebugMode) {
+          print('[DEBUG] Query without filters: Found ${allGames is List ? allGames.length : 0} games');
+          if (allGames is List && allGames.isNotEmpty) {
+            for (final game in allGames) {
+              print('[DEBUG] Game found: id=${game['id']}, mode=${game['mode']}, status=${game['status']}, visibility=${game['visibility']}');
+            }
+          }
+        }
+        
+        // Now filter in memory
+        // Exclude public games - they should only appear in Discover tab
+        if (allGames is List) {
+          games = allGames.where((g) {
+            final mode = g['mode'] as String?;
+            final status = g['status'] as String?;
+            final visibility = g['visibility'] as String?;
+            final isPublic = g['is_public'] as bool?;
+            
+            // Exclude team games, cancelled games, and public games
+            return mode != 'team_vs_team' && 
+                   status != 'cancelled' &&
+                   visibility != 'public' && 
+                   isPublic != true;
+          }).toList();
+        }
+      } catch (e) {
+        if (kDebugMode) {
+          print('[DEBUG] Error querying games: $e');
+        }
+        // Fall back to original query
+        // Exclude public games - they should only appear in Discover tab
+        final allGamesFallback = await supa
+            .from('instant_match_requests')
+            .select('id, sport, mode, zip_code, start_time_1, start_time_2, venue, details, status, created_by, num_players, visibility, friends_group_id, is_public')
+            .inFilter('id', requestIds)
+            .neq('mode', 'team_vs_team')
+            .neq('status', 'cancelled')
+            .order('created_at', ascending: false);
+        
+        // Filter out public games
+        if (allGamesFallback is List) {
+          games = allGamesFallback.where((g) {
+            final visibility = g['visibility'] as String?;
+            final isPublic = g['is_public'] as bool?;
+            return visibility != 'public' && isPublic != true;
+          }).toList();
+        } else {
+          games = [];
+        }
+      }
+
+      if (kDebugMode) {
+        print('[DEBUG] loadPendingIndividualGames: Found ${games is List ? games.length : 0} games after filtering');
+        if (games is List && games.isEmpty && requestIds.isNotEmpty) {
+          print('[DEBUG] ⚠️ WARNING: Found pending attendance records but no games after filtering!');
+          print('[DEBUG] This suggests the games exist but are being filtered out or RLS is blocking access');
+        }
+      }
 
       if (games is List) {
         // Get creator names
@@ -889,8 +1137,14 @@ class HomeTabsController extends ChangeNotifier {
           final startTime2 = game['start_time_2'];
           DateTime? startDt;
           DateTime? endDt;
-          if (startTime1 is String) startDt = DateTime.tryParse(startTime1);
-          if (startTime2 is String) endDt = DateTime.tryParse(startTime2);
+          if (startTime1 is String) {
+            final parsed = DateTime.tryParse(startTime1);
+            startDt = parsed?.toLocal();
+          }
+          if (startTime2 is String) {
+            final parsed = DateTime.tryParse(startTime2);
+            endDt = parsed?.toLocal();
+          }
 
           final createdBy = game['created_by'] as String?;
           final numPlayers = game['num_players'] as int? ?? 4;
@@ -923,6 +1177,10 @@ class HomeTabsController extends ChangeNotifier {
       }
     } catch (e) {
       lastError = 'loadPendingIndividualGames failed: $e';
+      if (kDebugMode) {
+        print('[DEBUG] loadPendingIndividualGames ERROR: $e');
+        print('[DEBUG] Stack trace: ${StackTrace.current}');
+      }
       pendingIndividualGames = [];
     } finally {
       notifyListeners();
@@ -1027,6 +1285,8 @@ class HomeTabsController extends ChangeNotifier {
       // Refresh lists after successful accept
       await loadPendingGamesForAdmin();
       await loadAdminTeamsAndInvites();
+      await loadAwaitingOpponentConfirmationGames();
+      await loadAllMyMatches(); // Refresh confirmed games
       notifyListeners();
     } catch (e) {
       final errorMsg = e.toString();
@@ -1036,6 +1296,8 @@ class HomeTabsController extends ChangeNotifier {
         // Refresh lists to remove the duplicate from UI
         await loadPendingGamesForAdmin();
         await loadAdminTeamsAndInvites();
+        await loadAwaitingOpponentConfirmationGames();
+        await loadAllMyMatches(); // Refresh confirmed games
         notifyListeners();
         // Don't throw - treat as success since invite exists
         return;
@@ -1066,6 +1328,62 @@ class HomeTabsController extends ChangeNotifier {
       lastError = 'denyPendingAdminMatch failed: $e';
       notifyListeners();
       rethrow;
+    }
+  }
+
+  Future<void> loadAwaitingOpponentConfirmationGames() async {
+    final uid = currentUserId;
+    if (uid == null) return;
+    
+    // Prevent multiple simultaneous loads
+    if (loadingAwaitingOpponentGames) return;
+
+    loadingAwaitingOpponentGames = true;
+    notifyListeners();
+
+    try {
+      // Get ALL teams user is a member of (not just admin teams)
+      final allUserTeams = await repo.getNonAdminTeams(uid);
+      final allTeamIds = [
+        ...adminTeams.map((t) => t['id'] as String),
+        ...allUserTeams.map((t) => t['id'] as String),
+      ].toSet().toList(); // Remove duplicates
+      
+      awaitingOpponentConfirmationGames = await repo.getAwaitingOpponentConfirmationGames(
+        uid,
+        allTeamIds,
+      );
+    } catch (e) {
+      if (kDebugMode) {
+        print('[ERROR] loadAwaitingOpponentConfirmationGames: $e');
+      }
+      lastError = 'loadAwaitingOpponentConfirmationGames failed: $e';
+    } finally {
+      loadingAwaitingOpponentGames = false;
+      notifyListeners();
+    }
+  }
+
+  /// Load public games that match user's notification preferences
+  Future<void> loadPublicPendingGames() async {
+    final uid = currentUserId;
+    if (uid == null) return;
+
+    try {
+      // Get user's current location coordinates
+      final coords = await LocationService.getCurrentCoordinates();
+      final userZip = await repo.getBaseZip(uid);
+
+      publicPendingGames = await repo.getPublicGamesForUser(
+        userId: uid,
+        userZipCode: userZip,
+        userLat: coords?['lat'],
+        userLng: coords?['lng'],
+      );
+      notifyListeners();
+    } catch (e) {
+      lastError = 'loadPublicPendingGames failed: $e';
+      notifyListeners();
     }
   }
 }

@@ -13,21 +13,22 @@ class HomeRepository {
   // -------------------------
 
   Future<String?> getBaseZip(String userId) async {
+    // Use last_known_zip_code instead of base_zip_code (which was removed)
     final row = await supa
         .from('users')
-        .select('base_zip_code')
+        .select('last_known_zip_code')
         .eq('id', userId)
         .maybeSingle();
-    return row?['base_zip_code'] as String?;
+    return row?['last_known_zip_code'] as String?;
   }
 
   Future<Map<String, String?>> getUserNameAndLocation(String userId) async {
     final row = await supa
         .from('users')
-        .select('full_name, base_zip_code, photo_url')
+        .select('full_name, last_known_zip_code, photo_url')
         .eq('id', userId)
         .maybeSingle();
-    final zipCode = row?['base_zip_code'] as String?;
+    final zipCode = row?['last_known_zip_code'] as String?;
     final cityName = zipCode != null ? await _getCityNameFromZip(zipCode) : null;
     
     return {
@@ -245,10 +246,47 @@ class HomeRepository {
     required String inviteId,
     required String deniedBy,
   }) async {
+    // Get invite details to check request_id
+    final invite = await supa
+        .from('instant_request_invites')
+        .select('request_id, target_team_id, status')
+        .eq('id', inviteId)
+        .maybeSingle();
+    
+    if (invite == null) return;
+    
+    final requestId = invite['request_id'] as String?;
+    if (requestId == null) return;
+    
+    // Update invite status to denied
     await supa
         .from('instant_request_invites')
         .update({'status': 'denied'})
         .eq('id', inviteId);
+    
+    // Check if all invited teams have denied
+    final allInvites = await supa
+        .from('instant_request_invites')
+        .select('status')
+        .eq('request_id', requestId);
+    
+    if (allInvites is List && allInvites.isNotEmpty) {
+      final allDenied = allInvites.every((inv) => 
+        (inv['status'] as String?)?.toLowerCase() == 'denied'
+      );
+      
+      // If all teams denied, make the game public
+      if (allDenied) {
+        await supa
+            .from('instant_match_requests')
+            .update({
+              'visibility': 'public',
+              'is_public': true,
+              'status': 'open', // Change to open so it appears in public games
+            })
+            .eq('id', requestId);
+      }
+    }
   }
 
   /// Accept a pending admin match by creating an invite for user's admin team
@@ -359,6 +397,19 @@ class HomeRepository {
 
     final adminTeamIds = adminTeams.map((t) => t['id'] as String).toList();
     final adminSports = adminTeams.map((t) => (t['sport'] as String? ?? '').toLowerCase()).toSet();
+    
+    // Get team notification preferences
+    final teamNotificationRadii = <String, int>{};
+    for (final team in adminTeams) {
+      final teamId = team['id'] as String;
+      // Fetch team notification radius from database
+      final teamRow = await supa
+          .from('teams')
+          .select('notification_radius_miles')
+          .eq('id', teamId)
+          .maybeSingle();
+      teamNotificationRadii[teamId] = (teamRow?['notification_radius_miles'] as int?) ?? 50;
+    }
 
     // Get all pending/open team match requests with same sport
     // Include public visibility for open challenges
@@ -426,21 +477,35 @@ class HomeRepository {
         continue;
       }
 
-      // Check if within radius (using radius_miles from request, default 75)
+      // Check if within radius using team notification preferences
       final reqZip = req['zip_code'] as String?;
-      final radiusMiles = req['radius_miles'] as int? ?? 75;
+      final reqRadiusMiles = req['radius_miles'] as int? ?? 75;
       
-      // For public games, show to all admins of the same sport (radius check is less strict)
+      // Find matching admin team for this sport to get its notification radius
+      final matchingTeam = adminTeams.firstWhere(
+        (t) => (t['sport'] as String? ?? '').toLowerCase() == reqSport,
+        orElse: () => <String, dynamic>{},
+      );
+      final teamNotificationRadius = matchingTeam.isNotEmpty 
+          ? (teamNotificationRadii[matchingTeam['id'] as String] ?? 50)
+          : 50; // Default 50 miles
+      
+      // For public games, use team notification radius
       // For non-public games, apply stricter radius check
       bool isWithinRadius;
       
       if (visibility == 'public' || isPublic) {
-        // Public games: Show to all admins of same sport within the request's radius
-        // Since it's public, we're more lenient - if radius is 75 miles (default), show it
-        // For now, show all public games to admins of same sport (radius check happens at game creation)
-        isWithinRadius = true; // Public games are discoverable by all admins of same sport
+        // Public games: Check if within team's notification radius
+        if (reqZip == null || userZipCode == null) {
+          // If ZIP codes unavailable, use game's radius
+          isWithinRadius = reqRadiusMiles >= teamNotificationRadius;
+        } else {
+          // If ZIP codes match (same area), definitely within range
+          // Otherwise, check if game radius overlaps with team notification radius
+          isWithinRadius = reqZip == userZipCode || reqRadiusMiles >= teamNotificationRadius;
+        }
         if (kDebugMode) {
-          print('[DEBUG] Request $reqId: Public game, isWithinRadius=true');
+          print('[DEBUG] Request $reqId: Public game, teamNotificationRadius=$teamNotificationRadius, isWithinRadius=$isWithinRadius');
         }
       } else {
         // Non-public games: Apply radius check
@@ -451,10 +516,10 @@ class HomeRepository {
           continue; // Need ZIP codes for radius check
         }
         // If ZIP codes match (same area), definitely within range
-        // If request has radius >= 75 (wide search), include it
-        isWithinRadius = reqZip == userZipCode || radiusMiles >= 75;
+        // Otherwise, check if game radius overlaps with team notification radius
+        isWithinRadius = reqZip == userZipCode || reqRadiusMiles >= teamNotificationRadius;
         if (kDebugMode) {
-          print('[DEBUG] Request $reqId: Non-public, isWithinRadius=$isWithinRadius (reqZip=$reqZip, userZipCode=$userZipCode, radius=$radiusMiles)');
+          print('[DEBUG] Request $reqId: Non-public, teamNotificationRadius=$teamNotificationRadius, isWithinRadius=$isWithinRadius (reqZip=$reqZip, userZipCode=$userZipCode, reqRadius=$reqRadiusMiles)');
         }
       }
       
@@ -811,8 +876,14 @@ class HomeRepository {
       DateTime? endDt;
       final st1 = r['start_time_1'];
       final st2 = r['start_time_2'];
-      if (st1 is String) startDt = DateTime.tryParse(st1);
-      if (st2 is String) endDt = DateTime.tryParse(st2);
+      if (st1 is String) {
+        final parsed = DateTime.tryParse(st1);
+        startDt = parsed?.toLocal();
+      }
+      if (st2 is String) {
+        final parsed = DateTime.tryParse(st2);
+        endDt = parsed?.toLocal();
+      }
 
       final venue = r['venue'] as String?;
       final createdBy =
@@ -893,6 +964,8 @@ class HomeRepository {
         'expected_players_per_team': r['expected_players_per_team'], // Match-specific expected players (can be null, falls back to sport default)
         'chat_enabled': r['chat_enabled'] as bool? ?? false,
         'chat_mode': r['chat_mode'] as String? ?? 'all_users',
+        'show_team_a_roster': r['show_team_a_roster'] as bool? ?? false, // Team A admin controls this
+        'show_team_b_roster': r['show_team_b_roster'] as bool? ?? false, // Team B admin controls this
       });
     }
 
@@ -1011,27 +1084,61 @@ class HomeRepository {
 
     if (reqs is! List || reqs.isEmpty) {
       if (kDebugMode) {
-        print('[DEBUG] No match requests found after filtering, returning empty list');
+        print('[DEBUG] No match requests found, returning empty list');
       }
       return [];
     }
 
-    // Filter out cancelled matches (user doesn't need to respond to cancelled matches)
+    // Filter out cancelled matches AND games awaiting opponent confirmation
+    // Games awaiting opponent confirmation (matched_team_id is null) should appear
+    // in "Awaiting Opponent Confirmation" not "Pending Approval"
+    // Also filter out games where the user's team is not the creating team or the matched team
+    // (e.g., if Team B accepts, Team C members should not see it in "Pending Approval")
     final nonCancelledReqs = (reqs as List).where((r) {
       final status = (r['status'] as String?)?.toLowerCase();
-      return status != 'cancelled';
+      final matchedTeamId = r['matched_team_id'];
+      final creatingTeamId = r['team_id'] as String?;
+      
+      // Exclude cancelled matches
+      if (status == 'cancelled') return false;
+      
+      // Exclude games awaiting opponent confirmation (matched_team_id is null)
+      // These games should only appear in "Awaiting Opponent Confirmation"
+      if (matchedTeamId == null) return false;
+      
+      // Get the user's team ID for this game from attendance record
+      final reqId = r['id'] as String?;
+      final userTeamId = reqId != null ? myTeamByReqId[reqId] : null;
+      
+      // Only include if user's team is the creating team OR the matched team
+      // This ensures that if Team B accepts, only Team A and Team B members see it
+      // Team C members (who haven't accepted) should not see it
+      if (userTeamId != null && matchedTeamId != null && creatingTeamId != null) {
+        final isUserOnCreatingTeam = userTeamId == creatingTeamId;
+        final isUserOnMatchedTeam = userTeamId == matchedTeamId;
+        
+        if (!isUserOnCreatingTeam && !isUserOnMatchedTeam) {
+          if (kDebugMode) {
+            print('[DEBUG] Filtering out game $reqId: userTeamId=$userTeamId, creatingTeamId=$creatingTeamId, matchedTeamId=$matchedTeamId');
+          }
+          return false; // User's team is neither creating team nor matched team
+        }
+      }
+      
+      return true;
     }).toList();
 
     if (kDebugMode) {
-      final cancelledCount = (reqs as List).length - nonCancelledReqs.length;
-      if (cancelledCount > 0) {
-        print('[DEBUG] Filtered out $cancelledCount cancelled match(es)');
+      final cancelledCount = (reqs as List).where((r) => (r['status'] as String?)?.toLowerCase() == 'cancelled').length;
+      final awaitingCount = (reqs as List).where((r) => r['matched_team_id'] == null).length;
+      if (cancelledCount > 0 || awaitingCount > 0) {
+        print('[DEBUG] Filtered out $cancelledCount cancelled match(es) and $awaitingCount game(s) awaiting opponent confirmation');
       }
     }
 
     if (nonCancelledReqs.isEmpty) {
       if (kDebugMode) {
-        print('[DEBUG] All matches were cancelled, returning empty list');
+        print('[DEBUG] All matches were cancelled or awaiting opponent confirmation, returning empty list');
       }
       return [];
     }
@@ -1077,8 +1184,14 @@ class HomeRepository {
       DateTime? endDt;
       final st1 = r['start_time_1'];
       final st2 = r['start_time_2'];
-      if (st1 is String) startDt = DateTime.tryParse(st1);
-      if (st2 is String) endDt = DateTime.tryParse(st2);
+      if (st1 is String) {
+        final parsed = DateTime.tryParse(st1);
+        startDt = parsed?.toLocal();
+      }
+      if (st2 is String) {
+        final parsed = DateTime.tryParse(st2);
+        endDt = parsed?.toLocal();
+      }
 
       final venue = r['venue'] as String?;
       final isConfirmed = teamBId != null;
@@ -1272,8 +1385,14 @@ class HomeRepository {
       DateTime? endDt;
       final st1 = r['start_time_1'];
       final st2 = r['start_time_2'];
-      if (st1 is String) startDt = DateTime.tryParse(st1);
-      if (st2 is String) endDt = DateTime.tryParse(st2);
+      if (st1 is String) {
+        final parsed = DateTime.tryParse(st1);
+        startDt = parsed?.toLocal();
+      }
+      if (st2 is String) {
+        final parsed = DateTime.tryParse(st2);
+        endDt = parsed?.toLocal();
+      }
 
       final venue = r['venue'] as String?;
       final createdBy =
@@ -1354,5 +1473,789 @@ class HomeRepository {
     });
 
     return rows;
+  }
+
+  /// Get team games awaiting opponent confirmation
+  /// These include:
+  /// 1. Games created by user's teams (all members, not just admins) where invites are still pending
+  /// 2. Games where user's teams have pending invites (invited teams)
+  /// Uses attendance records to ensure all members can see the games (bypasses RLS)
+  Future<List<Map<String, dynamic>>> getAwaitingOpponentConfirmationGames(
+      String userId, List<String> userTeamIds) async {
+    if (userTeamIds.isEmpty) return [];
+
+    try {
+      // First, get all games where user has an attendance record (this ensures RLS allows access)
+      // AND where matched_team_id is null (awaiting opponent confirmation)
+      final userAttendance = await supa
+          .from('team_match_attendance')
+          .select('request_id, team_id')
+          .eq('user_id', userId);
+      
+      final Set<String> gameIdsWithAttendance = {};
+      final Map<String, String> userTeamIdByGameId = {}; // Map game ID to user's team ID in that game
+      if (userAttendance is List) {
+        for (final att in userAttendance) {
+          final reqId = att['request_id'] as String?;
+          final teamId = att['team_id'] as String?;
+          if (reqId != null) {
+            gameIdsWithAttendance.add(reqId);
+            if (teamId != null) {
+              userTeamIdByGameId[reqId] = teamId;
+            }
+          }
+        }
+      }
+      
+      if (kDebugMode) {
+        print('[DEBUG] getAwaitingOpponentConfirmationGames: Found ${gameIdsWithAttendance.length} games with attendance');
+        print('[DEBUG] User team mapping: $userTeamIdByGameId');
+      }
+      
+      if (gameIdsWithAttendance.isEmpty) {
+        if (kDebugMode) {
+          print('[DEBUG] getAwaitingOpponentConfirmationGames: No attendance records found for user');
+        }
+        return [];
+      }
+      
+      // Get all games where user has attendance records
+      // Use RPC function to bypass RLS - this ensures all members (not just admins) can see games
+      final allGamesResult = await supa.rpc(
+        'get_match_requests_for_attendance',
+        params: {
+          'p_user_id': userId,
+          'p_request_ids': gameIdsWithAttendance.toList(),
+        },
+      );
+      
+      final allGamesRaw = allGamesResult is List ? allGamesResult : <dynamic>[];
+      
+      // Filter to only team_vs_team games awaiting opponent confirmation
+      // Exclude cancelled games explicitly
+      final allGames = allGamesRaw.where((game) {
+        final mode = (game['mode'] as String?)?.toLowerCase();
+        final status = (game['status'] as String?)?.toLowerCase();
+        final matchedTeamId = game['matched_team_id'];
+        final isCancelled = status == 'cancelled';
+        
+        if (kDebugMode && isCancelled) {
+          print('[DEBUG] Filtering out cancelled game: ${game['id']}, status=$status');
+        }
+        
+        return mode == 'team_vs_team' &&
+               !isCancelled && // Explicitly exclude cancelled games
+               (status == 'open' || status == 'pending') &&
+               matchedTeamId == null; // Only games awaiting opponent confirmation
+      }).toList();
+      
+      if (allGames.isEmpty) {
+        if (kDebugMode) {
+          print('[DEBUG] getAwaitingOpponentConfirmationGames: No games found with attendance records after filtering');
+          print('[DEBUG] Raw games from RPC: ${allGamesRaw.length}');
+        }
+        return [];
+      }
+      
+      // Need to fetch additional fields (details, created_by, creator_id, visibility, is_public)
+      // that aren't in the RPC function return
+      // Since user has attendance records, RLS should allow access via the policy in migration 024
+      final gameIdsForAdditionalFields = allGames.map<String>((g) => g['id'] as String).toList();
+      
+      Map<String, Map<String, dynamic>> additionalByGameId = {};
+      try {
+        final additionalFields = await supa
+            .from('instant_match_requests')
+            .select('id, details, created_by, creator_id, visibility, is_public')
+            .inFilter('id', gameIdsForAdditionalFields);
+        
+        if (additionalFields is List) {
+          for (final f in additionalFields) {
+            final id = f['id'] as String?;
+            if (id != null) {
+              additionalByGameId[id] = {
+                'details': f['details'],
+                'created_by': f['created_by'],
+                'creator_id': f['creator_id'],
+                'visibility': f['visibility'],
+                'is_public': f['is_public'],
+              };
+              if (kDebugMode) {
+                print('[DEBUG] Fetched additional fields for game $id: created_by=${f['created_by']}, creator_id=${f['creator_id']}');
+              }
+            }
+          }
+        }
+      } catch (e) {
+        if (kDebugMode) {
+          print('[ERROR] Failed to fetch additional fields for games: $e');
+          print('[DEBUG] This might be an RLS issue. Will try to get creator from invites table.');
+        }
+        // Try to get creator_id from invites table as fallback
+        try {
+          final inviteRows = await supa
+              .from('instant_request_invites')
+              .select('request_id, created_by')
+              .inFilter('request_id', gameIdsForAdditionalFields);
+          
+          if (inviteRows is List) {
+            for (final inv in inviteRows) {
+              final reqId = inv['request_id'] as String?;
+              final createdBy = inv['created_by'] as String?;
+              if (reqId != null && createdBy != null) {
+                if (additionalByGameId[reqId] == null) {
+                  additionalByGameId[reqId] = {};
+                }
+                additionalByGameId[reqId]!['created_by'] = createdBy;
+                additionalByGameId[reqId]!['creator_id'] = createdBy;
+                if (kDebugMode) {
+                  print('[DEBUG] Got creator from invites table for game $reqId: $createdBy');
+                }
+              }
+            }
+          }
+        } catch (e2) {
+          if (kDebugMode) {
+            print('[ERROR] Failed to fetch creator from invites table: $e2');
+          }
+        }
+      }
+      
+      // Merge additional fields into games
+      // Note: The RPC function now returns created_by and creator_id, so we can use those directly
+      final enrichedGames = allGames.map((game) {
+        final id = game['id'] as String;
+        final additional = additionalByGameId[id] ?? {};
+        return {
+          ...game,
+          'details': additional['details'] ?? game['details'],
+          // Use RPC function's created_by/creator_id first, then fallback to additional fields
+          'created_by': game['created_by'] ?? additional['created_by'],
+          'creator_id': game['creator_id'] ?? additional['creator_id'] ?? game['created_by'],
+          'visibility': additional['visibility'] ?? game['visibility'] ?? 'invited',
+          'is_public': additional['is_public'] ?? game['is_public'] ?? false,
+        };
+      }).toList();
+      
+      final allGamesFinal = enrichedGames;
+      
+      if (kDebugMode) {
+        print('[DEBUG] getAwaitingOpponentConfirmationGames: Found ${allGamesFinal.length} games via RPC');
+      }
+      
+      // Get game IDs for invite lookup
+      final gameIds = allGamesFinal.map<String>((g) => g['id'] as String).toList();
+      
+      // Get all invites for these games (including all statuses to determine if it's an open challenge)
+      final invites = await supa
+          .from('instant_request_invites')
+          .select('request_id, target_team_id, status')
+          .inFilter('request_id', gameIds);
+      
+      // Group invites by request_id
+      final Map<String, List<Map<String, dynamic>>> invitesByRequestId = {};
+      if (invites is List) {
+        for (final inv in invites) {
+          final reqId = inv['request_id'] as String?;
+          if (reqId != null) {
+            invitesByRequestId.putIfAbsent(reqId, () => []).add(inv);
+          }
+        }
+        if (kDebugMode) {
+          print('[DEBUG] Fetched ${invites.length} invites for ${gameIds.length} games');
+          print('[DEBUG] Invites by request_id: ${invitesByRequestId.keys.length} games have invites');
+          for (final entry in invitesByRequestId.entries.take(3)) {
+            print('[DEBUG] Game ${entry.key.substring(0, 8)}: ${entry.value.length} invites');
+            for (final inv in entry.value) {
+              print('[DEBUG]   - Team ${inv['target_team_id']}, Status: ${inv['status']}');
+            }
+          }
+        }
+      } else {
+        if (kDebugMode) {
+          print('[DEBUG] No invites found or error fetching invites');
+        }
+      }
+      
+      // Since user has attendance records for these games, they should see all of them
+      // Only filter out games where all invites have been accepted/denied (game is confirmed or cancelled)
+      final filteredGames = <dynamic>[];
+      for (final game in allGamesFinal) {
+        final reqId = game['id'] as String;
+        
+        // Explicitly exclude cancelled games
+        final status = (game['status'] as String?)?.toLowerCase();
+        final isCancelled = status == 'cancelled';
+        
+        if (isCancelled) {
+          if (kDebugMode) {
+            print('[DEBUG] Filtering out cancelled game from awaiting confirmation: $reqId, status=$status');
+          }
+          continue; // Skip cancelled games - they should not appear in "Awaiting Opponent Confirmation"
+        }
+        
+        final gameInvites = invitesByRequestId[reqId] ?? [];
+        
+        // Get the user's team ID for this game from attendance record
+        final userTeamIdForThisGame = userTeamIdByGameId[reqId];
+        
+        // Check if the user's team has denied the invite
+        // If so, exclude this game from the list (team members shouldn't see denied games)
+        if (userTeamIdForThisGame != null && gameInvites.isNotEmpty) {
+          // Find the invite for the user's team
+          Map<String, dynamic>? userTeamInvite;
+          for (final inv in gameInvites) {
+            final targetTeamId = inv['target_team_id'] as String?;
+            if (targetTeamId == userTeamIdForThisGame) {
+              userTeamInvite = inv;
+              break;
+            }
+          }
+          
+          if (userTeamInvite != null) {
+            final userTeamInviteStatus = (userTeamInvite['status'] as String?)?.toLowerCase();
+            if (kDebugMode) {
+              print('[DEBUG] Game $reqId: userTeamId=$userTeamIdForThisGame, inviteStatus=$userTeamInviteStatus');
+            }
+            if (userTeamInviteStatus == 'denied') {
+              if (kDebugMode) {
+                print('[DEBUG] Filtering out game where user team denied: $reqId, userTeamId=$userTeamIdForThisGame');
+              }
+              continue; // Skip games where the user's team has denied
+            }
+          } else if (kDebugMode) {
+            print('[DEBUG] Game $reqId: No invite found for userTeamId=$userTeamIdForThisGame, allInvites=${gameInvites.map((i) => '${i['target_team_id']}:${i['status']}').join(', ')}');
+          }
+        }
+        
+        // Check if any invite is still pending
+        final hasPendingInvite = gameInvites.any((inv) => 
+          (inv['status'] as String?)?.toLowerCase() == 'pending'
+        );
+        final isOpenChallenge = gameInvites.isEmpty;
+        
+        // Include if:
+        // 1. It's an open challenge (no invites), OR
+        // 2. There are still pending invites (game still awaiting opponent confirmation)
+        // Since user has attendance record, they're part of this game and should see it
+        // BUT exclude if their team has denied (checked above)
+        // Also exclude if user is on an invited team that has denied (already checked above)
+        if (isOpenChallenge || hasPendingInvite) {
+          // Double-check: if user is on an invited team and that team denied, don't include
+          if (userTeamIdForThisGame != null) {
+            final creatingTeamId = game['team_id'] as String?;
+            final isUserOnCreatingTeam = creatingTeamId != null && userTeamIdForThisGame == creatingTeamId;
+            
+            // Only check denial if user is NOT on the creating team
+            if (!isUserOnCreatingTeam) {
+              final userTeamDenied = gameInvites.any((inv) {
+                final targetTeamId = inv['target_team_id'] as String?;
+                final status = (inv['status'] as String?)?.toLowerCase();
+                return targetTeamId == userTeamIdForThisGame && status == 'denied';
+              });
+              
+              if (userTeamDenied) {
+                if (kDebugMode) {
+                  print('[DEBUG] Final check: Filtering out game where user team denied: $reqId');
+                }
+                continue; // Skip games where the user's team has denied
+              }
+            }
+          }
+          
+          filteredGames.add(game);
+        }
+      }
+      
+      if (kDebugMode) {
+        print('[DEBUG] getAwaitingOpponentConfirmationGames: Filtered ${filteredGames.length} games from ${allGames.length} total games with attendance');
+        print('[DEBUG] User team IDs: $userTeamIds');
+        if (filteredGames.isNotEmpty) {
+          for (final game in filteredGames.take(3)) {
+            final reqId = game['id'] as String;
+            final invites = invitesByRequestId[reqId] ?? [];
+            print('[DEBUG] Game ${reqId.substring(0, 8)}: team_id=${game['team_id']}, invites=${invites.length}, pending=${invites.where((i) => (i['status'] as String?)?.toLowerCase() == 'pending').length}');
+          }
+        }
+      }
+      
+      if (filteredGames.isEmpty) {
+        if (kDebugMode) {
+          print('[DEBUG] getAwaitingOpponentConfirmationGames: No games match criteria after filtering');
+        }
+        return [];
+      }
+
+      // Use filteredGames as the final list
+      final finalGames = filteredGames;
+
+      // Get team names - include all teams from games, invites, AND user's teams from attendance records
+      final allTeamIds = <String>{};
+      for (final g in finalGames) {
+        final teamId = g['team_id'] as String?;
+        if (teamId != null) allTeamIds.add(teamId);
+      }
+      if (invites is List) {
+        for (final inv in invites) {
+          final teamId = inv['target_team_id'] as String?;
+          if (teamId != null) allTeamIds.add(teamId);
+        }
+      }
+      // Add user's teams from attendance records to ensure we can look up their team names
+      for (final teamId in userTeamIdByGameId.values) {
+        allTeamIds.add(teamId);
+      }
+      
+      if (kDebugMode) {
+        print('[DEBUG] Fetching team names for ${allTeamIds.length} teams: $allTeamIds');
+      }
+
+      final teamNames = <String, String>{};
+      if (allTeamIds.isNotEmpty) {
+        final teamRows = await supa
+            .from('teams')
+            .select('id, name')
+            .inFilter('id', allTeamIds.toList());
+        if (teamRows is List) {
+          for (final t in teamRows) {
+            final id = t['id'] as String?;
+            if (id != null) {
+              teamNames[id] = (t['name'] as String?) ?? '';
+            }
+          }
+        }
+      }
+
+      // Get creator names
+      final creatorIds = finalGames
+          .map<String?>((g) => g['created_by'] as String? ?? g['creator_id'] as String?)
+          .whereType<String>()
+          .toSet()
+          .toList();
+
+      if (kDebugMode) {
+        print('[DEBUG] getAwaitingOpponentConfirmationGames: Creator IDs to fetch: $creatorIds');
+      }
+
+      final creatorNames = <String, String>{};
+      if (creatorIds.isNotEmpty) {
+        try {
+          final userRows = await supa
+              .from('users')
+              .select('id, full_name')
+              .inFilter('id', creatorIds);
+          if (userRows is List) {
+            for (final u in userRows) {
+              final id = u['id'] as String?;
+              if (id != null) {
+                final name = u['full_name'] as String?;
+                creatorNames[id] = name ?? 'Unknown';
+                if (kDebugMode) {
+                  print('[DEBUG] Creator $id: $name');
+                }
+              }
+            }
+          }
+        } catch (e) {
+          if (kDebugMode) {
+            print('[ERROR] Failed to fetch creator names: $e');
+          }
+          // Continue with empty creator names - will show "Unknown"
+        }
+      }
+
+      // Build result list - only include games with pending invites or open challenge
+      final result = <Map<String, dynamic>>[];
+      for (final game in finalGames) {
+        final reqId = game['id'] as String;
+        final gameInvites = invitesByRequestId[reqId] ?? [];
+        
+        // Check if any invite is still pending
+        final hasPendingInvite = gameInvites.any((inv) => 
+          (inv['status'] as String?)?.toLowerCase() == 'pending'
+        );
+
+        // For open challenge, check if no invites exist or all are pending
+        final isOpenChallenge = gameInvites.isEmpty || 
+          gameInvites.every((inv) => (inv['status'] as String?)?.toLowerCase() == 'pending');
+
+        // Only include if there are pending invites (specific teams) or it's an open challenge
+        if (hasPendingInvite || isOpenChallenge) {
+          final creatingTeamId = game['team_id'] as String?;
+          final creatingTeamName = teamNames[creatingTeamId] ?? 'Unknown Team';
+          
+          // Get the user's team ID for this game from attendance record
+          final userTeamIdForThisGame = userTeamIdByGameId[reqId];
+          
+          // Determine which team the user belongs to
+          final isUserOnCreatingTeam = creatingTeamId != null && userTeamIdForThisGame == creatingTeamId;
+          
+          // Get opponent team names (for specific invites) or mark as "Open Challenge"
+          // Include ALL invites (not just pending) to determine opponent teams
+          // This ensures we show the correct opponent names even if some invites are accepted/denied
+          final allInvitesForOpponentNames = gameInvites.toList();
+          final pendingInvites = gameInvites.where((inv) => 
+            (inv['status'] as String?)?.toLowerCase() == 'pending'
+          ).toList();
+          
+          // Build opponent team names from ALL invites (to show all invited teams)
+          // First, ensure all invited team names are fetched
+          final opponentTeamIds = allInvitesForOpponentNames
+              .map((inv) => inv['target_team_id'] as String?)
+              .where((tid) => tid != null)
+              .cast<String>()
+              .toSet();
+          
+          // Fetch any missing team names before building opponentTeamNames
+          final missingTeamIds = opponentTeamIds.where((tid) => 
+            !teamNames.containsKey(tid) || teamNames[tid] == null || teamNames[tid]!.isEmpty
+          ).toList();
+          
+          if (missingTeamIds.isNotEmpty) {
+            try {
+              final missingTeamRows = await supa
+                  .from('teams')
+                  .select('id, name')
+                  .inFilter('id', missingTeamIds);
+              if (missingTeamRows is List) {
+                for (final t in missingTeamRows) {
+                  final id = t['id'] as String?;
+                  if (id != null) {
+                    teamNames[id] = (t['name'] as String?) ?? '';
+                  }
+                }
+                if (kDebugMode) {
+                  print('[DEBUG] Fetched ${missingTeamRows.length} missing team names for opponent teams: $missingTeamIds');
+                }
+              }
+            } catch (e) {
+              if (kDebugMode) {
+                print('[ERROR] Failed to fetch missing team names: $e');
+              }
+            }
+          }
+          
+          final opponentTeamNames = allInvitesForOpponentNames
+              .map((inv) => teamNames[inv['target_team_id'] as String?] ?? 'Unknown Team')
+              .where((name) => name.isNotEmpty && name != 'Unknown Team')
+              .toList();
+          
+          if (kDebugMode) {
+            print('[DEBUG] Game $reqId: opponentTeamIds=$opponentTeamIds, opponentTeamNames=$opponentTeamNames, allInvitesForOpponentNames.length=${allInvitesForOpponentNames.length}');
+          }
+          
+          // Determine user's team name and which team ID to use
+          String myTeamName;
+          List<String> otherTeamNames;
+          String? myTeamId;
+          
+          if (isUserOnCreatingTeam) {
+            // User is on the creating team
+            myTeamName = creatingTeamName;
+            myTeamId = creatingTeamId;
+            otherTeamNames = opponentTeamNames;
+          } else if (userTeamIdForThisGame != null) {
+            // User is on an invited team - use the team ID from attendance record
+            myTeamId = userTeamIdForThisGame;
+            myTeamName = teamNames[myTeamId] ?? '';
+            if (myTeamName.isEmpty) {
+              // If team name not found, try to fetch it
+              try {
+                final teamRow = await supa
+                    .from('teams')
+                    .select('name')
+                    .eq('id', myTeamId)
+                    .maybeSingle();
+                if (teamRow != null) {
+                  myTeamName = (teamRow['name'] as String?) ?? 'My Team';
+                  teamNames[myTeamId] = myTeamName; // Cache it
+                } else {
+                  myTeamName = 'My Team';
+                }
+              } catch (e) {
+                if (kDebugMode) {
+                  print('[ERROR] Failed to fetch team name for $myTeamId: $e');
+                }
+                myTeamName = 'My Team';
+              }
+            }
+            // User is on an invited team - show creating team and other invited teams as opponents
+            otherTeamNames = [creatingTeamName];
+            // Add other invited teams (from ALL invites, not just pending)
+            for (final inv in allInvitesForOpponentNames) {
+              final tid = inv['target_team_id'] as String?;
+              if (tid != null && tid != userTeamIdForThisGame && tid != creatingTeamId) {
+                final name = teamNames[tid];
+                if (kDebugMode) {
+                  print('[DEBUG] Invited team member view: checking invite team $tid, name=$name, userTeamId=$userTeamIdForThisGame, creatingTeamId=$creatingTeamId');
+                }
+                if (name != null && name.isNotEmpty && !otherTeamNames.contains(name)) {
+                  otherTeamNames.add(name);
+                  if (kDebugMode) {
+                    print('[DEBUG] Added opponent team: $name');
+                  }
+                } else if (name == null || name.isEmpty) {
+                  // Try to fetch team name if not in cache
+                  try {
+                    final teamRow = await supa
+                        .from('teams')
+                        .select('name')
+                        .eq('id', tid)
+                        .maybeSingle();
+                    if (teamRow != null) {
+                      final fetchedName = (teamRow['name'] as String?) ?? '';
+                      if (fetchedName.isNotEmpty) {
+                        teamNames[tid] = fetchedName; // Cache it
+                        if (!otherTeamNames.contains(fetchedName)) {
+                          otherTeamNames.add(fetchedName);
+                          if (kDebugMode) {
+                            print('[DEBUG] Fetched and added opponent team: $fetchedName');
+                          }
+                        }
+                      }
+                    }
+                  } catch (e) {
+                    if (kDebugMode) {
+                      print('[ERROR] Failed to fetch team name for $tid: $e');
+                    }
+                  }
+                }
+              }
+            }
+            
+            if (kDebugMode) {
+              print('[DEBUG] Final otherTeamNames for invited team member: $otherTeamNames');
+            }
+          } else {
+            // Fallback (shouldn't happen if attendance records are correct)
+            myTeamName = creatingTeamName;
+            myTeamId = creatingTeamId;
+            otherTeamNames = opponentTeamNames;
+          }
+
+          final startTime1 = game['start_time_1'] as String?;
+          final startTime2 = game['start_time_2'] as String?;
+          DateTime? startDt;
+          DateTime? endDt;
+          if (startTime1 != null) {
+            try {
+              startDt = DateTime.parse(startTime1).toLocal();
+            } catch (_) {}
+          }
+          if (startTime2 != null) {
+            try {
+              endDt = DateTime.parse(startTime2).toLocal();
+            } catch (_) {}
+          }
+
+          final creatorId = game['created_by'] as String? ?? game['creator_id'] as String?;
+          
+          // Determine if it's an open challenge (no specific team invites)
+          // It's an open challenge ONLY if there are no invites at all
+          // If there are any invites (even if pending), it's NOT an open challenge
+          final isOpenChallengeGame = gameInvites.isEmpty;
+          
+          if (kDebugMode) {
+            print('[DEBUG] Game $reqId: gameInvites.length=${gameInvites.length}, isOpenChallenge=$isOpenChallengeGame');
+            print('[DEBUG] Game $reqId: isUserOnCreatingTeam=$isUserOnCreatingTeam, creatingTeamId=$creatingTeamId, userTeamIdForThisGame=$userTeamIdForThisGame');
+            print('[DEBUG] Game $reqId: opponentTeamNames=$opponentTeamNames, otherTeamNames=$otherTeamNames');
+            print('[DEBUG] Game $reqId: allInvitesForOpponentNames=${allInvitesForOpponentNames.map((i) => '${i['target_team_id']}').join(', ')}');
+          }
+          
+          // Fetch creator name if not already fetched
+          String creatorName = creatorNames[creatorId] ?? 'Unknown';
+          if (creatorName == 'Unknown' && creatorId != null) {
+            try {
+              final creatorRow = await supa
+                  .from('users')
+                  .select('full_name')
+                  .eq('id', creatorId)
+                  .maybeSingle();
+              if (creatorRow != null) {
+                creatorName = (creatorRow['full_name'] as String?) ?? 'Unknown';
+                creatorNames[creatorId] = creatorName; // Cache it
+              }
+            } catch (e) {
+              if (kDebugMode) {
+                print('[ERROR] Failed to fetch creator name for $creatorId: $e');
+              }
+            }
+          }
+          
+          result.add({
+            'request_id': reqId,
+            'sport': game['sport'],
+            'team_id': creatingTeamId,
+            'my_team_id': myTeamId,
+            'team_name': myTeamName, // This should be the user's team name from attendance record
+            'opponent_teams': otherTeamNames,
+            // Only set is_open_challenge to true if there are NO opponent teams
+            // If there are opponent teams, it's NOT an open challenge (even if gameInvites was empty)
+            'is_open_challenge': isOpenChallengeGame && otherTeamNames.isEmpty,
+            'start_time': startDt,
+            'end_time': endDt,
+            'venue': game['venue'],
+            'details': game['details'],
+            'creator_id': creatorId,
+            'creator_name': creatorName,
+            'status': game['status'],
+            'visibility': game['visibility'],
+            'is_public': game['is_public'] as bool? ?? false,
+          });
+          
+          if (kDebugMode) {
+            print('[DEBUG] Added game $reqId: myTeamName=$myTeamName, creatorName=$creatorName');
+            print('[DEBUG] Added game $reqId: isOpenChallenge=$isOpenChallengeGame, otherTeamNames=$otherTeamNames, final is_open_challenge=${isOpenChallengeGame && otherTeamNames.isEmpty}');
+          }
+        }
+      }
+
+      return result;
+    } catch (e) {
+      if (kDebugMode) {
+        print('[ERROR] getAwaitingOpponentConfirmationGames: $e');
+      }
+      return [];
+    }
+  }
+
+  /// Get public games that match user's notification preferences
+  /// Returns games within user's notification radius and matching sports
+  Future<List<Map<String, dynamic>>> getPublicGamesForUser({
+    required String userId,
+    required String? userZipCode,
+    required double? userLat,
+    required double? userLng,
+  }) async {
+    try {
+      // Get user's notification preferences
+      final userRow = await supa
+          .from('users')
+          .select('notification_radius_miles, notification_sports')
+          .eq('id', userId)
+          .maybeSingle();
+
+      final notificationRadius = (userRow?['notification_radius_miles'] as int?) ?? 25;
+      final notificationSports = (userRow?['notification_sports'] as List<dynamic>?)?.map((s) => s.toString().toLowerCase()).toList() ?? [];
+      final notifyAllSports = notificationSports.isEmpty;
+
+      // Get all public games (individual and team)
+      final publicGames = await supa
+          .from('instant_match_requests')
+          .select('id, sport, zip_code, mode, match_type, start_time_1, start_time_2, venue, status, created_by, creator_id, radius_miles, visibility, is_public, num_players, proficiency_level, details')
+          .eq('is_public', true)
+          .eq('visibility', 'public')
+          .neq('status', 'cancelled')
+          .neq('created_by', userId); // Exclude games created by user
+
+      if (publicGames is! List || publicGames.isEmpty) {
+        return [];
+      }
+
+      final matchingGames = <Map<String, dynamic>>[];
+
+      for (final game in publicGames) {
+        final gameSport = (game['sport'] as String? ?? '').toLowerCase();
+        
+        // Check sport filter
+        if (!notifyAllSports && !notificationSports.contains(gameSport)) {
+          continue;
+        }
+
+        // Check distance (if we have coordinates, use them; otherwise use ZIP)
+        bool isWithinRadius = false;
+        
+        if (userLat != null && userLng != null) {
+          // Use coordinates for distance calculation
+          final gameZip = game['zip_code'] as String?;
+          if (gameZip != null) {
+            // For now, if ZIP codes match, consider within radius
+            // TODO: Implement proper distance calculation using coordinates
+            // For simplicity, if user has coordinates, we'll check ZIP match or use game's radius
+            final gameRadius = game['radius_miles'] as int? ?? 75;
+            // If game radius is large enough, include it
+            if (gameRadius >= notificationRadius) {
+              isWithinRadius = true;
+            } else if (gameZip == userZipCode) {
+              isWithinRadius = true;
+            }
+          }
+        } else if (userZipCode != null) {
+          // Use ZIP code matching
+          final gameZip = game['zip_code'] as String?;
+          final gameRadius = game['radius_miles'] as int? ?? 75;
+          
+          if (gameZip == userZipCode) {
+            isWithinRadius = true;
+          } else if (gameRadius >= notificationRadius) {
+            // If game has a large radius, include it
+            isWithinRadius = true;
+          }
+        }
+
+        if (isWithinRadius) {
+          // Get creator info
+          final creatorId = game['created_by'] as String? ?? game['creator_id'] as String?;
+          Map<String, dynamic>? creatorInfo;
+          if (creatorId != null) {
+            creatorInfo = await supa
+                .from('users')
+                .select('id, full_name, photo_url')
+                .eq('id', creatorId)
+                .maybeSingle() as Map<String, dynamic>?;
+          }
+
+          // Parse dates
+          DateTime? startDt;
+          DateTime? endDt;
+          if (game['start_time_1'] != null) {
+            try {
+              startDt = DateTime.parse(game['start_time_1']).toLocal();
+            } catch (_) {}
+          }
+          if (game['start_time_2'] != null) {
+            try {
+              endDt = DateTime.parse(game['start_time_2']).toLocal();
+            } catch (_) {}
+          }
+
+          matchingGames.add({
+            'request_id': game['id'],
+            'sport': game['sport'],
+            'mode': game['mode'],
+            'match_type': game['match_type'],
+            'start_time': startDt,
+            'end_time': endDt,
+            'venue': game['venue'],
+            'details': game['details'],
+            'creator_id': creatorId,
+            'creator_name': creatorInfo?['full_name'] ?? 'Unknown',
+            'creator_photo': creatorInfo?['photo_url'],
+            'num_players': game['num_players'],
+            'proficiency_level': game['proficiency_level'],
+            'status': game['status'],
+            'visibility': game['visibility'],
+            'is_public': true,
+          });
+        }
+      }
+
+      // Sort by start time (newest first)
+      matchingGames.sort((a, b) {
+        final ad = a['start_time'] as DateTime?;
+        final bd = b['start_time'] as DateTime?;
+        if (ad == null && bd == null) return 0;
+        if (ad == null) return 1;
+        if (bd == null) return -1;
+        return bd.compareTo(ad);
+      });
+
+      return matchingGames;
+    } catch (e) {
+      if (kDebugMode) {
+        print('[ERROR] getPublicGamesForUser: $e');
+      }
+      return [];
+    }
   }
 }

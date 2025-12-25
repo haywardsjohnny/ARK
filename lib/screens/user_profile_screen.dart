@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
+import '../services/location_service.dart';
 import '../widgets/global_search_sheet.dart';
 
 import 'profile_setup_screen.dart';
@@ -22,8 +23,8 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
   Map<String, dynamic>? _userRow;
   List<String> _sports = [];
   int _teamsCount = 0;
-  String? _baseCity;
-  String? _baseState;
+  int _notificationRadius = 25; // Default 25 miles
+  List<String> _notificationSports = []; // Empty = all sports
   List<Map<String, dynamic>> _teams = [];
   List<Map<String, dynamic>> _friends = [];
   List<Map<String, dynamic>> _incomingRequests = [];
@@ -90,10 +91,10 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
     final userId = _effectiveUserId!;
 
     try {
-      // 1) Load main user row
+      // 1) Load main user row (including notification preferences)
       final userRow = await supa
           .from('users')
-          .select('id, full_name, base_zip_code, photo_url')
+          .select('id, full_name, base_zip_code, photo_url, notification_radius_miles, notification_sports')
           .eq('id', userId)
           .maybeSingle();
 
@@ -160,22 +161,8 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
         }
       }
 
-      // 5) City / State via zip_codes
-      String? baseCity;
-      String? baseState;
-      final baseZip = (userRow?['base_zip_code'] as String?)?.trim();
-      if (baseZip != null && baseZip.isNotEmpty) {
-        final zipRow = await supa
-            .from('zip_codes')
-            .select('city, state')
-            .eq('zip', baseZip)
-            .maybeSingle();
-
-        if (zipRow != null) {
-          baseCity = zipRow['city'] as String?;
-          baseState = zipRow['state'] as String?;
-        }
-      }
+      // 5) Location is now device-based, not ZIP-based
+      // No need to fetch city/state from ZIP codes
 
       // 6) Accepted friends (bidirectional) — for listing
       final outgoingRows = await supa
@@ -305,46 +292,78 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
         }
       }
 
+      // 8) Load friends groups (for profile user - can be self or other user)
+      List<Map<String, dynamic>> groups = [];
+      // First, get groups where profile user is the creator
+      final createdGroupsRows = await supa
+          .from('friends_groups')
+          .select('id, name, created_by, sport')
+          .eq('created_by', userId)
+          .order('sport, name');
+      
+      // Then, get group IDs where profile user is a member
+      final memberGroupsRows = await supa
+          .from('friends_group_members')
+          .select('group_id')
+          .eq('user_id', userId);
+      
+      // Collect all group IDs (created + member)
+      Set<String> allGroupIds = {};
+      if (createdGroupsRows is List) {
+        for (final g in createdGroupsRows) {
+          final groupId = g['id'] as String?;
+          if (groupId != null) allGroupIds.add(groupId);
+        }
+      }
+      if (memberGroupsRows is List) {
+        for (final m in memberGroupsRows) {
+          final groupId = m['group_id'] as String?;
+          if (groupId != null) allGroupIds.add(groupId);
+        }
+      }
+      
+      // Fetch all groups (if we have member groups that aren't in created groups)
+      if (allGroupIds.isNotEmpty) {
+        final allGroupsRows = await supa
+            .from('friends_groups')
+            .select('id, name, created_by, sport')
+            .inFilter('id', allGroupIds.toList())
+            .order('sport, name');
+        
+        if (allGroupsRows is List) {
+          for (final g in allGroupsRows) {
+            // Get member count for each group
+            final memberRows = await supa
+                .from('friends_group_members')
+                .select('id')
+                .eq('group_id', g['id']);
+            
+            groups.add({
+              'id': g['id'],
+              'name': g['name'],
+              'sport': g['sport'],
+              'created_by': g['created_by'],
+              'member_count': memberRows is List ? memberRows.length : 0,
+            });
+          }
+        }
+      }
+
       setState(() {
         _userRow = userRow != null ? Map<String, dynamic>.from(userRow) : null;
         _sports = sports;
         _teamsCount = teamsCount;
-        _baseCity = baseCity;
-        _baseState = baseState;
+        
+        // Load notification preferences
+        _notificationRadius = (userRow?['notification_radius_miles'] as int?) ?? 25;
+        final sportsArray = userRow?['notification_sports'] as List<dynamic>?;
+        _notificationSports = sportsArray?.map((s) => s.toString()).toList() ?? [];
         _teams = teams;
         _friends = friends;
         _incomingRequests = incomingRequests;
         _friendRelationship = relationship;
         _friendRequestIdForProfile = relReqId;
-        
-        // 8) Load friends groups (only for self)
-        if (_isSelf) {
-          final groupsRows = await supa
-              .from('friends_groups')
-              .select('id, name, created_by')
-              .or('created_by.eq.$userId,id.in.(select group_id from friends_group_members where user_id.eq.$userId)')
-              .order('name');
-          
-          List<Map<String, dynamic>> groups = [];
-          if (groupsRows is List) {
-            for (final g in groupsRows) {
-              // Get member count for each group
-              final memberRows = await supa
-                  .from('friends_group_members')
-                  .select('id')
-                  .eq('group_id', g['id']);
-              
-              groups.add({
-                'id': g['id'],
-                'name': g['name'],
-                'created_by': g['created_by'],
-                'member_count': memberRows is List ? memberRows.length : 0,
-              });
-            }
-          }
-          _friendsGroups = groups;
-        }
-        
+        _friendsGroups = groups;
         _loading = false;
       });
     } catch (e) {
@@ -388,6 +407,10 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
   Future<void> _logout() async {
     final supa = Supabase.instance.client;
     try {
+      // Note: We don't clear location cache on logout anymore
+      // Cache is now user-specific, so each user has their own cached location
+      // This allows faster loading while keeping locations separate per user
+      
       await supa.auth.signOut();
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
@@ -596,7 +619,6 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
     if (currentUserId == null) return;
 
     final nameCtrl = TextEditingController();
-    final zipCtrl = TextEditingController();
     final emailCtrl = TextEditingController();
     final phoneCtrl = TextEditingController();
 
@@ -647,7 +669,6 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
           builder: (ctx, setSheetState) {
             Future<void> doSearch() async {
               final name = nameCtrl.text.trim();
-              final zip = zipCtrl.text.trim();
               final email = emailCtrl.text.trim();
               final phone = phoneCtrl.text.trim();
 
@@ -656,14 +677,11 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
                 var query = supa
                     .from('users')
                     .select(
-                        'id, full_name, photo_url, base_zip_code, email, phone')
+                        'id, full_name, photo_url, email, phone')
                     .neq('id', currentUserId);
 
                 if (name.isNotEmpty) {
                   query = query.ilike('full_name', '%$name%');
-                }
-                if (zip.isNotEmpty) {
-                  query = query.eq('base_zip_code', zip);
                 }
                 if (email.isNotEmpty) {
                   query = query.ilike('email', '%$email%');
@@ -770,15 +788,6 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
                     keyboardType: TextInputType.phone,
                   ),
                   const SizedBox(height: 8),
-                  TextField(
-                    controller: zipCtrl,
-                    decoration: const InputDecoration(
-                      labelText: 'ZIP (optional)',
-                      prefixIcon: Icon(Icons.location_on_outlined),
-                    ),
-                    keyboardType: TextInputType.number,
-                  ),
-                  const SizedBox(height: 8),
                   Align(
                     alignment: Alignment.centerRight,
                     child: ElevatedButton.icon(
@@ -793,7 +802,7 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
                     const Align(
                       alignment: Alignment.centerLeft,
                       child: Text(
-                        'Search players by name, email, phone or ZIP to add as friends.',
+                        'Search players by name, email, or phone to add as friends.',
                         style: TextStyle(
                           fontSize: 12,
                           color: Colors.grey,
@@ -816,8 +825,6 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
                                     r['full_name'] as String? ?? 'Unknown';
                                 final photoUrl =
                                     r['photo_url'] as String?;
-                                final zip =
-                                    r['base_zip_code'] as String?;
                                 final email =
                                     r['email'] as String?;
                                 final phone =
@@ -860,9 +867,6 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
                                 }
 
                                 final subtitleParts = <String>[];
-                                if (zip != null) {
-                                  subtitleParts.add('ZIP: $zip');
-                                }
                                 if (email != null &&
                                     email.isNotEmpty) {
                                   subtitleParts.add(email);
@@ -923,9 +927,6 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
     }
 
     final nameCtrl = TextEditingController();
-    final zipCtrl = TextEditingController(
-      text: (_userRow?['base_zip_code'] as String?) ?? '',
-    );
     final descCtrl = TextEditingController();
     String? selectedSport;
     String? selectedLevel;
@@ -942,15 +943,13 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
           builder: (ctx, setSheetState) {
             Future<void> submit() async {
               final teamName = nameCtrl.text.trim();
-              final zip = zipCtrl.text.trim();
               final desc = descCtrl.text.trim();
 
               if (selectedSport == null ||
-                  teamName.isEmpty ||
-                  zip.isEmpty) {
+                  teamName.isEmpty) {
                 setSheetState(() {
                   errorText =
-                      'Sport, Team name and ZIP code are required.';
+                      'Sport and Team name are required.';
                 });
                 return;
               }
@@ -967,7 +966,6 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
                     .insert({
                       'name': teamName,
                       'sport': selectedSport,
-                      'zip_code': zip,
                       'description': desc.isEmpty ? null : desc,
                       'proficiency_level': selectedLevel,
                       'created_by': creatorId,
@@ -1058,16 +1056,6 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
                     ),
                     const SizedBox(height: 8),
 
-                    // ZIP
-                    TextField(
-                      controller: zipCtrl,
-                      decoration: const InputDecoration(
-                        labelText: 'Team ZIP code *',
-                        prefixIcon: Icon(Icons.location_on_outlined),
-                      ),
-                      keyboardType: TextInputType.number,
-                    ),
-                    const SizedBox(height: 8),
 
                     // Proficiency level
                     DropdownButtonFormField<String>(
@@ -1318,12 +1306,18 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
   Future<void> _showCreateFriendsGroupDialog() async {
     final nameController = TextEditingController();
     final selectedFriendIds = <String>{};
+    String? selectedSport;
 
     await showDialog(
       context: context,
       builder: (context) {
         return StatefulBuilder(
           builder: (context, setDialogState) {
+            String _displaySport(String key) {
+              return key.replaceAll('_', ' ').split(' ').map((w) =>
+                  w.isEmpty ? w : w[0].toUpperCase() + w.substring(1).toLowerCase()).join(' ');
+            }
+
             return AlertDialog(
               title: const Text('Create Friends Group'),
               content: SizedBox(
@@ -1340,40 +1334,69 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
                     ),
                     const SizedBox(height: 16),
                     const Text(
-                      'Select friends to add:',
+                      'Select Sport:',
                       style: TextStyle(fontWeight: FontWeight.bold),
                     ),
                     const SizedBox(height: 8),
-                    SizedBox(
-                      height: 200,
-                      child: _friends.isEmpty
-                          ? const Center(
-                              child: Text('No friends to add'),
-                            )
-                          : ListView.builder(
-                              itemCount: _friends.length,
-                              itemBuilder: (context, index) {
-                                final friend = _friends[index];
-                                final friendId = friend['id'] as String;
-                                final friendName = friend['full_name'] as String? ?? 'Unknown';
-                                final isSelected = selectedFriendIds.contains(friendId);
-
-                                return CheckboxListTile(
-                                  title: Text(friendName),
-                                  value: isSelected,
-                                  onChanged: (value) {
-                                    setDialogState(() {
-                                      if (value == true) {
-                                        selectedFriendIds.add(friendId);
-                                      } else {
-                                        selectedFriendIds.remove(friendId);
-                                      }
-                                    });
-                                  },
-                                );
-                              },
-                            ),
+                    DropdownButtonFormField<String>(
+                      value: selectedSport,
+                      decoration: const InputDecoration(
+                        border: OutlineInputBorder(),
+                        hintText: 'Choose a sport',
+                      ),
+                      items: _sports.map((sport) {
+                        return DropdownMenuItem<String>(
+                          value: sport,
+                          child: Text(_displaySport(sport)),
+                        );
+                      }).toList(),
+                      onChanged: (value) {
+                        setDialogState(() {
+                          selectedSport = value;
+                        });
+                      },
                     ),
+                    if (selectedSport != null) ...[
+                      const SizedBox(height: 16),
+                      const Text(
+                        'Select friends to add:',
+                        style: TextStyle(fontWeight: FontWeight.bold),
+                      ),
+                      const SizedBox(height: 8),
+                      SizedBox(
+                        height: 200,
+                        child: _friends.isEmpty
+                            ? const Center(
+                                child: Text(
+                                  'No friends available',
+                                  style: TextStyle(color: Colors.grey),
+                                ),
+                              )
+                            : ListView.builder(
+                                itemCount: _friends.length,
+                                itemBuilder: (context, index) {
+                                  final friend = _friends[index];
+                                  final friendId = friend['id'] as String;
+                                  final friendName = friend['full_name'] as String? ?? 'Unknown';
+                                  final isSelected = selectedFriendIds.contains(friendId);
+
+                                  return CheckboxListTile(
+                                    title: Text(friendName),
+                                    value: isSelected,
+                                    onChanged: (value) {
+                                      setDialogState(() {
+                                        if (value == true) {
+                                          selectedFriendIds.add(friendId);
+                                        } else {
+                                          selectedFriendIds.remove(friendId);
+                                        }
+                                      });
+                                    },
+                                  );
+                                },
+                              ),
+                      ),
+                    ],
                   ],
                 ),
               ),
@@ -1391,8 +1414,23 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
                       return;
                     }
 
+                    if (selectedSport == null) {
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        const SnackBar(content: Text('Please select a sport')),
+                      );
+                      return;
+                    }
+
+                    if (selectedFriendIds.isEmpty) {
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        const SnackBar(content: Text('Please select at least one friend')),
+                      );
+                      return;
+                    }
+
                     await _createFriendsGroup(
                       nameController.text.trim(),
+                      selectedSport!,
                       selectedFriendIds.toList(),
                     );
                     if (context.mounted) Navigator.pop(context);
@@ -1407,7 +1445,259 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
     );
   }
 
-  Future<void> _createFriendsGroup(String name, List<String> friendIds) async {
+  Future<void> _showManageFriendsGroupSheet() async {
+    await showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (context) => DraggableScrollableSheet(
+        initialChildSize: 0.7,
+        minChildSize: 0.5,
+        maxChildSize: 0.9,
+        expand: false,
+        builder: (context, scrollController) {
+          return Column(
+            children: [
+              Container(
+                padding: const EdgeInsets.all(16),
+                decoration: BoxDecoration(
+                  border: Border(
+                    bottom: BorderSide(color: Colors.grey.shade300),
+                  ),
+                ),
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    const Text(
+                      'Manage Friends Groups',
+                      style: TextStyle(
+                        fontSize: 20,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                    IconButton(
+                      icon: const Icon(Icons.close),
+                      onPressed: () => Navigator.pop(context),
+                    ),
+                  ],
+                ),
+              ),
+              Expanded(
+                child: _friendsGroups.isEmpty
+                    ? Center(
+                        child: Column(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: [
+                            Icon(
+                              Icons.group_off,
+                              size: 64,
+                              color: Colors.grey.shade400,
+                            ),
+                            const SizedBox(height: 16),
+                            Text(
+                              'No friends groups yet',
+                              style: TextStyle(
+                                fontSize: 16,
+                                color: Colors.grey.shade600,
+                              ),
+                            ),
+                            const SizedBox(height: 8),
+                            Text(
+                              'Create a group to get started',
+                              style: TextStyle(
+                                fontSize: 14,
+                                color: Colors.grey.shade500,
+                              ),
+                            ),
+                          ],
+                        ),
+                      )
+                    : Builder(
+                        builder: (context) {
+                          // Group by sport
+                          final Map<String, List<Map<String, dynamic>>> groupsBySport = {};
+                          for (final group in _friendsGroups) {
+                            final sport = (group['sport'] as String?) ?? 'Other';
+                            groupsBySport.putIfAbsent(sport, () => []).add(group);
+                          }
+
+                          // Sort sports
+                          final sortedSports = groupsBySport.keys.toList()..sort();
+
+                          String _displaySport(String key) {
+                            return key.replaceAll('_', ' ').split(' ').map((w) =>
+                                w.isEmpty ? w : w[0].toUpperCase() + w.substring(1).toLowerCase()).join(' ');
+                          }
+
+                          return ListView(
+                            controller: scrollController,
+                            padding: const EdgeInsets.all(16),
+                            children: sortedSports.expand<Widget>((sportKey) {
+                              final sportGroups = groupsBySport[sportKey]!;
+                              return [
+                                // Sport header
+                                Padding(
+                                  padding: const EdgeInsets.only(top: 8, bottom: 8),
+                                  child: Row(
+                                    children: [
+                                      const Icon(
+                                        Icons.sports,
+                                        size: 18,
+                                        color: Colors.black87,
+                                      ),
+                                      const SizedBox(width: 6),
+                                      Text(
+                                        _displaySport(sportKey),
+                                        style: const TextStyle(
+                                          fontSize: 15,
+                                          fontWeight: FontWeight.w600,
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                                // Groups for this sport
+                                ...sportGroups.map<Widget>((group) {
+                                  final groupId = group['id'] as String;
+                                  final groupName = group['name'] as String? ?? 'Unnamed Group';
+                                  final groupSport = group['sport'] as String?;
+                                  final memberCount = group['member_count'] as int? ?? 0;
+                                  final isCreator = (group['created_by'] as String?) == _currentUserId;
+
+                                  return Card(
+                                    margin: const EdgeInsets.only(bottom: 12),
+                                    child: ListTile(
+                                      leading: CircleAvatar(
+                                        backgroundColor: Colors.blue.shade100,
+                                        child: Icon(
+                                          Icons.group,
+                                          color: Colors.blue.shade700,
+                                        ),
+                                      ),
+                                      title: Text(
+                                        groupSport != null
+                                            ? '$groupName, ${_displaySport(groupSport)}'
+                                            : groupName,
+                                        style: const TextStyle(
+                                          fontWeight: FontWeight.w600,
+                                        ),
+                                      ),
+                                      subtitle: Text(
+                                        '$memberCount ${memberCount == 1 ? 'member' : 'members'}',
+                                      ),
+                                      trailing: PopupMenuButton<String>(
+                                        icon: const Icon(Icons.more_vert),
+                                        onSelected: (value) async {
+                                          Navigator.pop(context); // Close popup menu
+                                          switch (value) {
+                                            case 'view':
+                                              Navigator.pop(context); // Close bottom sheet
+                                              _showFriendsGroupDetails(group);
+                                              break;
+                                            case 'edit':
+                                              if (isCreator) {
+                                                Navigator.pop(context); // Close bottom sheet
+                                                _showEditFriendsGroupDialog(group);
+                                              }
+                                              break;
+                                            case 'add_members':
+                                              if (isCreator) {
+                                                Navigator.pop(context); // Close bottom sheet
+                                                await _showAddMembersToGroup(group);
+                                              }
+                                              break;
+                                            case 'delete':
+                                              if (isCreator) {
+                                                Navigator.pop(context); // Close bottom sheet
+                                                _showDeleteFriendsGroupDialog(group);
+                                              }
+                                              break;
+                                            case 'leave':
+                                              if (!isCreator) {
+                                                Navigator.pop(context); // Close bottom sheet
+                                                _leaveFriendsGroup(groupId, groupName);
+                                              }
+                                              break;
+                                          }
+                                        },
+                                        itemBuilder: (context) => [
+                                          const PopupMenuItem(
+                                            value: 'view',
+                                            child: Row(
+                                              children: [
+                                                Icon(Icons.visibility, size: 20),
+                                                SizedBox(width: 8),
+                                                Text('View Details'),
+                                              ],
+                                            ),
+                                          ),
+                                          if (isCreator) ...[
+                                            const PopupMenuItem(
+                                              value: 'edit',
+                                              child: Row(
+                                                children: [
+                                                  Icon(Icons.edit, size: 20),
+                                                  SizedBox(width: 8),
+                                                  Text('Edit Group'),
+                                                ],
+                                              ),
+                                            ),
+                                            const PopupMenuItem(
+                                              value: 'add_members',
+                                              child: Row(
+                                                children: [
+                                                  Icon(Icons.person_add, size: 20),
+                                                  SizedBox(width: 8),
+                                                  Text('Add Members'),
+                                                ],
+                                              ),
+                                            ),
+                                            const PopupMenuItem(
+                                              value: 'delete',
+                                              child: Row(
+                                                children: [
+                                                  Icon(Icons.delete, size: 20, color: Colors.red),
+                                                  SizedBox(width: 8),
+                                                  Text('Delete Group', style: TextStyle(color: Colors.red)),
+                                                ],
+                                              ),
+                                            ),
+                                          ] else
+                                            const PopupMenuItem(
+                                              value: 'leave',
+                                              child: Row(
+                                                children: [
+                                                  Icon(Icons.exit_to_app, size: 20),
+                                                  SizedBox(width: 8),
+                                                  Text('Leave Group'),
+                                                ],
+                                              ),
+                                            ),
+                                        ],
+                                      ),
+                                      onTap: () {
+                                        Navigator.pop(context); // Close bottom sheet
+                                        _showFriendsGroupDetails(group);
+                                      },
+                                    ),
+                                  );
+                                }),
+                              ];
+                            }).toList(),
+                          );
+                        },
+                      ),
+              ),
+            ],
+          );
+        },
+      ),
+    );
+  }
+
+  Future<void> _createFriendsGroup(String name, String sport, List<String> friendIds) async {
     final supa = Supabase.instance.client;
     final userId = _currentUserId;
     if (userId == null) return;
@@ -1416,7 +1706,7 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
       // Create group
       final groupResult = await supa
           .from('friends_groups')
-          .insert({'name': name, 'created_by': userId})
+          .insert({'name': name, 'sport': sport, 'created_by': userId})
           .select('id')
           .maybeSingle();
 
@@ -1425,16 +1715,27 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
         throw Exception('Failed to create group');
       }
 
-      // Add members
-      if (friendIds.isNotEmpty) {
-        final memberRecords = friendIds.map((friendId) => {
+      // Add members (including creator)
+      // Filter out creator from friendIds if they were somehow selected
+      final membersToAdd = friendIds.where((id) => id != userId).toList();
+      
+      // Create member records: creator + selected friends
+      final memberRecords = <Map<String, dynamic>>[
+        // Add creator as first member
+        {
+          'group_id': groupId,
+          'user_id': userId,
+          'added_by': userId,
+        },
+        // Add selected friends
+        ...membersToAdd.map((friendId) => {
           'group_id': groupId,
           'user_id': friendId,
           'added_by': userId,
-        }).toList();
+        }),
+      ];
 
-        await supa.from('friends_group_members').insert(memberRecords);
-      }
+      await supa.from('friends_group_members').insert(memberRecords);
 
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
@@ -1556,7 +1857,10 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
   Future<void> _showFriendsGroupDetails(Map<String, dynamic> group) async {
     final groupId = group['id'] as String;
     final groupName = group['name'] as String? ?? 'Unnamed Group';
-    final isCreator = group['created_by'] as String? == _currentUserId;
+    final isCreator = (group['created_by'] as String?) == _currentUserId;
+    final currentUserId = _currentUserId;
+
+    if (currentUserId == null) return;
 
     final supa = Supabase.instance.client;
     
@@ -1582,72 +1886,227 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
             .select('id, full_name, photo_url')
             .inFilter('id', memberIds);
 
+    // Check friendship status for each member
+    final Map<String, String> friendshipStatus = {}; // 'accepted', 'pending', 'none'
+    final Map<String, String?> friendRequestIds = {};
+    
+    if (memberIds.isNotEmpty) {
+      // Check if current user is friends with each member
+      final friendsRows = await supa
+          .from('friends')
+          .select('id, friend_id, status')
+          .eq('user_id', currentUserId)
+          .inFilter('friend_id', memberIds);
+
+      if (friendsRows is List) {
+        for (final row in friendsRows) {
+          final friendId = row['friend_id'] as String?;
+          final status = row['status'] as String?;
+          final reqId = row['id'] as String?;
+          if (friendId != null) {
+            friendshipStatus[friendId] = status ?? 'pending';
+            friendRequestIds[friendId] = reqId;
+          }
+        }
+      }
+
+      // Also check reverse (if they sent request to us)
+      final reverseRows = await supa
+          .from('friends')
+          .select('id, user_id, status')
+          .eq('friend_id', currentUserId)
+          .inFilter('user_id', memberIds);
+
+      if (reverseRows is List) {
+        for (final row in reverseRows) {
+          final userId = row['user_id'] as String?;
+          final status = row['status'] as String?;
+          final reqId = row['id'] as String?;
+          if (userId != null) {
+            friendshipStatus[userId] = status ?? 'pending';
+            friendRequestIds[userId] = reqId;
+          }
+        }
+      }
+    }
+
     if (!mounted) return;
 
     await showDialog(
       context: context,
-      builder: (context) => AlertDialog(
-        title: Text(groupName),
-        content: SizedBox(
-          width: double.maxFinite,
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              if (users is List && users.isNotEmpty)
-                ...users.map((user) {
-                  final userId = user['id'] as String;
-                  final userName = user['full_name'] as String? ?? 'Unknown';
-                  final photoUrl = user['photo_url'] as String?;
+      builder: (context) => StatefulBuilder(
+        builder: (context, setDialogState) {
+          Future<void> sendFriendRequest(String friendId, String friendName) async {
+            try {
+              await supa.from('friends').insert({
+                'user_id': currentUserId,
+                'friend_id': friendId,
+                'status': 'pending',
+              });
 
-                  return ListTile(
-                    leading: CircleAvatar(
-                      backgroundImage: photoUrl != null && photoUrl.isNotEmpty
-                          ? NetworkImage(photoUrl)
-                          : null,
-                      child: photoUrl == null || photoUrl.isEmpty
-                          ? Text(userName.isNotEmpty ? userName[0].toUpperCase() : '?')
-                          : null,
-                    ),
-                    title: Text(userName),
-                    trailing: isCreator && userId != _currentUserId
-                        ? IconButton(
-                            icon: const Icon(Icons.remove_circle_outline),
-                            onPressed: () async {
-                              await supa
-                                  .from('friends_group_members')
-                                  .delete()
-                                  .match({'group_id': groupId, 'user_id': userId});
-                              if (context.mounted) {
-                                Navigator.pop(context);
-                                await _showFriendsGroupDetails(group);
-                              }
-                            },
-                          )
-                        : null,
-                  );
-                }).toList()
-              else
-                const Text('No members yet'),
-              if (isCreator) ...[
-                const Divider(),
-                ListTile(
-                  leading: const Icon(Icons.person_add),
-                  title: const Text('Add Members'),
-                  onTap: () async {
-                    Navigator.pop(context);
-                    await _showAddMembersToGroup(group);
-                  },
+              setDialogState(() {
+                friendshipStatus[friendId] = 'pending';
+              });
+
+              if (context.mounted) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  SnackBar(content: Text('Friend request sent to $friendName')),
+                );
+              }
+            } catch (e) {
+              if (context.mounted) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  SnackBar(content: Text('Failed to send request: $e')),
+                );
+              }
+            }
+          }
+
+          return AlertDialog(
+            title: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(groupName),
+                const SizedBox(height: 4),
+                Text(
+                  '${memberIds.length} ${memberIds.length == 1 ? 'member' : 'members'}',
+                  style: const TextStyle(
+                    fontSize: 14,
+                    fontWeight: FontWeight.normal,
+                    color: Colors.grey,
+                  ),
                 ),
               ],
+            ),
+            content: SizedBox(
+              width: double.maxFinite,
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  if (users is List && users.isNotEmpty)
+                    ...users.map((user) {
+                      final userId = user['id'] as String;
+                      final userName = user['full_name'] as String? ?? 'Unknown';
+                      final photoUrl = user['photo_url'] as String?;
+                      final isFriend = friendshipStatus[userId] == 'accepted';
+                      final hasPendingRequest = friendshipStatus[userId] == 'pending';
+                      final isSelf = userId == currentUserId;
+                      final isGroupCreator = userId == group['created_by'];
+
+                      return ListTile(
+                        leading: CircleAvatar(
+                          backgroundImage: photoUrl != null && photoUrl.isNotEmpty
+                              ? NetworkImage(photoUrl)
+                              : null,
+                          child: photoUrl == null || photoUrl.isEmpty
+                              ? Text(userName.isNotEmpty ? userName[0].toUpperCase() : '?')
+                              : null,
+                        ),
+                        title: Row(
+                          children: [
+                            Expanded(
+                              child: Text(userName),
+                            ),
+                            if (isGroupCreator)
+                              Container(
+                                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                                decoration: BoxDecoration(
+                                  color: Colors.blue.shade100,
+                                  borderRadius: BorderRadius.circular(12),
+                                ),
+                                child: const Text(
+                                  'Created by',
+                                  style: TextStyle(
+                                    fontSize: 11,
+                                    color: Colors.blue,
+                                    fontWeight: FontWeight.w600,
+                                  ),
+                                ),
+                              ),
+                          ],
+                        ),
+                        trailing: isSelf
+                            ? const Text(
+                                'You',
+                                style: TextStyle(
+                                  color: Colors.grey,
+                                  fontStyle: FontStyle.italic,
+                                ),
+                              )
+                            : Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  if (!isFriend && !hasPendingRequest)
+                                    TextButton.icon(
+                                      icon: const Icon(Icons.person_add, size: 18),
+                                      label: const Text('Add Friend'),
+                                      onPressed: () => sendFriendRequest(userId, userName),
+                                    ),
+                                  if (hasPendingRequest)
+                                    const Text(
+                                      'Request sent',
+                                      style: TextStyle(
+                                        color: Colors.grey,
+                                        fontSize: 12,
+                                      ),
+                                    ),
+                                  if (isFriend)
+                                    const Icon(
+                                      Icons.check_circle,
+                                      color: Colors.green,
+                                      size: 20,
+                                    ),
+                                  if (isCreator && !isSelf)
+                                    IconButton(
+                                      icon: const Icon(Icons.remove_circle_outline),
+                                      tooltip: 'Remove from group',
+                                      onPressed: () async {
+                                        await supa
+                                            .from('friends_group_members')
+                                            .delete()
+                                            .match({'group_id': groupId, 'user_id': userId});
+                                        if (context.mounted) {
+                                          Navigator.pop(context);
+                                          await _showFriendsGroupDetails(group);
+                                        }
+                                      },
+                                    ),
+                                ],
+                              ),
+                        onTap: () {
+                          Navigator.pop(context);
+                          Navigator.of(context).push(
+                            MaterialPageRoute(
+                              builder: (_) => UserProfileScreen(userId: userId),
+                            ),
+                          );
+                        },
+                      );
+                    }).toList()
+                  else
+                    const Text('No members yet'),
+                  if (isCreator) ...[
+                    const Divider(),
+                    ListTile(
+                      leading: const Icon(Icons.person_add),
+                      title: const Text('Add Members'),
+                      onTap: () async {
+                        Navigator.pop(context);
+                        await _showAddMembersToGroup(group);
+                      },
+                    ),
+                  ],
+                ],
+              ),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(context),
+                child: const Text('Close'),
+              ),
             ],
-          ),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('Close'),
-          ),
-        ],
+          );
+        },
       ),
     );
   }
@@ -1768,6 +2227,54 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text('Failed to add members: $e')),
+      );
+    }
+  }
+
+  Future<void> _showDeleteFriendsGroupDialog(Map<String, dynamic> group) async {
+    final groupId = group['id'] as String;
+    final groupName = group['name'] as String? ?? 'Unnamed Group';
+
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Delete Group?'),
+        content: Text('Are you sure you want to delete "$groupName"? This action cannot be undone.'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancel'),
+          ),
+          ElevatedButton(
+            onPressed: () => Navigator.pop(context, true),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: Colors.red,
+              foregroundColor: Colors.white,
+            ),
+            child: const Text('Delete'),
+          ),
+        ],
+      ),
+    );
+
+    if (confirmed != true) return;
+
+    final supa = Supabase.instance.client;
+    try {
+      await supa
+          .from('friends_groups')
+          .delete()
+          .eq('id', groupId);
+
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Deleted "$groupName"')),
+      );
+      await _loadProfile();
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Failed to delete group: $e')),
       );
     }
   }
@@ -1989,32 +2496,8 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
                                             const SizedBox(height: 4),
                                             Text(
                                               () {
-                                                final zip =
-                                                    _userRow![
-                                                        'base_zip_code'];
-                                                if (zip == null ||
-                                                    (zip as String)
-                                                        .isEmpty) {
-                                                  return 'Location: -';
-                                                }
-                                                final locParts = <String>[];
-                                                locParts
-                                                    .add(zip as String);
-                                                if (_baseCity != null &&
-                                                    _baseCity!
-                                                        .isNotEmpty) {
-                                                  if (_baseState !=
-                                                          null &&
-                                                      _baseState!
-                                                          .isNotEmpty) {
-                                                    locParts.add(
-                                                        '$_baseCity, $_baseState');
-                                                  } else {
-                                                    locParts
-                                                        .add(_baseCity!);
-                                                  }
-                                                }
-                                                return 'Location: ${locParts.join(' • ')}';
+                                                // Location is now device-based, not ZIP-based
+                                                return 'Location: Device-based';
                                               }(),
                                               style: const TextStyle(
                                                 fontSize: 14,
@@ -2023,7 +2506,7 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
                                             ),
                                             const SizedBox(height: 8),
                                             Row(
-                                              children: [
+                                              children: <Widget>[
                                                 const Icon(
                                                   Icons.groups,
                                                   size: 16,
@@ -2058,61 +2541,11 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
 
                           const SizedBox(height: 16),
 
-                          // Sports interests header + button
-                          Row(
-                            mainAxisAlignment:
-                                MainAxisAlignment.spaceBetween,
-                            children: [
-                              Text(
-                                'Sports Interests',
-                                style: Theme.of(context)
-                                    .textTheme
-                                    .titleMedium
-                                    ?.copyWith(
-                                      fontWeight: FontWeight.bold,
-                                    ),
-                              ),
-                              if (_isSelf)
-                                TextButton.icon(
-                                  onPressed: _showSportsInterestSheet,
-                                  icon: const Icon(
-                                    Icons.add_circle_outline,
-                                    size: 18,
-                                  ),
-                                  label: const Text('Add / edit sports'),
-                                ),
-                            ],
-                          ),
-                          const SizedBox(height: 8),
-                          if (_sports.isEmpty)
-                            const Align(
-                              alignment: Alignment.centerLeft,
-                              child: Text(
-                                'No sports selected yet.',
-                                style: TextStyle(
-                                  fontSize: 13,
-                                  color: Colors.grey,
-                                ),
-                              ),
-                            )
-                          else
-                            Wrap(
-                              spacing: 8,
-                              runSpacing: 8,
-                              children: _sports
-                                  .map(
-                                    (s) => Chip(
-                                      label: Text(_toDisplaySport(s)),
-                                      avatar: const Icon(
-                                        Icons.sports,
-                                        size: 16,
-                                      ),
-                                    ),
-                                  )
-                                  .toList(),
-                            ),
-
-                          const SizedBox(height: 24),
+                          // Notification Preferences Section (only for self)
+                          if (_isSelf) ...[
+                            _buildNotificationPreferencesSection(),
+                            const SizedBox(height: 24),
+                          ],
 
                           // Friend requests (self only)
                           if (_isSelf && _incomingRequests.isNotEmpty) ...[
@@ -2136,8 +2569,6 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
                                         'Unknown';
                                 final photoUrl =
                                     r['photo_url'] as String?;
-                                final zip =
-                                    r['base_zip_code'] as String?;
                                 final reqId =
                                     r['request_id'] as String;
 
@@ -2160,9 +2591,6 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
                                           : null,
                                     ),
                                     title: Text(name),
-                                    subtitle: zip != null
-                                        ? Text('ZIP: $zip')
-                                        : null,
                                     trailing: Wrap(
                                       spacing: 4,
                                       children: [
@@ -2263,9 +2691,6 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
                                           : null,
                                     ),
                                     title: Text(name),
-                                    subtitle: zip != null
-                                        ? Text('ZIP: $zip')
-                                        : null,
                                     onTap: () {
                                       Navigator.of(context).push(
                                         MaterialPageRoute(
@@ -2297,32 +2722,87 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
 
                           const SizedBox(height: 24),
 
-                          // Friends Groups section (self only)
-                          if (_isSelf) ...[
+                          // Friends Groups section (show for profile user)
+                          if (_friendsGroups.isNotEmpty || _isSelf) ...[
                             Row(
                               mainAxisAlignment:
                                   MainAxisAlignment.spaceBetween,
                               children: [
-                                Text(
-                                  'Friends Groups',
-                                  style: Theme.of(context)
-                                      .textTheme
-                                      .titleMedium
-                                      ?.copyWith(
-                                        fontWeight: FontWeight.bold,
-                                      ),
+                                Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Text(
+                                      'Friends Groups',
+                                      style: Theme.of(context)
+                                          .textTheme
+                                          .titleMedium
+                                          ?.copyWith(
+                                            fontWeight: FontWeight.bold,
+                                          ),
+                                    ),
+                                    const SizedBox(height: 2),
+                                    Row(
+                                      children: [
+                                        Icon(
+                                          Icons.lock_outline,
+                                          size: 12,
+                                          color: Colors.grey.shade600,
+                                        ),
+                                        const SizedBox(width: 4),
+                                        Text(
+                                          'Private - Only visible to group members',
+                                          style: TextStyle(
+                                            fontSize: 11,
+                                            color: Colors.grey.shade600,
+                                            fontStyle: FontStyle.italic,
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                  ],
                                 ),
-                                TextButton.icon(
-                                  onPressed: _showCreateFriendsGroupDialog,
-                                  icon: const Icon(
-                                    Icons.group_add,
-                                    size: 18,
+                                if (_friendsGroups.isNotEmpty)
+                                  TextButton.icon(
+                                    onPressed: _showManageFriendsGroupSheet,
+                                    icon: const Icon(
+                                      Icons.settings,
+                                      size: 18,
+                                    ),
+                                    label: const Text('Manage'),
                                   ),
-                                  label: const Text('Create Group'),
-                                ),
                               ],
                             ),
                             const SizedBox(height: 8),
+                            
+                            // "Create Friends Group" card (only for self)
+                            if (_isSelf)
+                              Card(
+                                margin: const EdgeInsets.only(bottom: 8),
+                                shape: RoundedRectangleBorder(
+                                  borderRadius: BorderRadius.circular(12),
+                                ),
+                                color: Colors.green.shade50, // Not const
+                                child: ListTile(
+                                  leading: const CircleAvatar(
+                                    backgroundColor: Colors.green,
+                                    child: Icon(
+                                      Icons.group_add,
+                                      color: Colors.white,
+                                    ),
+                                  ),
+                                  title: const Text(
+                                    'Create Friends Group',
+                                    style: TextStyle(
+                                      fontWeight: FontWeight.w600,
+                                    ),
+                                  ),
+                                  subtitle: const Text(
+                                    'Create a group to easily invite multiple friends to games.',
+                                  ),
+                                  onTap: _showCreateFriendsGroupDialog,
+                                ),
+                              ),
+                            
                             if (_friendsGroups.isEmpty)
                               const Align(
                                 alignment: Alignment.centerLeft,
@@ -2335,54 +2815,104 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
                                 ),
                               )
                             else
-                              Column(
-                                children: _friendsGroups.map((group) {
-                                  final groupId = group['id'] as String;
-                                  final groupName = group['name'] as String? ?? 'Unnamed Group';
-                                  final memberCount = group['member_count'] as int? ?? 0;
-                                  final isCreator = group['created_by'] as String? == _effectiveUserId;
+                              Builder(
+                                builder: (context) {
+                                  // Group by sport
+                                  final Map<String, List<Map<String, dynamic>>> groupsBySport = {};
+                                  for (final group in _friendsGroups) {
+                                    final sport = (group['sport'] as String?) ?? 'Other';
+                                    groupsBySport.putIfAbsent(sport, () => []).add(group);
+                                  }
 
-                                  return Card(
-                                    margin: const EdgeInsets.symmetric(
-                                      vertical: 4,
-                                    ),
-                                    child: ListTile(
-                                      leading: CircleAvatar(
-                                        backgroundColor: Colors.blue.shade100,
-                                        child: Icon(
-                                          Icons.group,
-                                          color: Colors.blue.shade700,
-                                        ),
-                                      ),
-                                      title: Text(
-                                        groupName,
-                                        style: const TextStyle(
-                                          fontWeight: FontWeight.w600,
-                                        ),
-                                      ),
-                                      subtitle: Text(
-                                        '$memberCount ${memberCount == 1 ? 'member' : 'members'}',
-                                      ),
-                                      trailing: Row(
-                                        mainAxisSize: MainAxisSize.min,
+                                  // Sort sports
+                                  final sortedSports = groupsBySport.keys.toList()..sort();
+
+                                  return Column(
+                                    children: sortedSports.map((sportKey) {
+                                      final sportGroups = groupsBySport[sportKey]!;
+                                      
+                                      String _displaySport(String key) {
+                                        return key.replaceAll('_', ' ').split(' ').map((w) =>
+                                            w.isEmpty ? w : w[0].toUpperCase() + w.substring(1).toLowerCase()).join(' ');
+                                      }
+
+                                      return Column(
+                                        crossAxisAlignment: CrossAxisAlignment.start,
                                         children: [
-                                          IconButton(
-                                            icon: const Icon(Icons.edit),
-                                            tooltip: 'Edit group',
-                                            onPressed: () => _showEditFriendsGroupDialog(group),
+                                          const SizedBox(height: 8),
+                                          Row(
+                                            children: [
+                                              const Icon(
+                                                Icons.sports,
+                                                size: 18,
+                                                color: Colors.black87,
+                                              ),
+                                              const SizedBox(width: 6),
+                                              Text(
+                                                _displaySport(sportKey),
+                                                style: const TextStyle(
+                                                  fontSize: 15,
+                                                  fontWeight: FontWeight.w600,
+                                                ),
+                                              ),
+                                            ],
                                           ),
-                                          if (!isCreator)
-                                            IconButton(
-                                              icon: const Icon(Icons.exit_to_app),
-                                              tooltip: 'Leave group',
-                                              onPressed: () => _leaveFriendsGroup(groupId, groupName),
-                                            ),
+                                          const SizedBox(height: 4),
+                                          ...sportGroups.map((group) {
+                                            final groupId = group['id'] as String;
+                                            final groupName = group['name'] as String? ?? 'Unnamed Group';
+                                            final groupSport = group['sport'] as String?;
+                                            final memberCount = group['member_count'] as int? ?? 0;
+                                            final isCreator = (group['created_by'] as String?) == _effectiveUserId;
+
+                                            return Card(
+                                              margin: const EdgeInsets.symmetric(
+                                                vertical: 4,
+                                              ),
+                                              child: ListTile(
+                                                leading: CircleAvatar(
+                                                  backgroundColor: Colors.blue.shade100,
+                                                  child: Icon(
+                                                    Icons.group,
+                                                    color: Colors.blue.shade700,
+                                                  ),
+                                                ),
+                                                title: Text(
+                                                  groupSport != null
+                                                      ? '$groupName, ${_displaySport(groupSport)}'
+                                                      : groupName,
+                                                  style: const TextStyle(
+                                                    fontWeight: FontWeight.w600,
+                                                  ),
+                                                ),
+                                                subtitle: Text(
+                                                  '$memberCount ${memberCount == 1 ? 'member' : 'members'}',
+                                                ),
+                                                trailing: Row(
+                                                  mainAxisSize: MainAxisSize.min,
+                                                  children: [
+                                                    IconButton(
+                                                      icon: const Icon(Icons.edit),
+                                                      tooltip: 'Edit group',
+                                                      onPressed: () => _showEditFriendsGroupDialog(group),
+                                                    ),
+                                                    if (!isCreator)
+                                                      IconButton(
+                                                        icon: const Icon(Icons.exit_to_app),
+                                                        tooltip: 'Leave group',
+                                                        onPressed: () => _leaveFriendsGroup(groupId, groupName),
+                                                      ),
+                                                  ],
+                                                ),
+                                                onTap: () => _showFriendsGroupDetails(group),
+                                              ),
+                                            );
+                                          }).toList(),
                                         ],
-                                      ),
-                                      onTap: () => _showFriendsGroupDetails(group),
-                                    ),
+                                      );
+                                    }).toList(),
                                   );
-                                }).toList(),
+                                },
                               ),
                             const SizedBox(height: 24),
                           ],
@@ -2392,14 +2922,38 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
                             mainAxisAlignment:
                                 MainAxisAlignment.spaceBetween,
                             children: [
-                              Text(
-                                'Teams',
-                                style: Theme.of(context)
-                                    .textTheme
-                                    .titleMedium
-                                    ?.copyWith(
-                                      fontWeight: FontWeight.bold,
-                                    ),
+                              Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Text(
+                                    'Teams',
+                                    style: Theme.of(context)
+                                        .textTheme
+                                        .titleMedium
+                                        ?.copyWith(
+                                          fontWeight: FontWeight.bold,
+                                        ),
+                                  ),
+                                  const SizedBox(height: 2),
+                                  Row(
+                                    children: [
+                                      Icon(
+                                        Icons.public,
+                                        size: 12,
+                                        color: Colors.grey.shade600,
+                                      ),
+                                      const SizedBox(width: 4),
+                                      Text(
+                                        'Public - Visible to everyone on Sportsdug',
+                                        style: TextStyle(
+                                          fontSize: 11,
+                                          color: Colors.grey.shade600,
+                                          fontStyle: FontStyle.italic,
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                ],
                               ),
                               if (_isSelf)
                                 TextButton.icon(
@@ -2525,7 +3079,6 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
                                           subtitle: Text(
                                             '${_toDisplaySport(t['sport'] as String? ?? '')}'
                                             ' • ${t['proficiency_level'] ?? 'N/A'}'
-                                            ' • ZIP ${t['zip_code'] ?? '-'}',
                                           ),
                                           trailing: roleText != null && roleColor != null
                                               ? Chip(
@@ -2568,5 +3121,161 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
                   ),
                 ),
     );
+  }
+
+  Widget _buildNotificationPreferencesSection() {
+    return Card(
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(16),
+      ),
+      elevation: 3,
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                const Icon(Icons.notifications_active, color: Colors.orange),
+                const SizedBox(width: 8),
+                const Text(
+                  'Notification Preferences',
+                  style: TextStyle(
+                    fontSize: 18,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 16),
+            
+            // Notification Radius
+            Text(
+              'Notification Radius: $_notificationRadius miles',
+              style: const TextStyle(
+                fontSize: 14,
+                fontWeight: FontWeight.w500,
+              ),
+            ),
+            const SizedBox(height: 8),
+            Slider(
+              value: _notificationRadius.toDouble(),
+              min: 5,
+              max: 100,
+              divisions: 19,
+              label: '$_notificationRadius miles',
+              onChanged: (value) {
+                setState(() {
+                  _notificationRadius = value.round();
+                });
+              },
+            ),
+            const SizedBox(height: 16),
+            
+            // Sports Selection
+            const Text(
+              'Notify me about games in:',
+              style: TextStyle(
+                fontSize: 14,
+                fontWeight: FontWeight.w500,
+              ),
+            ),
+            const SizedBox(height: 8),
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: [
+                // "All Sports" option
+                FilterChip(
+                  label: const Text('All Sports'),
+                  selected: _notificationSports.isEmpty,
+                  onSelected: (selected) {
+                    setState(() {
+                      if (selected) {
+                        _notificationSports = [];
+                      } else {
+                        // If deselecting "All Sports", select all individual sports
+                        _notificationSports = const [
+                          'badminton', 'basketball', 'cricket', 'football',
+                          'pickleball', 'soccer', 'table_tennis', 'tennis', 'volleyball'
+                        ];
+                      }
+                    });
+                  },
+                ),
+                // Individual sports
+                ...const [
+                  'Badminton', 'Basketball', 'Cricket', 'Football',
+                  'Pickleball', 'Soccer', 'Table Tennis', 'Tennis', 'Volleyball'
+                ].map((sport) {
+                  final sportKey = sport.toLowerCase().replaceAll(' ', '_');
+                  return FilterChip(
+                    label: Text(sport),
+                    selected: _notificationSports.isEmpty || _notificationSports.contains(sportKey),
+                    onSelected: (selected) {
+                      setState(() {
+                        if (_notificationSports.isEmpty) {
+                          // If "All Sports" was selected, switch to individual selection
+                          _notificationSports = const [
+                            'badminton', 'basketball', 'cricket', 'football',
+                            'pickleball', 'soccer', 'table_tennis', 'tennis', 'volleyball'
+                          ];
+                        }
+                        if (selected) {
+                          if (!_notificationSports.contains(sportKey)) {
+                            _notificationSports.add(sportKey);
+                          }
+                        } else {
+                          _notificationSports.remove(sportKey);
+                        }
+                        // If all sports selected, switch to "All Sports" mode
+                        if (_notificationSports.length == 9) {
+                          _notificationSports = [];
+                        }
+                      });
+                    },
+                  );
+                }),
+              ],
+            ),
+            const SizedBox(height: 16),
+            
+            // Save button
+            ElevatedButton.icon(
+              onPressed: _saveNotificationPreferences,
+              icon: const Icon(Icons.save),
+              label: const Text('Save Preferences'),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: Colors.orange,
+                foregroundColor: Colors.white,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future<void> _saveNotificationPreferences() async {
+    final supa = Supabase.instance.client;
+    final userId = _effectiveUserId;
+    if (userId == null) return;
+
+    try {
+      await supa.from('users').update({
+        'notification_radius_miles': _notificationRadius,
+        'notification_sports': _notificationSports.isEmpty ? null : _notificationSports,
+      }).eq('id', userId);
+
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Notification preferences saved!')),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Failed to save preferences: $e')),
+      );
+    }
   }
 }

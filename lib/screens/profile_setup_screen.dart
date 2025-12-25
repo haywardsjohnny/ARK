@@ -5,6 +5,7 @@ import 'user_profile_screen.dart';
 import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
+import '../services/location_service.dart';
 
 import 'select_sports_screen.dart';
 import 'friends_screen.dart';
@@ -19,7 +20,6 @@ class ProfileSetupScreen extends StatefulWidget {
 
 class _ProfileSetupScreenState extends State<ProfileSetupScreen> {
   final _nameController = TextEditingController();
-  final _zipController = TextEditingController();
   final _bioController = TextEditingController();
 
   bool _loadingProfile = false;
@@ -53,7 +53,6 @@ class _ProfileSetupScreenState extends State<ProfileSetupScreen> {
     if (res != null) {
       setState(() {
         _nameController.text = res['full_name'] ?? '';
-        _zipController.text = res['base_zip_code'] ?? '';
         _bioController.text = res['bio'] ?? '';
         _photoUrl = res['photo_url'] as String?;
       });
@@ -75,7 +74,6 @@ class _ProfileSetupScreenState extends State<ProfileSetupScreen> {
     final data = {
       'id': user.id,
       'full_name': _nameController.text.trim(),
-      'base_zip_code': _zipController.text.trim(),
       'bio': _bioController.text.trim(),
       'photo_url': _photoUrl,
       'updated_at': DateTime.now().toIso8601String(),
@@ -102,6 +100,10 @@ Navigator.of(context).pushReplacement(
   }
 
   Future<void> _logout() async {
+    // Note: We don't clear location cache on logout anymore
+    // Cache is now user-specific, so each user has their own cached location
+    // This allows faster loading while keeping locations separate per user
+    
     await Supabase.instance.client.auth.signOut();
   }
 
@@ -277,17 +279,10 @@ Navigator.of(context).pushReplacement(
               Center(child: _buildAvatar()),
               const SizedBox(height: 24),
 
-              // Name, ZIP, Bio
+              // Name, Bio
               TextField(
                 controller: _nameController,
                 decoration: const InputDecoration(labelText: 'Full Name'),
-              ),
-              const SizedBox(height: 8),
-
-              TextField(
-                controller: _zipController,
-                decoration: const InputDecoration(labelText: 'Base ZIP Code'),
-                keyboardType: TextInputType.number,
               ),
               const SizedBox(height: 8),
 

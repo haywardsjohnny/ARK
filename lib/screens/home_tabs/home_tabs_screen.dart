@@ -1,6 +1,8 @@
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
+import 'package:geolocator/geolocator.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import '../user_profile_screen.dart';
 import '../teams_screen.dart';
@@ -70,14 +72,124 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
 
     try {
       if (kDebugMode) {
-        print('[HomeTabsScreen] Starting location load - using device GPS');
+        print('[HomeTabsScreen] Starting location load - using device GPS with 3s timeout');
       }
       
-      // Try to get device location directly (no timeout, let it try)
-      final deviceLocation = await LocationService.getCurrentLocationDisplay();
+      // Try to get device location with 3-second timeout
+      // If it fails, getCurrentLocationDisplay will use last known ZIP from database
+      final deviceLocation = await LocationService.getCurrentLocationDisplay()
+          .timeout(
+            const Duration(seconds: 3),
+            onTimeout: () {
+              if (kDebugMode) {
+                print('[HomeTabsScreen] Location load timed out after 3 seconds, using fallback');
+              }
+              // Return a placeholder - the service will use last known location
+              return 'Loading...';
+            },
+          );
       
       if (kDebugMode) {
         print('[HomeTabsScreen] Got location: $deviceLocation');
+      }
+      
+      // If still loading, try to get from last known ZIP directly from database
+      // Skip device location attempt since it already timed out
+      if (deviceLocation == 'Loading...' || deviceLocation == 'Location') {
+        if (kDebugMode) {
+          print('[HomeTabsScreen] Device location failed, trying last known ZIP from database');
+        }
+        
+        // Try to get last known ZIP directly from database (skip device location)
+        try {
+          final supa = Supabase.instance.client;
+          final user = supa.auth.currentUser;
+          if (user != null) {
+            final result = await supa
+                .from('users')
+                .select('last_known_zip_code')
+                .eq('id', user.id)
+                .maybeSingle();
+            
+            final lastKnownZip = result?['last_known_zip_code'] as String?;
+            if (lastKnownZip != null && lastKnownZip.isNotEmpty) {
+              if (kDebugMode) {
+                print('[HomeTabsScreen] Found last known ZIP in database: $lastKnownZip');
+              }
+              final cityState = await LocationService.getCityStateFromZip(lastKnownZip);
+              if (cityState != null && mounted) {
+                setState(() {
+                  _currentLocation = cityState;
+                  _loadingLocation = false;
+                });
+                return;
+              }
+            } else {
+              if (kDebugMode) {
+                print('[HomeTabsScreen] No last known ZIP in database');
+              }
+            }
+          }
+        } catch (e) {
+          if (kDebugMode) {
+            print('[HomeTabsScreen] Error getting last known ZIP from database: $e');
+          }
+        }
+        
+        // If database lookup also failed, try cached location
+        try {
+          final prefs = await SharedPreferences.getInstance();
+          final cachedLocation = prefs.getString('cached_location');
+          if (cachedLocation != null && cachedLocation.isNotEmpty && mounted) {
+            if (kDebugMode) {
+              print('[HomeTabsScreen] Using cached location: $cachedLocation');
+            }
+            setState(() {
+              _currentLocation = cachedLocation;
+              _loadingLocation = false;
+            });
+            return;
+          }
+          
+          // Also try cached ZIP code
+          final cachedZip = prefs.getString('cached_zip');
+          if (cachedZip != null && cachedZip.isNotEmpty) {
+            if (kDebugMode) {
+              print('[HomeTabsScreen] Found cached ZIP, converting to city/state: $cachedZip');
+            }
+            // Save it to database for future use
+            try {
+              final supa = Supabase.instance.client;
+              final user = supa.auth.currentUser;
+              if (user != null) {
+                await supa.from('users').update({
+                  'last_known_zip_code': cachedZip,
+                  'updated_at': DateTime.now().toUtc().toIso8601String(),
+                }).eq('id', user.id);
+                if (kDebugMode) {
+                  print('[HomeTabsScreen] Saved cached ZIP to database: $cachedZip');
+                }
+              }
+            } catch (e) {
+              if (kDebugMode) {
+                print('[HomeTabsScreen] Error saving cached ZIP to database: $e');
+              }
+            }
+            
+            final cityState = await LocationService.getCityStateFromZip(cachedZip);
+            if (cityState != null && mounted) {
+              setState(() {
+                _currentLocation = cityState;
+                _loadingLocation = false;
+              });
+              return;
+            }
+          }
+        } catch (e) {
+          if (kDebugMode) {
+            print('[HomeTabsScreen] Error getting cached location: $e');
+          }
+        }
       }
       
       if (mounted) {
@@ -90,6 +202,23 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
     } catch (e) {
       if (kDebugMode) {
         print('[HomeTabsScreen] Location loading error: $e');
+      }
+      
+      // Fallback: Try to get from last known ZIP
+      try {
+        final lastKnownZip = await LocationService.getCurrentZipCode();
+        if (lastKnownZip != null) {
+          final cityState = await LocationService.getCityStateFromZip(lastKnownZip);
+          if (cityState != null && mounted) {
+            setState(() {
+              _currentLocation = cityState;
+              _loadingLocation = false;
+            });
+            return;
+          }
+        }
+      } catch (_) {
+        // Ignore fallback errors
       }
       
       // Wait a bit for profile location to load as fallback
@@ -115,11 +244,13 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
       builder: (context) => const LocationPickerDialog(),
     );
 
-    // If location was changed, reload it
+    // If location was changed, reload it and refresh discovery matches
     if (result == true) {
       await _loadCurrentLocation();
-      // Optionally reload games based on new location
+      
+      // Reload discovery matches with new location for accurate distance calculation
       if (mounted) {
+        await _controller.loadDiscoveryPickupMatches();
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(content: Text('Location updated')),
         );
@@ -513,6 +644,78 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
     }
   }
 
+  Future<void> _toggleTeamRosterPrivacy(String requestId, Map<String, dynamic> match, {required String team}) async {
+    try {
+      final teamAId = match['team_a_id'] as String?;
+      final teamBId = match['team_b_id'] as String?;
+      final teamAName = match['team_a_name'] as String? ?? 'Team A';
+      final teamBName = match['team_b_name'] as String? ?? 'Team B';
+      
+      String fieldName;
+      String teamName;
+      String opponentName;
+      
+      if (team == 'a') {
+        fieldName = 'show_team_a_roster';
+        teamName = teamAName;
+        opponentName = teamBName;
+      } else {
+        fieldName = 'show_team_b_roster';
+        teamName = teamBName;
+        opponentName = teamAName;
+      }
+      
+      final currentValue = match[fieldName] as bool? ?? false;
+      final newValue = !currentValue;
+      
+      final supa = Supabase.instance.client;
+      await supa
+          .from('instant_match_requests')
+          .update({
+            fieldName: newValue,
+            'last_updated_at': DateTime.now().toUtc().toIso8601String(),
+          })
+          .eq('id', requestId);
+      
+      // Reload matches to refresh the UI
+      await _controller.loadAllMyMatches();
+      
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            newValue 
+                ? '$teamName roster is now visible to $opponentName'
+                : '$teamName roster is now hidden from $opponentName (privacy enabled)'
+          ),
+        ),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Failed to update roster privacy: $e')),
+      );
+    }
+  }
+
+  /// Get ZIP code from current device location
+  Future<String?> _getDeviceLocationZipForQuickCreate() async {
+    // Use LocationService.getCurrentZipCode() which handles:
+    // 1. Current device location
+    // 2. Manual location setting
+    // 3. Cached ZIP code
+    // 4. Last known ZIP code from database (fallback)
+    final zip = await LocationService.getCurrentZipCode();
+    if (kDebugMode) {
+      if (zip != null) {
+        print('[DEBUG] Using ZIP code for quick game creation: $zip');
+      } else {
+        print('[DEBUG] ⚠️  No ZIP code available for quick game creation');
+      }
+    }
+    return zip;
+  }
+
   // ---------- CREATE INSTANT MATCH ----------
 
   Future<void> _showCreateInstantMatchSheet() async {
@@ -654,7 +857,7 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
                   'mode': matchType == 'team' ? 'team_vs_team' : 'pickup',
                   'match_type': matchType == 'team' ? 'team_vs_team' : 'pickup',
                   'sport': selectedSport,
-                  'zip_code': _controller.baseZip,
+                  'zip_code': await _getDeviceLocationZipForQuickCreate(), // Use device location
                   'radius_miles': radiusMiles.toInt(),
                   'proficiency_level': proficiencyLevel,
                   'is_public': isPublic,
@@ -999,7 +1202,6 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
     if (creatorId == null) return;
 
     final nameCtrl = TextEditingController();
-    final zipCtrl = TextEditingController(text: _controller.baseZip ?? '');
     final descCtrl = TextEditingController();
     String? selectedSport;
     String? selectedLevel;
@@ -1016,12 +1218,11 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
           builder: (ctx, setSheetState) {
             Future<void> submit() async {
               final teamName = nameCtrl.text.trim();
-              final zip = zipCtrl.text.trim();
               final desc = descCtrl.text.trim();
 
-              if (selectedSport == null || teamName.isEmpty || zip.isEmpty) {
+              if (selectedSport == null || teamName.isEmpty) {
                 setSheetState(() {
-                  errorText = 'Sport, Team name and ZIP code are required.';
+                  errorText = 'Sport and Team name are required.';
                 });
                 return;
               }
@@ -1038,7 +1239,6 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
                     .insert({
                       'name': teamName,
                       'sport': selectedSport,
-                      'zip_code': zip,
                       'description': desc.isEmpty ? null : desc,
                       'proficiency_level': selectedLevel,
                       'created_by': creatorId,
@@ -1126,17 +1326,6 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
                         labelText: 'Team name *',
                         prefixIcon: Icon(Icons.group),
                       ),
-                    ),
-                    const SizedBox(height: 8),
-
-                    // ZIP
-                    TextField(
-                      controller: zipCtrl,
-                      decoration: const InputDecoration(
-                        labelText: 'Team ZIP code *',
-                        prefixIcon: Icon(Icons.location_on_outlined),
-                      ),
-                      keyboardType: TextInputType.number,
                     ),
                     const SizedBox(height: 8),
 
@@ -1262,7 +1451,10 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
 
             DateTime? startDt;
             final st1 = req['start_time_1'];
-            if (st1 is String) startDt = DateTime.tryParse(st1);
+            if (st1 is String) {
+              final parsed = DateTime.tryParse(st1);
+              startDt = parsed?.toLocal();
+            }
 
             return Card(
               margin: const EdgeInsets.symmetric(vertical: 4),
@@ -1713,6 +1905,7 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
           await _controller.loadPendingGamesForAdmin();
           await _controller.loadFriendsOnlyIndividualGames();
           await _controller.loadMyPendingAvailabilityMatches();
+          await _controller.loadPendingIndividualGames();
         },
         child: ListView(
           physics: const AlwaysScrollableScrollPhysics(),
@@ -1757,11 +1950,14 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
               const SizedBox(height: 24),
             ],
             
-            // [ Pending Confirmation ] Section (expanded)
+            // [ Pending Approval ] Section (expanded)
             if (_pendingConfirmationExpanded) ...[
               _buildPendingConfirmationSection(),
               const SizedBox(height: 24),
             ],
+            
+            // Public games should only appear in Discover tab, not in pending sections
+            // Removed Public Pending Approval section
           ],
         ),
       ),
@@ -2569,7 +2765,179 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
     );
   }
 
-  // [ Pending Confirmation ] Section (expanded with details)
+  // [ Public Pending Approval ] Section
+  Widget _buildPublicPendingApprovalSection() {
+    final publicGames = _controller.publicPendingGames;
+
+    if (publicGames.isEmpty) {
+      return const SizedBox.shrink();
+    }
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            const Icon(Icons.public, color: Colors.blue, size: 20),
+            const SizedBox(width: 8),
+            const Text(
+              'Public Pending Approval',
+              style: TextStyle(
+                fontSize: 18,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+            const Spacer(),
+            Text(
+              '${publicGames.length}',
+              style: TextStyle(
+                fontSize: 16,
+                fontWeight: FontWeight.bold,
+                color: Colors.blue.shade700,
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 12),
+        ...publicGames.map((game) => _buildPublicGameCard(game)),
+      ],
+    );
+  }
+
+  Widget _buildPublicGameCard(Map<String, dynamic> game) {
+    final sport = game['sport'] as String? ?? '';
+    final mode = game['mode'] as String? ?? '';
+    final matchType = game['match_type'] as String? ?? '';
+    final startDt = game['start_time'] as DateTime?;
+    final venue = game['venue'] as String?;
+    final creatorName = game['creator_name'] as String? ?? 'Unknown';
+    final details = game['details'] as String?;
+    final numPlayers = game['num_players'] as int?;
+    final proficiencyLevel = game['proficiency_level'] as String?;
+    final isIndividual = mode == 'pickup' || matchType == 'pickup';
+
+    return Card(
+      margin: const EdgeInsets.only(bottom: 12),
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Text(
+                  _getSportEmoji(sport),
+                  style: const TextStyle(fontSize: 24),
+                ),
+                const SizedBox(width: 8),
+                            Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        isIndividual
+                            ? '${_displaySport(sport)} Individual Game'
+                            : '${_displaySport(sport)} Team Game',
+                        style: const TextStyle(
+                          fontSize: 16,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                      Text(
+                        'Created by: $creatorName',
+                        style: TextStyle(
+                          fontSize: 12,
+                          color: Colors.grey.shade600,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            if (startDt != null)
+              Row(
+                children: [
+                  const Icon(Icons.calendar_today, size: 14, color: Colors.grey),
+                  const SizedBox(width: 4),
+                  Text(
+                    '${startDt.year}-${startDt.month.toString().padLeft(2, '0')}-${startDt.day.toString().padLeft(2, '0')}',
+                    style: TextStyle(fontSize: 13, color: Colors.grey.shade700),
+                  ),
+                  const SizedBox(width: 8),
+                  const Icon(Icons.access_time, size: 14, color: Colors.grey),
+                  const SizedBox(width: 4),
+                  Text(
+                    _formatTime(startDt),
+                    style: TextStyle(fontSize: 13, color: Colors.grey.shade700),
+                  ),
+                ],
+              ),
+            if (venue != null && venue.isNotEmpty) ...[
+              const SizedBox(height: 4),
+              Row(
+                children: [
+                  const Icon(Icons.place_outlined, size: 14, color: Colors.grey),
+                  const SizedBox(width: 4),
+                  Expanded(
+                    child: Text(
+                      venue,
+                      style: TextStyle(fontSize: 13, color: Colors.grey.shade700),
+                    ),
+                  ),
+                ],
+              ),
+            ],
+            if (details != null && details.isNotEmpty) ...[
+              const SizedBox(height: 8),
+              Text(
+                details,
+                style: TextStyle(fontSize: 13, color: Colors.grey.shade700),
+              ),
+            ],
+            if (isIndividual && numPlayers != null) ...[
+              const SizedBox(height: 8),
+              Text(
+                'Players needed: $numPlayers',
+                style: TextStyle(fontSize: 13, color: Colors.grey.shade700),
+              ),
+            ],
+            if (proficiencyLevel != null) ...[
+              const SizedBox(height: 4),
+              Text(
+                'Level: $proficiencyLevel',
+                style: TextStyle(fontSize: 13, color: Colors.grey.shade700),
+              ),
+            ],
+            const SizedBox(height: 12),
+            Row(
+              children: [
+                Expanded(
+                  child: OutlinedButton.icon(
+                    onPressed: () => _requestToJoinPublicGame(game),
+                    icon: const Icon(Icons.add_circle_outline),
+                    label: const Text('Request to Join'),
+                  ),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future<void> _requestToJoinPublicGame(Map<String, dynamic> game) async {
+    // Navigate to discover screen or show join dialog
+    // For now, show a message
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('Join game functionality coming soon')),
+    );
+  }
+
+  // [ Pending Approval ] Section (expanded with details)
   Widget _buildPendingConfirmationSection() {
     final pendingAvailabilityGames = _controller.pendingAvailabilityTeamMatches;
     final pendingIndividualGames = _controller.pendingIndividualGames;
@@ -2600,7 +2968,7 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
             const Icon(Icons.event_available, color: Colors.orange, size: 20),
             const SizedBox(width: 8),
             const Text(
-              'Pending Confirmation',
+              'Pending Approval',
               style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
             ),
           ],
@@ -2713,7 +3081,7 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
                   const SizedBox(width: 8),
                   Expanded(
                     child: Text(
-                      'Waiting for organizer approval • $spotsLeft spots left',
+                      '$spotsLeft spots left',
                       style: TextStyle(
                         fontSize: 12,
                         color: Colors.orange.shade900,
@@ -2722,6 +3090,34 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
                   ),
                 ],
               ),
+            ),
+            const SizedBox(height: 12),
+            Row(
+              children: [
+                Expanded(
+                  child: OutlinedButton.icon(
+                    onPressed: () => _acceptIndividualGameAttendance(reqId),
+                    icon: const Icon(Icons.check_circle, color: Colors.green),
+                    label: const Text('Available'),
+                    style: OutlinedButton.styleFrom(
+                      foregroundColor: Colors.green,
+                      side: const BorderSide(color: Colors.green),
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: OutlinedButton.icon(
+                    onPressed: () => _declineIndividualGameAttendance(reqId),
+                    icon: const Icon(Icons.cancel, color: Colors.red),
+                    label: const Text('Not Available'),
+                    style: OutlinedButton.styleFrom(
+                      foregroundColor: Colors.red,
+                      side: const BorderSide(color: Colors.red),
+                    ),
+                  ),
+                ),
+              ],
             ),
           ],
         ),
@@ -3465,8 +3861,9 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
     final friendsOnlyGames = _controller.friendsOnlyIndividualGames.length;
     final pendingAdminApprovalCount = existingPendingInvites + pendingAdminMatches + friendsOnlyGames;
     
-    // 2. Pending Confirmation: Games where user needs to give availability
-    final pendingConfirmationCount = _controller.pendingAvailabilityTeamMatches.length;
+    // 2. Pending Approval: Games where user needs to give availability (team + individual)
+    final pendingConfirmationCount = _controller.pendingAvailabilityTeamMatches.length + 
+                                     _controller.pendingIndividualGames.length;
     
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -3660,7 +4057,7 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
               
               const SizedBox(height: 12),
               
-              // Pending Confirmation
+              // Pending Approval
               InkWell(
                 onTap: pendingConfirmationCount > 0
                     ? () {
@@ -3700,7 +4097,7 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
                             const Text(
-                              'PENDING CONFIRMATION',
+                              'PENDING APPROVAL',
                               style: TextStyle(
                                 fontSize: 12,
                                 color: Colors.white70,
@@ -3983,17 +4380,21 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
 
   Widget _buildMyGamesTab() {
     // Load all matches when tab is opened (if not already loaded or loading)
-    if (_controller.allMyMatches.isEmpty && !_controller.loadingAllMatches) {
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        _controller.loadAllMyMatches();
-      });
-    }
-    
-    // Also load individual games
-    if (_controller.allMyIndividualMatches.isEmpty && !_controller.loadingIndividualMatches) {
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        _controller.loadAllMyIndividualMatches();
-      });
+    // Use a one-time flag to prevent infinite loops
+    if (!_controller.myGamesTabLoadInitiated) {
+      if (_controller.allMyMatches.isEmpty && !_controller.loadingAllMatches) {
+        _controller.myGamesTabLoadInitiated = true;
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          _controller.loadAllMyMatches();
+        });
+      }
+      
+      // Also load individual games
+      if (_controller.allMyIndividualMatches.isEmpty && !_controller.loadingIndividualMatches) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          _controller.loadAllMyIndividualMatches();
+        });
+      }
     }
 
     return Scaffold(
@@ -4021,6 +4422,7 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
         onRefresh: () async {
           await _controller.loadAllMyMatches();
           await _controller.loadAllMyIndividualMatches();
+          await _controller.loadAwaitingOpponentConfirmationGames();
         },
         child: AnimatedBuilder(
           animation: _controller,
@@ -4153,6 +4555,21 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
       );
     }
 
+    // For Team games, show "Awaiting Opponent Confirmation" section first
+    if (_myGamesType == 'Team') {
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          // Awaiting Opponent Confirmation Section
+          _buildAwaitingOpponentConfirmationSection(),
+          const SizedBox(height: 24),
+          // Regular confirmed games
+          _buildRegularTeamGamesSection(),
+        ],
+      );
+    }
+
+    // For Individual games, show regular list
     final filteredMatches = _getFilteredMatches();
 
     if (filteredMatches.isEmpty) {
@@ -4166,9 +4583,296 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
       );
     }
 
-    return _myGamesType == 'Team' 
-        ? _buildMatchesList(filteredMatches)
-        : _buildIndividualMatchesList(filteredMatches);
+    return _buildIndividualMatchesList(filteredMatches);
+  }
+
+  Widget _buildAwaitingOpponentConfirmationSection() {
+    final awaitingGames = _controller.awaitingOpponentConfirmationGames;
+
+    if (awaitingGames.isEmpty) {
+      return const SizedBox.shrink();
+    }
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+          child: Row(
+            children: [
+              Icon(Icons.hourglass_empty, color: Colors.orange.shade700, size: 20),
+              const SizedBox(width: 8),
+              Text(
+                'Awaiting Opponent Confirmation',
+                style: TextStyle(
+                  fontSize: 18,
+                  fontWeight: FontWeight.bold,
+                  color: Colors.orange.shade900,
+                ),
+              ),
+            ],
+          ),
+        ),
+        const SizedBox(height: 8),
+        ...awaitingGames.map((game) => _buildAwaitingOpponentCard(game)),
+      ],
+    );
+  }
+
+  Widget _buildAwaitingOpponentCard(Map<String, dynamic> game) {
+    final sport = game['sport'] as String? ?? '';
+    final sportEmoji = _getSportEmoji(sport);
+    final teamName = game['team_name'] as String? ?? 'My Team';
+    final opponentTeams = game['opponent_teams'] as List<dynamic>? ?? [];
+    final isOpenChallenge = game['is_open_challenge'] as bool? ?? false;
+    final startDt = game['start_time'] as DateTime?;
+    final endDt = game['end_time'] as DateTime?;
+    final venue = game['venue'] as String?;
+    final details = game['details'] as String?;
+    final creatorName = game['creator_name'] as String? ?? 'Unknown';
+    final creatingTeamId = game['team_id'] as String?; // The team that created the game
+    final myTeamId = game['my_team_id'] as String?; // The user's team in this game
+    final isUserOnCreatingTeam = creatingTeamId != null && myTeamId == creatingTeamId;
+
+    return Card(
+      margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+      color: Colors.orange.shade50,
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            // Header
+            Row(
+              children: [
+                Text(sportEmoji, style: const TextStyle(fontSize: 24)),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        '${_displaySport(sport)} • Team Match',
+                        style: const TextStyle(
+                          fontSize: 16,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                      Text(
+                        'Created by: $creatorName',
+                        style: TextStyle(
+                          fontSize: 12,
+                          color: Colors.grey.shade600,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                  decoration: BoxDecoration(
+                    color: Colors.orange.shade200,
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  child: Text(
+                    'Awaiting',
+                    style: TextStyle(
+                      fontSize: 10,
+                      color: Colors.orange.shade900,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 12),
+            
+            // Team info
+            Row(
+              children: [
+                Icon(Icons.group, size: 16, color: Colors.grey.shade700),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    'Your Team: $teamName',
+                    style: TextStyle(
+                      fontSize: 14,
+                      fontWeight: FontWeight.w500,
+                      color: Colors.grey.shade800,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            
+            // Opponent info
+            Row(
+              children: [
+                Icon(Icons.sports_soccer, size: 16, color: Colors.grey.shade700),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    // If there are specific opponent teams, show them (even if isOpenChallenge is true)
+                    // Only show "Open Challenge" if there are no opponent teams
+                    (isOpenChallenge && opponentTeams.isEmpty)
+                        ? 'Opponent: Open Challenge'
+                        : opponentTeams.isNotEmpty
+                            ? 'Opponent: ${opponentTeams.join(', ')}'
+                            : 'Opponent: Open Challenge',
+                    style: TextStyle(
+                      fontSize: 14,
+                      fontWeight: FontWeight.w500,
+                      color: Colors.grey.shade800,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 12),
+            
+            // Date & Time
+            if (startDt != null) ...[
+              Row(
+                children: [
+                  const Icon(Icons.calendar_today, size: 16, color: Colors.grey),
+                  const SizedBox(width: 8),
+                  Text(
+                    '${startDt.year}-${startDt.month.toString().padLeft(2, '0')}-${startDt.day.toString().padLeft(2, '0')}',
+                    style: const TextStyle(fontSize: 14),
+                  ),
+                  if (startDt != null) ...[
+                    const SizedBox(width: 16),
+                    const Icon(Icons.access_time, size: 16, color: Colors.grey),
+                    const SizedBox(width: 8),
+                    Text(
+                      _formatTime(startDt),
+                      style: const TextStyle(fontSize: 14),
+                    ),
+                  ],
+                ],
+              ),
+              const SizedBox(height: 8),
+            ],
+            
+            // Venue
+            if (venue != null && venue.isNotEmpty) ...[
+              Row(
+                children: [
+                  const Icon(Icons.place_outlined, size: 16, color: Colors.grey),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      venue,
+                      style: const TextStyle(fontSize: 14),
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 8),
+            ],
+            
+            // Details
+            if (details != null && details.isNotEmpty) ...[
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Icon(Icons.description, size: 16, color: Colors.grey),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      details,
+                      style: const TextStyle(fontSize: 14),
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 12),
+            ],
+            
+            // Cancel button (only for admins of the creating team)
+            if (isUserOnCreatingTeam && _isAdminForTeam(creatingTeamId)) ...[
+              const SizedBox(height: 8),
+              OutlinedButton.icon(
+                onPressed: () => _confirmCancelAwaitingGame(game),
+                icon: const Icon(Icons.cancel_outlined, size: 18),
+                label: const Text('Cancel Game'),
+                style: OutlinedButton.styleFrom(
+                  foregroundColor: Colors.red,
+                  side: const BorderSide(color: Colors.red),
+                ),
+              ),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// Check if current user is an admin of the given team
+  bool _isAdminForTeam(String? teamId) {
+    if (teamId == null) return false;
+    return _controller.adminTeams.any((team) => team['id'] == teamId);
+  }
+
+  Future<void> _confirmCancelAwaitingGame(Map<String, dynamic> game) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Cancel Game?'),
+        content: const Text('This will cancel the game. This action cannot be undone.'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('No'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: const Text('Yes, Cancel'),
+            style: TextButton.styleFrom(foregroundColor: Colors.red),
+          ),
+        ],
+      ),
+    );
+
+    if (confirmed != true) return;
+
+    try {
+      final requestId = game['request_id'] as String?;
+      if (requestId == null) return;
+
+      await _controller.cancelGameForBothTeams(game);
+      
+                                    if (!mounted) return;
+                                    ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Game cancelled')),
+                                    );
+      
+      // Refresh awaiting games
+      await _controller.loadAwaitingOpponentConfirmationGames();
+                                  } catch (e) {
+                                    if (!mounted) return;
+                                    ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Failed to cancel game: $e')),
+      );
+    }
+  }
+
+  Widget _buildRegularTeamGamesSection() {
+    final filteredMatches = _getFilteredMatches();
+
+    if (filteredMatches.isEmpty) {
+      return Padding(
+        padding: const EdgeInsets.all(16),
+        child: Text(
+          _getEmptyMessage(),
+          style: const TextStyle(fontSize: 14, color: Colors.grey),
+          textAlign: TextAlign.center,
+        ),
+      );
+    }
+
+    return _buildMatchesList(filteredMatches);
   }
 
   List<Map<String, dynamic>> _getFilteredMatches() {
@@ -4495,7 +5199,7 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
                                 style: TextStyle(fontSize: 13, color: Colors.grey.shade700),
                               ),
                               if (endDt != null) ...[
-                                const SizedBox(width: 8),
+                            const SizedBox(width: 8),
                                 const Icon(Icons.access_time, size: 14, color: Colors.grey),
                                 const SizedBox(width: 4),
                                 Text(
@@ -4519,7 +5223,7 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
               // Percentage Bar and Spots Left
               Row(
                 children: [
-                  Expanded(
+                            Expanded(
                     child: StatusBar(
                       percentage: percentage / 100.0,
                       height: 8,
@@ -4968,8 +5672,8 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
       
       await _controller.loadAllMyIndividualMatches();
     } catch (e) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
+                                    if (!mounted) return;
+                                    ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text('Failed to update availability: $e')),
       );
     }
@@ -5012,9 +5716,9 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
           const SnackBar(content: Text('Game cancelled')),
         );
         await _controller.loadAllMyIndividualMatches();
-      } catch (e) {
-        if (!mounted) return;
-        ScaffoldMessenger.of(context).showSnackBar(
+                                  } catch (e) {
+                                    if (!mounted) return;
+                                    ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text('Failed to cancel game: $e')),
         );
       }
@@ -5037,7 +5741,7 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
       }
 
       final userIds = pendingRows
-          .map<String>((r) => r['user_id'] as String?)
+          .map<String?>((r) => r['user_id'] as String?)
           .where((id) => id != null)
           .cast<String>()
           .toList();
@@ -5088,6 +5792,72 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
     }
   }
   
+  Future<void> _acceptIndividualGameAttendance(String requestId) async {
+    try {
+      final supa = Supabase.instance.client;
+      final userId = supa.auth.currentUser?.id;
+      if (userId == null) return;
+
+      // Update user's own attendance status to accepted
+      await supa
+          .from('individual_game_attendance')
+          .update({
+            'status': 'accepted',
+            'updated_at': DateTime.now().toUtc().toIso8601String(),
+          })
+          .eq('request_id', requestId)
+          .eq('user_id', userId);
+
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('You marked yourself as available!')),
+      );
+
+      // Refresh pending games and my games
+      await _controller.loadPendingIndividualGames();
+      await _controller.loadAllMyIndividualMatches();
+      setState(() {});
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Failed to update availability: $e')),
+      );
+    }
+  }
+
+  Future<void> _declineIndividualGameAttendance(String requestId) async {
+    try {
+      final supa = Supabase.instance.client;
+      final userId = supa.auth.currentUser?.id;
+      if (userId == null) return;
+
+      // Update user's own attendance status to declined
+      await supa
+          .from('individual_game_attendance')
+          .update({
+            'status': 'declined',
+            'updated_at': DateTime.now().toUtc().toIso8601String(),
+          })
+          .eq('request_id', requestId)
+          .eq('user_id', userId);
+
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('You marked yourself as not available')),
+      );
+
+      // Refresh pending games and my games
+      await _controller.loadPendingIndividualGames();
+      await _controller.loadAllMyIndividualMatches();
+      setState(() {});
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Failed to update availability: $e')),
+      );
+    }
+  }
+
   Future<void> _denyIndividualRequest(String requestId, String userId) async {
     final confirmed = await showDialog<bool>(
       context: context,
@@ -5235,10 +6005,10 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
                                   style: TextStyle(fontSize: 13, color: Colors.grey.shade700),
                                 ),
                               ],
-                            ],
-                          ),
-                        ],
+                          ],
+                        ),
                       ],
+                    ],
                     ),
                   ),
                   Icon(
@@ -5375,6 +6145,10 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
                   await _setChatMode(reqId, mode: 'all_users');
                 } else if (v == 'chat_admins_only') {
                   await _setChatMode(reqId, mode: 'admins_only');
+                } else if (v == 'toggle_team_a_roster') {
+                  await _toggleTeamRosterPrivacy(reqId, match, team: 'a');
+                } else if (v == 'toggle_team_b_roster') {
+                  await _toggleTeamRosterPrivacy(reqId, match, team: 'b');
                 }
               },
               itemBuilder: (_) => [
@@ -5399,6 +6173,45 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
                   ),
                 ],
                 if (isAdmin) ...[
+                  // Allow admins to edit expected players for confirmed team games
+                  if (!isOrganizer) ...[
+                    const PopupMenuItem(
+                      value: 'edit_players',
+                      child: Text('Edit expected players'),
+                    ),
+                  ],
+                  const PopupMenuDivider(),
+                  // Roster privacy toggle - only show for admin's own team
+                  if (isAdminA) ...[
+                    PopupMenuItem(
+                      value: 'toggle_team_a_roster',
+                      child: Row(
+                        children: [
+                          if ((match['show_team_a_roster'] as bool? ?? false))
+                            const Icon(Icons.check, size: 16),
+                          const SizedBox(width: 8),
+                          Text((match['show_team_a_roster'] as bool? ?? false)
+                              ? 'Show Team A Roster to Team B'
+                              : 'Hide Team A Roster from Team B'),
+                        ],
+                      ),
+                    ),
+                  ],
+                  if (isAdminB) ...[
+                    PopupMenuItem(
+                      value: 'toggle_team_b_roster',
+                      child: Row(
+                        children: [
+                          if ((match['show_team_b_roster'] as bool? ?? false))
+                            const Icon(Icons.check, size: 16),
+                          const SizedBox(width: 8),
+                          Text((match['show_team_b_roster'] as bool? ?? false)
+                              ? 'Show Team B Roster to Team A'
+                              : 'Hide Team B Roster from Team A'),
+                        ],
+                      ),
+                    ),
+                  ],
                   const PopupMenuDivider(),
                   if (chatEnabled)
                     const PopupMenuItem(
@@ -5500,34 +6313,74 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
         const SizedBox(height: 12),
         
         // Team A
-        Row(
-          mainAxisAlignment: MainAxisAlignment.spaceBetween,
-          children: [
-            Text('Team $teamAName', style: const TextStyle(fontWeight: FontWeight.bold)),
-            Text(
-              '${aCounts['accepted']}/${teamAPlayers.length}',
-              style: const TextStyle(fontSize: 12),
-            ),
-          ],
+        Builder(
+          builder: (context) {
+            final isUserOnTeamA = myTeamId == teamAId;
+            final showTeamARoster = match['show_team_a_roster'] as bool? ?? false;
+            
+            // Show full roster if user is on Team A OR Team A admin has enabled visibility
+            final showFullRoster = isUserOnTeamA || showTeamARoster;
+            
+            return Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    Text('Team $teamAName', style: const TextStyle(fontWeight: FontWeight.bold)),
+                    Text(
+                      '${aCounts['accepted']}/${teamAPlayers.length}',
+                      style: const TextStyle(fontSize: 12),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 4),
+                _buildTeamRosterDisplay(
+                  players: teamAPlayers,
+                  teamName: teamAName,
+                  showRoster: showFullRoster,
+                  counts: aCounts,
+                ),
+              ],
+            );
+          },
         ),
-        const SizedBox(height: 4),
-        ...teamAPlayers.map((p) => _buildPlayerRow(p)),
         
         const SizedBox(height: 12),
         
         // Team B
-        Row(
-          mainAxisAlignment: MainAxisAlignment.spaceBetween,
-          children: [
-            Text('Team $teamBName', style: const TextStyle(fontWeight: FontWeight.bold)),
-            Text(
-              '${bCounts['accepted']}/${teamBPlayers.length}',
-              style: const TextStyle(fontSize: 12),
-            ),
-          ],
+        Builder(
+          builder: (context) {
+            final isUserOnTeamA = myTeamId == teamAId;
+            final showTeamBRoster = match['show_team_b_roster'] as bool? ?? false;
+            
+            // Show full roster if user is on Team B OR Team B admin has enabled visibility
+            final showFullRoster = !isUserOnTeamA || showTeamBRoster;
+            
+            return Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    Text('Team $teamBName', style: const TextStyle(fontWeight: FontWeight.bold)),
+                    Text(
+                      '${bCounts['accepted']}/${teamBPlayers.length}',
+                      style: const TextStyle(fontSize: 12),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 4),
+                _buildTeamRosterDisplay(
+                  players: teamBPlayers,
+                  teamName: teamBName,
+                  showRoster: showFullRoster,
+                  counts: bCounts,
+                ),
+              ],
+            );
+          },
         ),
-        const SizedBox(height: 4),
-        ...teamBPlayers.map((p) => _buildPlayerRow(p)),
         
         const SizedBox(height: 12),
         
@@ -5784,6 +6637,130 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
     );
   }
   
+  /// Build a privacy-aware team roster display
+  /// If showRoster is false, shows only counts instead of player names
+  Widget _buildTeamRosterDisplay({
+    required List<Map<String, dynamic>> players,
+    required String teamName,
+    required bool showRoster,
+    required Map<String, int> counts,
+  }) {
+    if (showRoster) {
+      // Show full roster with player names
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          ...players.map((p) => _buildPlayerRow(p)),
+        ],
+      );
+    } else {
+      // Show only counts for privacy
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          _buildPrivacyCountsDisplay(counts: counts),
+        ],
+      );
+    }
+  }
+
+  /// Build privacy counts display (available, not available, pending)
+  Widget _buildPrivacyCountsDisplay({required Map<String, int> counts}) {
+    final available = counts['accepted'] ?? 0;
+    final notAvailable = counts['declined'] ?? 0;
+    final pending = counts['pending'] ?? 0;
+    final total = available + notAvailable + pending;
+
+    return Container(
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: Colors.grey.shade100,
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: Colors.grey.shade300),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(Icons.lock_outline, size: 16, color: Colors.grey.shade600),
+              const SizedBox(width: 6),
+              Text(
+                'Roster hidden for privacy',
+                style: TextStyle(
+                  fontSize: 12,
+                  fontWeight: FontWeight.w600,
+                  color: Colors.grey.shade700,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          if (available > 0)
+            _buildCountRow(
+              icon: Icons.check_circle,
+              color: Colors.green,
+              label: 'Available',
+              count: available,
+              total: total,
+            ),
+          if (notAvailable > 0)
+            _buildCountRow(
+              icon: Icons.cancel,
+              color: Colors.red,
+              label: 'Not Available',
+              count: notAvailable,
+              total: total,
+            ),
+          if (pending > 0)
+            _buildCountRow(
+              icon: Icons.help_outline,
+              color: Colors.orange,
+              label: 'Yet to Respond',
+              count: pending,
+              total: total,
+            ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildCountRow({
+    required IconData icon,
+    required Color color,
+    required String label,
+    required int count,
+    required int total,
+  }) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 6),
+      child: Row(
+        children: [
+          Icon(icon, size: 16, color: color),
+          const SizedBox(width: 8),
+          Text(
+            '$label: ',
+            style: TextStyle(fontSize: 13, color: Colors.grey.shade700),
+          ),
+          Text(
+            '$count',
+            style: TextStyle(
+              fontSize: 13,
+              fontWeight: FontWeight.w600,
+              color: color,
+            ),
+          ),
+          if (total > 0) ...[
+            Text(
+              ' / $total',
+              style: TextStyle(fontSize: 13, color: Colors.grey.shade600),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
   Widget _buildPlayerRow(Map<String, dynamic> player) {
     final name = player['name'] as String? ?? 'Unknown';
     final status = (player['status'] as String?)?.toLowerCase() ?? 'pending';
@@ -5890,6 +6867,13 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
 
     final isOrganizer = _controller.isOrganizerForMatch(match);
     final canSendReminder = _controller.canSendReminderForMatch(match);
+    
+    // Check if user is admin of either team
+    final isAdminA = teamAPlayers.any((p) => 
+      p['user_id'] == uid && (p['is_admin'] as bool? ?? false));
+    final isAdminB = teamBPlayers.any((p) => 
+      p['user_id'] == uid && (p['is_admin'] as bool? ?? false));
+    final isAdmin = isAdminA || isAdminB;
 
     return Card(
       margin: const EdgeInsets.symmetric(vertical: 8),
@@ -6038,6 +7022,13 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
                       const PopupMenuItem(
                         value: 'cancel',
                         child: Text('Cancel game (both teams)'),
+                      ),
+                    ],
+                    // Also allow admins (non-organizers) to edit expected players for confirmed team games
+                    if (!isOrganizer && isAdmin) ...[
+                      const PopupMenuItem(
+                        value: 'edit_players',
+                        child: Text('Edit expected players'),
                       ),
                     ],
                   ],
@@ -6360,6 +7351,12 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
 
   void _onItemTapped(int index) {
     setState(() => _controller.selectedIndex = index);
+    
+    // Reload discovery matches when Discover tab is selected
+    // This ensures distances are recalculated with current location
+    if (index == 1) {
+      _controller.loadDiscoveryPickupMatches();
+    }
   }
 
   @override

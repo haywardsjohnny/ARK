@@ -1,8 +1,12 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
+import 'package:geolocator/geolocator.dart';
 
 import 'home_tabs/home_tabs_controller.dart';
 import '../../utils/sport_defaults.dart';
+import '../../services/location_service.dart';
+import 'user_profile_screen.dart';
 
 class CreateGameScreen extends StatefulWidget {
   final HomeTabsController controller;
@@ -242,6 +246,24 @@ class _TeamVsTeamForm extends StatefulWidget {
 }
 
 class _TeamVsTeamFormState extends State<_TeamVsTeamForm> {
+  /// Get ZIP code from current device location
+  Future<String?> _getDeviceLocationZip() async {
+    // Use LocationService.getCurrentZipCode() which handles:
+    // 1. Current device location
+    // 2. Manual location setting
+    // 3. Cached ZIP code
+    // 4. Last known ZIP code from database (fallback)
+    final zip = await LocationService.getCurrentZipCode();
+    if (kDebugMode) {
+      if (zip != null) {
+        print('[DEBUG] Using ZIP code for game creation: $zip');
+      } else {
+        print('[DEBUG] ⚠️  No ZIP code available for game creation');
+      }
+    }
+    return zip;
+  }
+
   final _allSportsOptions = const [
     'badminton',
     'basketball',
@@ -332,13 +354,25 @@ class _TeamVsTeamFormState extends State<_TeamVsTeamForm> {
       final startUtc = startLocal.toUtc().toIso8601String();
       final endUtc = endLocal.toUtc().toIso8601String();
 
+      // Get device location ZIP code
+      String? gameZipCode;
+      // Use LocationService.getCurrentZipCode() which handles fallback to last known ZIP
+      gameZipCode = await LocationService.getCurrentZipCode();
+      if (kDebugMode) {
+        if (gameZipCode != null) {
+          print('[DEBUG] Using ZIP code for team game creation: $gameZipCode');
+        } else {
+          print('[DEBUG] ⚠️  No ZIP code available for team game creation');
+        }
+      }
+
       final insertMap = <String, dynamic>{
         'creator_id': userId,
         'created_by': userId,
         'mode': 'team_vs_team',
         'match_type': 'team_vs_team',
         'sport': _selectedSport,
-        'zip_code': widget.controller.baseZip,
+        'zip_code': gameZipCode, // Use device location ZIP
         // Default radius for all match types
         'radius_miles': 75, // Required field
         'status': widget.isAdmin ? 'open' : 'pending', // Non-admin creates as pending
@@ -385,9 +419,116 @@ class _TeamVsTeamFormState extends State<_TeamVsTeamForm> {
         }).toList();
 
         await supa.from('instant_request_invites').insert(inviteRows);
+        
+        // Create attendance records for all members of the creating team
+        try {
+          final creatingTeamMembers = await supa
+              .from('team_members')
+              .select('user_id')
+              .eq('team_id', _selectedTeamId!);
+          
+          if (kDebugMode) {
+            print('[DEBUG] Creating attendance for creating team $_selectedTeamId: ${creatingTeamMembers is List ? creatingTeamMembers.length : 0} members');
+          }
+          
+          if (creatingTeamMembers is List && creatingTeamMembers.isNotEmpty) {
+            final creatingTeamAttendanceRows = creatingTeamMembers.map((member) {
+              return {
+                'request_id': requestId,
+                'user_id': member['user_id'] as String,
+                'team_id': _selectedTeamId,
+                'status': 'pending', // All members start as pending
+              };
+            }).toList();
+            
+            // Use upsert to handle potential duplicates gracefully
+            await supa.from('team_match_attendance').upsert(
+              creatingTeamAttendanceRows,
+              onConflict: 'request_id,user_id',
+            );
+            
+            if (kDebugMode) {
+              print('[DEBUG] ✅ Created ${creatingTeamAttendanceRows.length} attendance records for creating team');
+            }
+          }
+        } catch (e) {
+          if (kDebugMode) {
+            print('[ERROR] Failed to create attendance for creating team: $e');
+          }
+          // Continue even if this fails - game is already created
+        }
+        
+        // Create attendance records for all members of the invited teams
+        for (final invitedTeamId in _selectedOpponentTeamIds) {
+          try {
+            final invitedTeamMembers = await supa
+                .from('team_members')
+                .select('user_id')
+                .eq('team_id', invitedTeamId);
+            
+            if (kDebugMode) {
+              print('[DEBUG] Creating attendance for invited team $invitedTeamId: ${invitedTeamMembers is List ? invitedTeamMembers.length : 0} members');
+            }
+            
+            if (invitedTeamMembers is List && invitedTeamMembers.isNotEmpty) {
+              final invitedTeamAttendanceRows = invitedTeamMembers.map((member) {
+                return {
+                  'request_id': requestId,
+                  'user_id': member['user_id'] as String,
+                  'team_id': invitedTeamId,
+                  'status': 'pending', // All members start as pending
+                };
+              }).toList();
+              
+              // Use upsert to handle potential duplicates gracefully
+              await supa.from('team_match_attendance').upsert(
+                invitedTeamAttendanceRows,
+                onConflict: 'request_id,user_id',
+              );
+              
+              if (kDebugMode) {
+                print('[DEBUG] ✅ Created ${invitedTeamAttendanceRows.length} attendance records for invited team $invitedTeamId');
+              }
+            }
+          } catch (e) {
+            if (kDebugMode) {
+              print('[ERROR] Failed to create attendance for invited team $invitedTeamId: $e');
+            }
+            // Continue for other teams even if one fails
+          }
+        }
       } else if (widget.isAdmin && _opponentType == 'open') {
         // Open challenge: no per-team invites created.
         // Other teams discover this match via visibility + radius filters.
+        // Still create attendance records for all members of the creating team
+        try {
+          final creatingTeamMembers = await supa
+              .from('team_members')
+              .select('user_id')
+              .eq('team_id', _selectedTeamId!);
+          
+          if (creatingTeamMembers is List && creatingTeamMembers.isNotEmpty) {
+            final creatingTeamAttendanceRows = creatingTeamMembers.map((member) {
+              return {
+                'request_id': requestId,
+                'user_id': member['user_id'] as String,
+                'team_id': _selectedTeamId,
+                'status': 'pending', // All members start as pending
+              };
+            }).toList();
+            
+            // Use upsert to handle potential duplicates gracefully
+            await supa.from('team_match_attendance').upsert(
+              creatingTeamAttendanceRows,
+              onConflict: 'request_id,user_id',
+            );
+          }
+        } catch (e) {
+          if (kDebugMode) {
+            print('[ERROR] Failed to create attendance for creating team (open challenge): $e');
+          }
+          // Continue even if this fails - game is already created
+        }
       }
 
       if (!mounted) return;
@@ -404,6 +545,9 @@ class _TeamVsTeamFormState extends State<_TeamVsTeamForm> {
       );
 
       await widget.controller.loadAdminTeamsAndInvites();
+      await widget.controller.loadAwaitingOpponentConfirmationGames();
+      await widget.controller.loadAllMyMatches(); // Refresh My Games
+      await widget.controller.loadDiscoveryPickupMatches(); // Refresh Discover
     } catch (e) {
       setState(() {
         _saving = false;
@@ -915,6 +1059,23 @@ class _IndividualsForm extends StatefulWidget {
 }
 
 class _IndividualsFormState extends State<_IndividualsForm> {
+  /// Get ZIP code from current device location
+  Future<String?> _getDeviceLocationZip() async {
+    // Use LocationService.getCurrentZipCode() which handles:
+    // 1. Current device location
+    // 2. Manual location setting
+    // 3. Cached ZIP code
+    // 4. Last known ZIP code from database (fallback)
+    final zip = await LocationService.getCurrentZipCode();
+    if (kDebugMode) {
+      if (zip != null) {
+        print('[DEBUG] Using ZIP code for game creation: $zip');
+      } else {
+        print('[DEBUG] ⚠️  No ZIP code available for game creation');
+      }
+    }
+    return zip;
+  }
   final _allSportsOptions = const [
     'badminton',
     'basketball',
@@ -934,7 +1095,7 @@ class _IndividualsFormState extends State<_IndividualsForm> {
   TimeOfDay? _selectedTime;
   String? _venueText;
   String? _gameDetails;
-  String _visibility = 'public'; // 'all_friends', 'friends_group', 'public'
+  String _visibility = 'public'; // 'friends_group', 'public'
   String? _selectedFriendsGroupId;
   List<Map<String, dynamic>> _friendsGroups = [];
   bool _loadingGroups = false;
@@ -964,16 +1125,69 @@ class _IndividualsFormState extends State<_IndividualsForm> {
     setState(() => _loadingGroups = true);
 
     try {
-      // Get groups created by user or groups user is member of
-      final groups = await supa
+      // First, get groups created by user or groups user is member of
+      final createdGroupsRows = await supa
           .from('friends_groups')
-          .select('id, name, created_by')
-          .or('created_by.eq.$userId,id.in.(select group_id from friends_group_members where user_id.eq.$userId)')
-          .order('name');
+          .select('id, name, created_by, sport')
+          .eq('created_by', userId)
+          .order('sport, name');
+      
+      // Then, get group IDs where user is a member
+      final memberGroupsRows = await supa
+          .from('friends_group_members')
+          .select('group_id')
+          .eq('user_id', userId);
+      
+      // Collect all group IDs (created + member)
+      Set<String> allGroupIds = {};
+      if (createdGroupsRows is List) {
+        for (final g in createdGroupsRows) {
+          final groupId = g['id'] as String?;
+          if (groupId != null) allGroupIds.add(groupId);
+        }
+      }
+      if (memberGroupsRows is List) {
+        for (final m in memberGroupsRows) {
+          final groupId = m['group_id'] as String?;
+          if (groupId != null) allGroupIds.add(groupId);
+        }
+      }
+      
+      // Fetch all groups
+      List<Map<String, dynamic>> allGroups = [];
+      if (allGroupIds.isNotEmpty) {
+        final allGroupsRows = await supa
+            .from('friends_groups')
+            .select('id, name, created_by, sport')
+            .inFilter('id', allGroupIds.toList())
+            .order('sport, name');
+        
+        if (allGroupsRows is List) {
+          allGroups = allGroupsRows.map((g) => Map<String, dynamic>.from(g)).toList();
+        }
+      }
 
-      if (groups is List) {
+      // Filter by selected sport if available
+      // If sport is selected, only show groups for that sport
+      // If no sport selected, show all groups
+      List<Map<String, dynamic>> filteredGroups = allGroups;
+      if (_selectedSport != null && _selectedSport!.isNotEmpty) {
+        filteredGroups = allGroups.where((g) {
+          final groupSport = g['sport'] as String?;
+          return groupSport == _selectedSport;
+        }).toList();
+      }
+
+      if (mounted) {
         setState(() {
-          _friendsGroups = groups.map((g) => Map<String, dynamic>.from(g)).toList();
+          _friendsGroups = filteredGroups;
+          if (_selectedFriendsGroupId != null) {
+            // Clear selected group if it's no longer in the filtered list
+            final stillExists = filteredGroups.any((g) => g['id'] == _selectedFriendsGroupId);
+            if (!stillExists) {
+              _selectedFriendsGroupId = null;
+            }
+          }
         });
       }
     } catch (e) {
@@ -1047,7 +1261,7 @@ class _IndividualsFormState extends State<_IndividualsForm> {
         'mode': 'pickup',
         'match_type': 'pickup',
         'sport': _selectedSport,
-        'zip_code': widget.controller.baseZip,
+        'zip_code': await _getDeviceLocationZip(), // Use device location ZIP
         'radius_miles': radiusMiles,
         'num_players': _numPlayers,
         'proficiency_level': _skillLevel,
@@ -1078,37 +1292,148 @@ class _IndividualsFormState extends State<_IndividualsForm> {
         throw Exception('Failed to create game');
       }
 
-      // Create attendance record for organizer (auto-accepted)
-      await supa.from('individual_game_attendance').insert({
-        'request_id': requestId,
-        'user_id': userId,
-        'status': 'accepted',
-      });
-
-      // If friends_group visibility, create pending attendance for all group members
-      if (_visibility == 'friends_group' && _selectedFriendsGroupId != null) {
-        final groupMembers = await supa
-            .from('friends_group_members')
-            .select('user_id')
-            .eq('group_id', _selectedFriendsGroupId);
-        
-        if (groupMembers is List && groupMembers.isNotEmpty) {
-          final attendanceRecords = (groupMembers as List).map((member) {
-            final memberId = member['user_id'] as String?;
-            if (memberId == null || memberId == userId) return null; // Skip organizer
-            return {
-              'request_id': requestId,
-              'user_id': memberId,
-              'status': 'pending',
-              'invited_by': userId,
-            };
-          }).where((r) => r != null).toList();
-          
-          if (attendanceRecords.isNotEmpty) {
-            await supa.from('individual_game_attendance').insert(attendanceRecords);
+      // For public games, create an accepted attendance record for the creator
+      // so the game appears in "My Games"
+      if (_visibility == 'public') {
+        try {
+          if (kDebugMode) {
+            print('[DEBUG] Creating attendance record for public game creator');
+            print('[DEBUG] request_id: $requestId, user_id: $userId');
           }
+          final insertResult = await supa.from('individual_game_attendance').insert({
+            'request_id': requestId,
+            'user_id': userId,
+            'status': 'accepted', // Creator is automatically accepted
+          }).select();
+          if (kDebugMode) {
+            print('[DEBUG] ✅ Successfully created attendance record: $insertResult');
+          }
+        } catch (e) {
+          if (kDebugMode) {
+            print('[DEBUG] ❌ Failed to create creator attendance record: $e');
+            print('[DEBUG] Stack trace: ${StackTrace.current}');
+          }
+          // Don't fail game creation if attendance record fails
+        }
+      } else if (kDebugMode) {
+        print('[DEBUG] Not creating attendance record (visibility: $_visibility)');
+      }
+
+      // If friends_group visibility, create pending attendance for all group members (including organizer)
+      if (_visibility == 'friends_group' && _selectedFriendsGroupId != null) {
+        final groupId = _selectedFriendsGroupId!;
+        try {
+          if (kDebugMode) {
+            print('[DEBUG] ========== CREATING ATTENDANCE RECORDS ==========');
+            print('[DEBUG] Game ID: $requestId');
+            print('[DEBUG] Group ID: $groupId');
+            print('[DEBUG] Organizer ID: $userId');
+          }
+          
+          // First, verify we can see the group
+          final groupCheck = await supa
+              .from('friends_groups')
+              .select('id, name, created_by')
+              .eq('id', groupId)
+              .maybeSingle();
+          
+          if (kDebugMode) {
+            print('[DEBUG] Group check result: $groupCheck');
+          }
+          
+          final groupMembers = await supa
+              .from('friends_group_members')
+              .select('user_id')
+              .eq('group_id', groupId);
+          
+          if (kDebugMode) {
+            print('[DEBUG] Found ${groupMembers is List ? groupMembers.length : 0} group members');
+            if (groupMembers is List) {
+              print('[DEBUG] Group member IDs: ${groupMembers.map((m) => m['user_id']).toList()}');
+            }
+          }
+          
+          if (groupMembers is List && groupMembers.isNotEmpty) {
+            final List<Map<String, dynamic>> attendanceRecords = [];
+            for (final member in groupMembers as List) {
+              final memberId = member['user_id'] as String?;
+              if (kDebugMode) {
+                print('[DEBUG] Processing member: $memberId (organizer: $userId)');
+              }
+              if (memberId != null) { // Include organizer too (they'll have pending status)
+                attendanceRecords.add({
+                  'request_id': requestId,
+                  'user_id': memberId,
+                  'status': 'pending',
+                  'invited_by': userId,
+                });
+                if (kDebugMode) {
+                  print('[DEBUG] Added attendance record for member: $memberId');
+                }
+              } else if (kDebugMode) {
+                print('[DEBUG] Skipping null member: $memberId');
+              }
+            }
+            
+            if (kDebugMode) {
+              print('[DEBUG] Total attendance records to create: ${attendanceRecords.length}');
+              print('[DEBUG] Records: $attendanceRecords');
+            }
+            
+            if (attendanceRecords.isNotEmpty) {
+              try {
+                final insertResult = await supa.from('individual_game_attendance').insert(attendanceRecords);
+                if (kDebugMode) {
+                  print('[DEBUG] ✅ Successfully created ${attendanceRecords.length} pending attendance records');
+                  print('[DEBUG] Insert result: $insertResult');
+                  
+                  // Verify the records were created
+                  final verifyRecords = await supa
+                      .from('individual_game_attendance')
+                      .select('id, user_id, status')
+                      .eq('request_id', requestId)
+                      .eq('status', 'pending');
+                  
+                  if (kDebugMode) {
+                    print('[DEBUG] Verification: Found ${verifyRecords is List ? verifyRecords.length : 0} pending records');
+                    if (verifyRecords is List) {
+                      for (final record in verifyRecords) {
+                        print('[DEBUG] Verified record: user=${record['user_id']}, status=${record['status']}');
+                      }
+                    }
+                  }
+                }
+              } catch (insertError) {
+                if (kDebugMode) {
+                  print('[DEBUG] ❌ Failed to insert attendance records: $insertError');
+                  print('[DEBUG] Attempted to insert: $attendanceRecords');
+                }
+                rethrow; // Re-throw to be caught by outer catch
+              }
+            } else if (kDebugMode) {
+              print('[DEBUG] No attendance records to create (only organizer in group)');
+            }
+          } else if (kDebugMode) {
+            print('[DEBUG] ❌ No group members found for group $groupId');
+          }
+          
+          if (kDebugMode) {
+            print('[DEBUG] ========== END ATTENDANCE RECORDS CREATION ==========');
+          }
+        } catch (e) {
+          if (kDebugMode) {
+            print('[DEBUG] ❌ Error creating attendance records for friends group: $e');
+            print('[DEBUG] Stack trace: ${StackTrace.current}');
+          }
+          // Don't fail the entire game creation if attendance record creation fails
+          // The game is already created, attendance can be added later
         }
       }
+
+      // Refresh discovery and my games after creating
+      await widget.controller.loadDiscoveryPickupMatches();
+      await widget.controller.loadAllMyIndividualMatches();
+      await widget.controller.loadAllMyMatches();
 
       if (!mounted) return;
       Navigator.of(context).pop();
@@ -1162,7 +1487,13 @@ class _IndividualsFormState extends State<_IndividualsForm> {
                         child: Text(_displaySport(s)),
                       ))
                   .toList(),
-              onChanged: (v) => setState(() => _selectedSport = v),
+              onChanged: (v) {
+                setState(() {
+                  _selectedSport = v;
+                  _selectedFriendsGroupId = null; // Reset selected group when sport changes
+                });
+                _loadFriendsGroups(); // Reload groups filtered by new sport
+              },
             ),
             const SizedBox(height: 24),
 
@@ -1296,18 +1627,6 @@ class _IndividualsFormState extends State<_IndividualsForm> {
             ),
             const SizedBox(height: 8),
             RadioListTile<String>(
-              title: const Text('All Friends'),
-              subtitle: const Text('Visible to all your friends. They can invite their friends too.'),
-              value: 'all_friends',
-              groupValue: _visibility,
-              onChanged: (v) {
-                setState(() {
-                  _visibility = v ?? 'all_friends';
-                  _selectedFriendsGroupId = null;
-                });
-              },
-            ),
-            RadioListTile<String>(
               title: const Text('Friends Group'),
               subtitle: const Text('Send to a specific friends group'),
               value: 'friends_group',
@@ -1315,10 +1634,9 @@ class _IndividualsFormState extends State<_IndividualsForm> {
               onChanged: (v) {
                 setState(() {
                   _visibility = v ?? 'friends_group';
-                  if (_friendsGroups.isEmpty) {
-                    _selectedFriendsGroupId = null;
-                  }
+                  _selectedFriendsGroupId = null; // Reset selection
                 });
+                _loadFriendsGroups(); // Reload groups when selecting this option
               },
             ),
             // Friends Group Dropdown
@@ -1341,7 +1659,9 @@ class _IndividualsFormState extends State<_IndividualsForm> {
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       Text(
-                        'You currently do not have any friends groups.',
+                        _selectedSport != null
+                            ? 'You currently do not have friends group for ${_displaySport(_selectedSport!)}.'
+                            : 'You currently do not have friends group.',
                         style: TextStyle(
                           color: Colors.orange.shade900,
                           fontWeight: FontWeight.w500,
@@ -1350,7 +1670,11 @@ class _IndividualsFormState extends State<_IndividualsForm> {
                       const SizedBox(height: 8),
                       InkWell(
                         onTap: () {
-                          Navigator.of(context).pushNamed('/profile').then((_) {
+                          Navigator.of(context).push(
+                            MaterialPageRoute(
+                              builder: (_) => const UserProfileScreen(),
+                            ),
+                          ).then((_) {
                             _loadFriendsGroups(); // Reload groups when returning
                           });
                         },
@@ -1374,9 +1698,15 @@ class _IndividualsFormState extends State<_IndividualsForm> {
                     border: OutlineInputBorder(),
                   ),
                   items: _friendsGroups.map((group) {
+                    final groupName = group['name'] as String? ?? 'Unnamed Group';
+                    final groupSport = group['sport'] as String?;
                     return DropdownMenuItem<String>(
                       value: group['id'] as String,
-                      child: Text(group['name'] as String? ?? 'Unnamed Group'),
+                      child: Text(
+                        groupSport != null
+                            ? '$groupName (${_displaySport(groupSport)})'
+                            : groupName,
+                      ),
                     );
                   }).toList(),
                   onChanged: (value) {

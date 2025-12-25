@@ -1,6 +1,9 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
 
 import 'home_tabs/home_tabs_controller.dart';
+import '../../services/location_service.dart';
 
 class DiscoverScreen extends StatefulWidget {
   final HomeTabsController controller;
@@ -14,11 +17,18 @@ class DiscoverScreen extends StatefulWidget {
 
 class _DiscoverScreenState extends State<DiscoverScreen> {
   final _searchController = TextEditingController();
-  String _selectedSport = '';
-  String _selectedFilter = '5v5'; // Default selected filter
-  bool _showNearby = true;
-  bool _showToday = false;
-  bool _showIndoor = false;
+  
+  // Filter state
+  String? _selectedSport; // null = all sports
+  String? _selectedGameType; // 'team', 'individual', null = all
+  DateTime? _selectedDate; // null = any date
+  int _maxDistance = 100; // miles, default 100
+  String? _selectedReadiness; // proficiency level, null = all
+  int? _minSpotsLeft; // null = any
+  int? _maxSpotsLeft; // null = any
+  
+  bool _showFilterPanel = false;
+  String? _userLocationDisplay; // "City, State" format
 
   String _displaySport(String key) {
     final withSpaces = key.replaceAll('_', ' ');
@@ -64,10 +74,19 @@ class _DiscoverScreenState extends State<DiscoverScreen> {
     return '${start.month}/${start.day} ${fmtTime(start)}';
   }
 
-  // Calculate distance (mock for now - would need location services)
-  String _calculateDistance(String? zip) {
-    // TODO: Implement actual distance calculation
-    return '2 miles';
+  // Calculate distance from match data
+  String _calculateDistance(Map<String, dynamic> match) {
+    final distance = match['distance_miles'] as double?;
+    if (distance == null) {
+      return 'Distance unknown';
+    }
+    if (distance < 1) {
+      return '${(distance * 5280).round()} ft'; // Show in feet if less than 1 mile
+    } else if (distance < 10) {
+      return '${distance.toStringAsFixed(1)} mi'; // Show 1 decimal for < 10 miles
+    } else {
+      return '${distance.round()} mi'; // Round to nearest mile for >= 10 miles
+    }
   }
   
   Future<void> _showInviteFriendsDialog(String requestId, String sport) async {
@@ -164,7 +183,7 @@ class _DiscoverScreenState extends State<DiscoverScreen> {
                           final photoUrl = friend['photo_url'] as String?;
                           final isSelected = selectedFriendIds.contains(friendId);
 
-                          return CheckboxListTile(
+                          return ListTile(
                             leading: CircleAvatar(
                               backgroundImage: photoUrl != null && photoUrl.isNotEmpty
                                   ? NetworkImage(photoUrl)
@@ -174,13 +193,24 @@ class _DiscoverScreenState extends State<DiscoverScreen> {
                                   : null,
                             ),
                             title: Text(friendName),
-                            value: isSelected,
-                            onChanged: (value) {
+                            trailing: Checkbox(
+                              value: isSelected,
+                              onChanged: (value) {
+                                setDialogState(() {
+                                  if (value == true) {
+                                    selectedFriendIds.add(friendId);
+                                  } else {
+                                    selectedFriendIds.remove(friendId);
+                                  }
+                                });
+                              },
+                            ),
+                            onTap: () {
                               setDialogState(() {
-                                if (value == true) {
-                                  selectedFriendIds.add(friendId);
-                                } else {
+                                if (isSelected) {
                                   selectedFriendIds.remove(friendId);
+                                } else {
+                                  selectedFriendIds.add(friendId);
                                 }
                               });
                             },
@@ -310,6 +340,32 @@ class _DiscoverScreenState extends State<DiscoverScreen> {
   }
 
   @override
+  void initState() {
+    super.initState();
+    _loadUserLocation();
+  }
+
+
+  Future<void> _loadUserLocation() async {
+    // Get user's ZIP code and convert to city, state
+    try {
+      final zipCode = await LocationService.getCurrentZipCode();
+      if (zipCode != null) {
+        final cityState = await LocationService.getCityStateFromZip(zipCode);
+        if (mounted) {
+          setState(() {
+            _userLocationDisplay = cityState;
+          });
+        }
+      }
+    } catch (e) {
+      if (kDebugMode) {
+        print('[DiscoverScreen] Error loading user location: $e');
+      }
+    }
+  }
+
+  @override
   void dispose() {
     _searchController.dispose();
     super.dispose();
@@ -326,14 +382,20 @@ class _DiscoverScreenState extends State<DiscoverScreen> {
               // Search Bar
               _buildSearchBar(),
               
-              // Filter Chips
-              _buildFilterChips(),
+              // Location Header
+              _buildLocationHeader(),
+              
+              // Filter Header
+              _buildFilterHeader(),
+              
+              // Filter Panel (expandable)
+              if (_showFilterPanel) _buildFilterPanel(),
               
               // Content
               Expanded(
                 child: widget.controller.loadingDiscoveryMatches
                     ? const Center(child: CircularProgressIndicator())
-                    : widget.controller.discoveryPickupMatches.isEmpty
+                    : _getFilteredMatches().isEmpty
                         ? _buildEmptyState()
                         : RefreshIndicator(
                             onRefresh: () => widget.controller.loadDiscoveryPickupMatches(),
@@ -392,36 +454,739 @@ class _DiscoverScreenState extends State<DiscoverScreen> {
     );
   }
 
-  Widget _buildFilterChips() {
+  Widget _buildLocationHeader() {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-      color: Colors.white,
+      child: Row(
+        children: [
+          Text(
+            _userLocationDisplay != null
+                ? 'Games near $_userLocationDisplay'
+                : 'Games near you',
+            style: const TextStyle(
+              fontSize: 14,
+              fontWeight: FontWeight.w500,
+              color: Colors.grey,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildFilterHeader() {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+      color: Colors.grey.shade100,
       child: SingleChildScrollView(
         scrollDirection: Axis.horizontal,
         child: Row(
           children: [
-            _buildFilterChip('📍 Nearby', _showNearby, () {
-              setState(() => _showNearby = !_showNearby);
-            }),
+            _buildFilterPillButton(
+              icon: Icons.tune,
+              label: 'Filter & Sort By',
+              onTap: () {
+                setState(() => _showFilterPanel = !_showFilterPanel);
+              },
+              showChevron: true,
+            ),
             const SizedBox(width: 8),
-            _buildFilterChip('⚽ Soccer', _selectedSport == 'soccer', () {
-              setState(() => _selectedSport = _selectedSport == 'soccer' ? '' : 'soccer');
-            }),
+            _buildFilterPillButton(
+              icon: Icons.sports_soccer,
+              label: _selectedSport != null ? _displaySport(_selectedSport!) : 'Sports',
+              onTap: () => _showSportPicker(),
+              showChevron: true,
+              isActive: _selectedSport != null,
+            ),
             const SizedBox(width: 8),
-            _buildFilterChip('Today', _showToday, () {
-              setState(() => _showToday = !_showToday);
-            }),
+            _buildFilterPillButton(
+              icon: Icons.calendar_today,
+              label: _selectedDate != null ? _formatDate(_selectedDate!) : 'Date',
+              onTap: () => _showDatePicker(),
+              showChevron: true,
+              isActive: _selectedDate != null,
+            ),
             const SizedBox(width: 8),
-            _buildFilterChip('Indoor', _showIndoor, () {
-              setState(() => _showIndoor = !_showIndoor);
-            }),
+            _buildFilterPillButton(
+              icon: Icons.location_on,
+              label: _maxDistance < 100 ? '$_maxDistance mi' : 'Nearby',
+              onTap: () => _showDistancePicker(),
+              showChevron: true,
+              isActive: _maxDistance < 100,
+            ),
             const SizedBox(width: 8),
-            _buildFilterChip('5v5', _selectedFilter == '5v5', () {
-              setState(() => _selectedFilter = '5v5');
-            }, highlightSelected: true),
+            _buildFilterPillButton(
+              icon: Icons.emoji_events,
+              label: _selectedReadiness != null 
+                  ? _selectedReadiness!.substring(0, 1).toUpperCase() + _selectedReadiness!.substring(1)
+                  : 'Readiness',
+              onTap: () => _showReadinessPicker(),
+              showChevron: true,
+              isActive: _selectedReadiness != null,
+            ),
+            const SizedBox(width: 8),
+            _buildFilterPillButton(
+              icon: Icons.people,
+              label: _minSpotsLeft != null || _maxSpotsLeft != null
+                  ? 'Spots ${_minSpotsLeft ?? 0}-${_maxSpotsLeft ?? '∞'}'
+                  : 'Spots Left',
+              onTap: () => _showSpotsLeftPicker(),
+              showChevron: true,
+              isActive: _minSpotsLeft != null || _maxSpotsLeft != null,
+            ),
           ],
         ),
       ),
+    );
+  }
+  
+  Widget _buildFilterPillButton({
+    required IconData icon,
+    required String label,
+    required VoidCallback onTap,
+    bool showChevron = false,
+    bool isActive = false,
+  }) {
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(20),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+        decoration: BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.circular(20),
+          border: Border.all(
+            color: isActive ? Colors.orange : Colors.grey.shade300,
+            width: isActive ? 1.5 : 1,
+          ),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(
+              icon,
+              size: 18,
+              color: isActive ? Colors.orange : Colors.grey.shade700,
+            ),
+            const SizedBox(width: 6),
+            Text(
+              label,
+              style: TextStyle(
+                fontSize: 13,
+                fontWeight: isActive ? FontWeight.w600 : FontWeight.normal,
+                color: isActive ? Colors.orange : Colors.grey.shade700,
+              ),
+            ),
+            if (showChevron) ...[
+              const SizedBox(width: 4),
+              Icon(
+                Icons.keyboard_arrow_down,
+                size: 16,
+                color: isActive ? Colors.orange : Colors.grey.shade600,
+              ),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+  
+  void _showSportPicker() {
+    final allSports = [
+      'badminton',
+      'basketball',
+      'cricket',
+      'football',
+      'pickleball',
+      'soccer',
+      'table_tennis',
+      'tennis',
+      'volleyball',
+    ];
+    
+    showModalBottomSheet(
+      context: context,
+      builder: (context) {
+        return Container(
+          padding: const EdgeInsets.all(16),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Text(
+                'Select Sport',
+                style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+              ),
+              const SizedBox(height: 16),
+              ListTile(
+                title: const Text('All Sports'),
+                leading: Radio<String?>(
+                  value: null,
+                  groupValue: _selectedSport,
+                  onChanged: (value) {
+                    setState(() => _selectedSport = value);
+                    Navigator.pop(context);
+                  },
+                ),
+                onTap: () {
+                  setState(() => _selectedSport = null);
+                  Navigator.pop(context);
+                },
+              ),
+              ...allSports.map((sport) => ListTile(
+                title: Text(_displaySport(sport)),
+                leading: Radio<String?>(
+                  value: sport,
+                  groupValue: _selectedSport,
+                  onChanged: (value) {
+                    setState(() => _selectedSport = value);
+                    Navigator.pop(context);
+                  },
+                ),
+                onTap: () {
+                  setState(() => _selectedSport = sport);
+                  Navigator.pop(context);
+                },
+              )),
+            ],
+          ),
+        );
+      },
+    );
+  }
+  
+  void _showDatePicker() async {
+    final date = await showDatePicker(
+      context: context,
+      initialDate: _selectedDate ?? DateTime.now(),
+      firstDate: DateTime.now(),
+      lastDate: DateTime.now().add(const Duration(days: 365)),
+    );
+    if (date != null) {
+      setState(() => _selectedDate = date);
+    }
+  }
+  
+  void _showDistancePicker() {
+    int tempDistance = _maxDistance; // Store current value
+    
+    showModalBottomSheet(
+      context: context,
+      builder: (context) {
+        return StatefulBuilder(
+          builder: (context, setModalState) {
+            return Container(
+              padding: const EdgeInsets.all(16),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const Text(
+                    'Maximum Distance',
+                    style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+                  ),
+                  const SizedBox(height: 16),
+                  Text(
+                    tempDistance == 100 ? 'Any Distance' : '$tempDistance miles',
+                    style: TextStyle(
+                      fontSize: 20,
+                      fontWeight: FontWeight.bold,
+                      color: Colors.orange,
+                    ),
+                  ),
+                  const SizedBox(height: 16),
+                  Slider(
+                    value: tempDistance.toDouble(),
+                    min: 5,
+                    max: 100,
+                    divisions: 19,
+                    label: tempDistance == 100 ? 'Any' : '$tempDistance miles',
+                    onChanged: (value) {
+                      setModalState(() {
+                        tempDistance = value.round();
+                      });
+                    },
+                  ),
+                  const SizedBox(height: 16),
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                    children: [
+                      TextButton(
+                        onPressed: () {
+                          setModalState(() {
+                            tempDistance = 100;
+                          });
+                        },
+                        child: const Text('Any Distance'),
+                      ),
+                      ElevatedButton(
+                        onPressed: () {
+                          setState(() {
+                            _maxDistance = tempDistance; // Update main widget state
+                          });
+                          Navigator.pop(context);
+                        },
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: Colors.orange,
+                        ),
+                        child: const Text('Done'),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            );
+          },
+        );
+      },
+    );
+  }
+  
+  void _showReadinessPicker() {
+    final levels = ['Beginner', 'Intermediate', 'Advanced', 'Professional'];
+    
+    showModalBottomSheet(
+      context: context,
+      builder: (context) {
+        return Container(
+          padding: const EdgeInsets.all(16),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Text(
+                'Select Skill Level',
+                style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+              ),
+              const SizedBox(height: 16),
+              ListTile(
+                title: const Text('Any Level'),
+                leading: Radio<String?>(
+                  value: null,
+                  groupValue: _selectedReadiness,
+                  onChanged: (value) {
+                    setState(() => _selectedReadiness = value);
+                    Navigator.pop(context);
+                  },
+                ),
+                onTap: () {
+                  setState(() => _selectedReadiness = null);
+                  Navigator.pop(context);
+                },
+              ),
+              ...levels.map((level) => ListTile(
+                title: Text(level),
+                leading: Radio<String?>(
+                  value: level.toLowerCase(),
+                  groupValue: _selectedReadiness,
+                  onChanged: (value) {
+                    setState(() => _selectedReadiness = value);
+                    Navigator.pop(context);
+                  },
+                ),
+                onTap: () {
+                  setState(() => _selectedReadiness = level.toLowerCase());
+                  Navigator.pop(context);
+                },
+              )),
+            ],
+          ),
+        );
+      },
+    );
+  }
+  
+  void _showSpotsLeftPicker() {
+    final minController = TextEditingController(text: _minSpotsLeft?.toString() ?? '');
+    final maxController = TextEditingController(text: _maxSpotsLeft?.toString() ?? '');
+    
+    showModalBottomSheet(
+      context: context,
+      builder: (context) {
+        return Container(
+          padding: const EdgeInsets.all(16),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Text(
+                'Spots Left',
+                style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+              ),
+              const SizedBox(height: 16),
+              Row(
+                children: [
+                  Expanded(
+                    child: TextField(
+                      controller: minController,
+                      decoration: const InputDecoration(
+                        labelText: 'Min',
+                        border: OutlineInputBorder(),
+                      ),
+                      keyboardType: TextInputType.number,
+                    ),
+                  ),
+                  const SizedBox(width: 16),
+                  const Text('to'),
+                  const SizedBox(width: 16),
+                  Expanded(
+                    child: TextField(
+                      controller: maxController,
+                      decoration: const InputDecoration(
+                        labelText: 'Max',
+                        border: OutlineInputBorder(),
+                      ),
+                      keyboardType: TextInputType.number,
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 16),
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                children: [
+                  TextButton(
+                    onPressed: () {
+                      setState(() {
+                        _minSpotsLeft = null;
+                        _maxSpotsLeft = null;
+                      });
+                      Navigator.pop(context);
+                    },
+                    child: const Text('Clear'),
+                  ),
+                  ElevatedButton(
+                    onPressed: () {
+                      setState(() {
+                        _minSpotsLeft = minController.text.isEmpty 
+                            ? null 
+                            : int.tryParse(minController.text);
+                        _maxSpotsLeft = maxController.text.isEmpty 
+                            ? null 
+                            : int.tryParse(maxController.text);
+                      });
+                      Navigator.pop(context);
+                    },
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: Colors.orange,
+                    ),
+                    child: const Text('Apply'),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+  
+  Widget _buildActiveFilterChip(String label, VoidCallback onRemove) {
+    return Container(
+      margin: const EdgeInsets.only(right: 8),
+      child: Chip(
+        label: Text(label, style: const TextStyle(fontSize: 12)),
+        onDeleted: onRemove,
+        deleteIcon: const Icon(Icons.close, size: 16),
+        backgroundColor: Colors.orange.shade100,
+        labelStyle: const TextStyle(color: Colors.orange),
+      ),
+    );
+  }
+  
+  String _formatDate(DateTime date) {
+    final now = DateTime.now();
+    if (date.year == now.year && date.month == now.month && date.day == now.day) {
+      return 'Today';
+    }
+    return '${date.month}/${date.day}/${date.year}';
+  }
+  
+  Widget _buildFilterPanel() {
+    return Container(
+      color: Colors.grey.shade50,
+      padding: const EdgeInsets.all(16),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text(
+            'Filters',
+            style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+          ),
+          const SizedBox(height: 16),
+          
+          // Sport Filter
+          _buildSportFilter(),
+          const SizedBox(height: 16),
+          
+          // Game Type Filter
+          _buildGameTypeFilter(),
+          const SizedBox(height: 16),
+          
+          // Date Filter
+          _buildDateFilter(),
+          const SizedBox(height: 16),
+          
+          // Distance Filter
+          _buildDistanceFilter(),
+          const SizedBox(height: 16),
+          
+          // Readiness Filter
+          _buildReadinessFilter(),
+          const SizedBox(height: 16),
+          
+          // Spots Left Filter
+          _buildSpotsLeftFilter(),
+          const SizedBox(height: 16),
+          
+          // Apply/Clear Buttons
+          Row(
+            children: [
+              Expanded(
+                child: OutlinedButton(
+                  onPressed: () {
+                    setState(() {
+                      _selectedSport = null;
+                      _selectedGameType = null;
+                      _selectedDate = null;
+                      _maxDistance = 100;
+                      _selectedReadiness = null;
+                      _minSpotsLeft = null;
+                      _maxSpotsLeft = null;
+                    });
+                  },
+                  child: const Text('Clear All'),
+                ),
+              ),
+              const SizedBox(width: 16),
+              Expanded(
+                child: ElevatedButton(
+                  onPressed: () {
+                    setState(() => _showFilterPanel = false);
+                  },
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: Colors.orange,
+                  ),
+                  child: const Text('Apply'),
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+  
+  Widget _buildSportFilter() {
+    final allSports = [
+      'badminton',
+      'basketball',
+      'cricket',
+      'football',
+      'pickleball',
+      'soccer',
+      'table_tennis',
+      'tennis',
+      'volleyball',
+    ];
+    
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const Text('Sport', style: TextStyle(fontWeight: FontWeight.w600)),
+        const SizedBox(height: 8),
+        DropdownButtonFormField<String>(
+          value: _selectedSport,
+          decoration: const InputDecoration(
+            border: OutlineInputBorder(),
+            contentPadding: EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+          ),
+          hint: const Text('All Sports'),
+          items: [
+            const DropdownMenuItem<String>(value: null, child: Text('All Sports')),
+            ...allSports.map((sport) => DropdownMenuItem<String>(
+              value: sport,
+              child: Text(_displaySport(sport)),
+            )),
+          ],
+          onChanged: (value) {
+            setState(() => _selectedSport = value);
+          },
+        ),
+      ],
+    );
+  }
+  
+  Widget _buildGameTypeFilter() {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const Text('Game Type', style: TextStyle(fontWeight: FontWeight.w600)),
+        const SizedBox(height: 8),
+        Row(
+          children: [
+            Expanded(
+              child: RadioListTile<String?>(
+                title: const Text('All'),
+                value: null,
+                groupValue: _selectedGameType,
+                onChanged: (value) => setState(() => _selectedGameType = value),
+              ),
+            ),
+            Expanded(
+              child: RadioListTile<String?>(
+                title: const Text('Team'),
+                value: 'team',
+                groupValue: _selectedGameType,
+                onChanged: (value) => setState(() => _selectedGameType = value),
+              ),
+            ),
+            Expanded(
+              child: RadioListTile<String?>(
+                title: const Text('Individual'),
+                value: 'individual',
+                groupValue: _selectedGameType,
+                onChanged: (value) => setState(() => _selectedGameType = value),
+              ),
+            ),
+          ],
+        ),
+      ],
+    );
+  }
+  
+  Widget _buildDateFilter() {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const Text('Date', style: TextStyle(fontWeight: FontWeight.w600)),
+        const SizedBox(height: 8),
+        Row(
+          children: [
+            Expanded(
+              child: OutlinedButton.icon(
+                icon: const Icon(Icons.calendar_today),
+                label: Text(_selectedDate == null ? 'Any Date' : _formatDate(_selectedDate!)),
+                onPressed: () async {
+                  final date = await showDatePicker(
+                    context: context,
+                    initialDate: DateTime.now(),
+                    firstDate: DateTime.now(),
+                    lastDate: DateTime.now().add(const Duration(days: 365)),
+                  );
+                  if (date != null) {
+                    setState(() => _selectedDate = date);
+                  }
+                },
+              ),
+            ),
+            if (_selectedDate != null)
+              IconButton(
+                icon: const Icon(Icons.clear),
+                onPressed: () => setState(() => _selectedDate = null),
+              ),
+          ],
+        ),
+      ],
+    );
+  }
+  
+  Widget _buildDistanceFilter() {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+          children: [
+            const Text('Distance (miles)', style: TextStyle(fontWeight: FontWeight.w600)),
+            Text(
+              _maxDistance == 100 ? 'Any' : 'Within $_maxDistance mi',
+              style: TextStyle(color: Colors.orange, fontWeight: FontWeight.w600),
+            ),
+          ],
+        ),
+        const SizedBox(height: 8),
+        Slider(
+          value: _maxDistance.toDouble(),
+          min: 5,
+          max: 100,
+          divisions: 19,
+          label: _maxDistance == 100 ? 'Any' : '$_maxDistance miles',
+          onChanged: (value) {
+            setState(() => _maxDistance = value.round());
+          },
+        ),
+      ],
+    );
+  }
+  
+  Widget _buildReadinessFilter() {
+    final levels = ['Beginner', 'Intermediate', 'Advanced', 'Professional'];
+    
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const Text('Skill Level', style: TextStyle(fontWeight: FontWeight.w600)),
+        const SizedBox(height: 8),
+        DropdownButtonFormField<String>(
+          value: _selectedReadiness,
+          decoration: const InputDecoration(
+            border: OutlineInputBorder(),
+            contentPadding: EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+          ),
+          hint: const Text('Any Level'),
+          items: [
+            const DropdownMenuItem<String>(value: null, child: Text('Any Level')),
+            ...levels.map((level) => DropdownMenuItem<String>(
+              value: level.toLowerCase(),
+              child: Text(level),
+            )),
+          ],
+          onChanged: (value) {
+            setState(() => _selectedReadiness = value);
+          },
+        ),
+      ],
+    );
+  }
+  
+  Widget _buildSpotsLeftFilter() {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const Text('Spots Left', style: TextStyle(fontWeight: FontWeight.w600)),
+        const SizedBox(height: 8),
+        Row(
+          children: [
+            Expanded(
+              child: TextField(
+                decoration: const InputDecoration(
+                  labelText: 'Min',
+                  border: OutlineInputBorder(),
+                  contentPadding: EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                ),
+                keyboardType: TextInputType.number,
+                onChanged: (value) {
+                  setState(() => _minSpotsLeft = value.isEmpty ? null : int.tryParse(value));
+                },
+              ),
+            ),
+            const SizedBox(width: 16),
+            const Text('to', style: TextStyle(color: Colors.grey)),
+            const SizedBox(width: 16),
+            Expanded(
+              child: TextField(
+                decoration: const InputDecoration(
+                  labelText: 'Max',
+                  border: OutlineInputBorder(),
+                  contentPadding: EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                ),
+                keyboardType: TextInputType.number,
+                onChanged: (value) {
+                  setState(() => _maxSpotsLeft = value.isEmpty ? null : int.tryParse(value));
+                },
+              ),
+            ),
+          ],
+        ),
+      ],
     );
   }
 
@@ -475,16 +1240,94 @@ class _DiscoverScreenState extends State<DiscoverScreen> {
     );
   }
 
+  List<Map<String, dynamic>> _getFilteredMatches() {
+    var matches = widget.controller.discoveryPickupMatches;
+    
+    // Apply filters
+    if (_selectedSport != null) {
+      matches = matches.where((m) => 
+        (m['sport'] as String?)?.toLowerCase() == _selectedSport?.toLowerCase()
+      ).toList();
+    }
+    
+    if (_selectedGameType != null) {
+      matches = matches.where((m) {
+        final mode = m['mode'] as String?;
+        if (_selectedGameType == 'team') {
+          return mode == 'team_vs_team';
+        } else if (_selectedGameType == 'individual') {
+          return mode != 'team_vs_team';
+        }
+        return true;
+      }).toList();
+    }
+    
+    if (_selectedDate != null) {
+      matches = matches.where((m) {
+        final startTime = m['start_time'] as DateTime?;
+        if (startTime == null) return false;
+        return startTime.year == _selectedDate!.year &&
+               startTime.month == _selectedDate!.month &&
+               startTime.day == _selectedDate!.day;
+      }).toList();
+    }
+    
+    if (_selectedReadiness != null) {
+      matches = matches.where((m) {
+        final proficiency = (m['proficiency_level'] as String?)?.toLowerCase();
+        if (proficiency == null) return false;
+        return proficiency == _selectedReadiness?.toLowerCase();
+      }).toList();
+    }
+    
+    if (_minSpotsLeft != null || _maxSpotsLeft != null) {
+      matches = matches.where((m) {
+        final spotsLeft = m['spots_left'] as int?;
+        if (spotsLeft == null) return false;
+        if (_minSpotsLeft != null && spotsLeft < _minSpotsLeft!) return false;
+        if (_maxSpotsLeft != null && spotsLeft > _maxSpotsLeft!) return false;
+        return true;
+      }).toList();
+    }
+    
+    // Filter by distance within the 100-mile range already loaded
+    // Initial load limits to 100 miles, user can filter further (e.g., 25, 50 miles)
+    if (_maxDistance < 100) {
+      matches = matches.where((m) {
+        final distance = m['distance_miles'] as double?;
+        if (distance == null) {
+          // If distance couldn't be calculated, exclude it when filtering by distance
+          // This ensures consistent filtering behavior
+          return false;
+        }
+        return distance <= _maxDistance;
+      }).toList();
+    }
+    // When "Any Distance" (100 miles) is selected, show all games within the 100-mile range
+    
+    return matches;
+  }
+  
   Widget _buildResultsFeed() {
+    final filteredMatches = _getFilteredMatches();
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        const Text(
-          'Results Feed',
-          style: TextStyle(fontSize: 14, fontWeight: FontWeight.bold, color: Colors.grey),
+        Row(
+          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+          children: [
+            const Text(
+              'Results Feed',
+              style: TextStyle(fontSize: 14, fontWeight: FontWeight.bold, color: Colors.grey),
+            ),
+            Text(
+              '${filteredMatches.length} ${filteredMatches.length == 1 ? 'game' : 'games'}',
+              style: const TextStyle(fontSize: 12, color: Colors.grey),
+            ),
+          ],
         ),
         const SizedBox(height: 8),
-        ...widget.controller.discoveryPickupMatches.map((match) => _buildResultCard(match)),
+        ...filteredMatches.map((match) => _buildResultCard(match)),
       ],
     );
   }
@@ -500,7 +1343,7 @@ class _DiscoverScreenState extends State<DiscoverScreen> {
     final acceptedCount = match['accepted_count'] as int? ?? 0;
     final requestId = match['request_id'] as String?;
     final sportEmoji = _getSportEmoji(sport);
-    final distance = _calculateDistance(zip);
+    final distance = _calculateDistance(match);
     
     // Determine match type display
     String matchType;
@@ -649,15 +1492,6 @@ class _DiscoverScreenState extends State<DiscoverScreen> {
                     ),
                     textAlign: TextAlign.center,
                   ),
-                  // Invite Friends button (for all_friends visibility)
-                  if (match['visibility'] == 'all_friends') ...[
-                    const SizedBox(height: 8),
-                    OutlinedButton.icon(
-                      onPressed: () => _showInviteFriendsDialog(requestId!, sport),
-                      icon: const Icon(Icons.person_add, size: 16),
-                      label: const Text('Invite Your Friends'),
-                    ),
-                  ],
                 ],
               ],
             ],
