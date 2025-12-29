@@ -5,6 +5,9 @@
 -- Drop the existing restrictive policy if it exists (it only allowed team admins)
 DROP POLICY IF EXISTS "Public games discoverable by admins" ON instant_match_requests;
 
+-- Drop the policy if it already exists (for idempotency)
+DROP POLICY IF EXISTS "All users can see public games" ON instant_match_requests;
+
 -- Create a new policy that allows ALL authenticated users to see public games
 -- This ensures public games (both individual and team) are visible to everyone
 CREATE POLICY "All users can see public games"

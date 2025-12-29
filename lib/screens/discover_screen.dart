@@ -277,6 +277,106 @@ class _DiscoverScreenState extends State<DiscoverScreen> {
     }
   }
   
+  /// Show dialog to select which team(s) to join with
+  Future<List<String>?> _showTeamSelectionDialog(String sport) async {
+    final adminTeamsForSport = widget.controller.getAdminTeamsForSport(sport);
+    
+    if (adminTeamsForSport.isEmpty) {
+      return null;
+    }
+    
+    // If only one team, return it directly (no dialog needed)
+    if (adminTeamsForSport.length == 1) {
+      final teamId = adminTeamsForSport.first['id'] as String?;
+      return teamId != null ? [teamId] : null;
+    }
+    
+    // Multiple teams - show selection dialog
+    final selectedTeamIds = <String>{};
+    
+    return showDialog<List<String>>(
+      context: context,
+      builder: (context) {
+        return StatefulBuilder(
+          builder: (context, setDialogState) {
+            return AlertDialog(
+              title: Text('Select Team(s) to Join'),
+              content: SizedBox(
+                width: double.maxFinite,
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'You are an admin of multiple ${_displaySport(sport)} teams. Select which team(s) to join with:',
+                      style: const TextStyle(fontSize: 14),
+                    ),
+                    const SizedBox(height: 16),
+                    // Select All checkbox
+                    if (adminTeamsForSport.length > 1)
+                      CheckboxListTile(
+                        title: const Text('Select All', style: TextStyle(fontWeight: FontWeight.bold)),
+                        value: selectedTeamIds.length == adminTeamsForSport.length,
+                        onChanged: (checked) {
+                          setDialogState(() {
+                            if (checked == true) {
+                              for (final team in adminTeamsForSport) {
+                                final teamId = team['id'] as String?;
+                                if (teamId != null) {
+                                  selectedTeamIds.add(teamId);
+                                }
+                              }
+                            } else {
+                              selectedTeamIds.clear();
+                            }
+                          });
+                        },
+                        controlAffinity: ListTileControlAffinity.leading,
+                      ),
+                    const Divider(),
+                    // Individual team checkboxes
+                    ...adminTeamsForSport.map((team) {
+                      final teamId = team['id'] as String?;
+                      final teamName = team['name'] as String? ?? 'Unknown Team';
+                      final isSelected = teamId != null && selectedTeamIds.contains(teamId);
+                      
+                      return CheckboxListTile(
+                        title: Text(teamName),
+                        value: isSelected,
+                        onChanged: (checked) {
+                          setDialogState(() {
+                            if (checked == true && teamId != null) {
+                              selectedTeamIds.add(teamId);
+                            } else if (teamId != null) {
+                              selectedTeamIds.remove(teamId);
+                            }
+                          });
+                        },
+                        controlAffinity: ListTileControlAffinity.leading,
+                      );
+                    }).toList(),
+                  ],
+                ),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.of(context).pop(null),
+                  child: const Text('Cancel'),
+                ),
+                ElevatedButton(
+                  onPressed: selectedTeamIds.isEmpty
+                      ? null
+                      : () => Navigator.of(context).pop(selectedTeamIds.toList()),
+                  child: Text('Join (${selectedTeamIds.length})'),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
+  }
+
   Future<void> _requestToJoinIndividualGame(String requestId) async {
     final supa = Supabase.instance.client;
     final userId = supa.auth.currentUser?.id;
@@ -1337,6 +1437,8 @@ class _DiscoverScreenState extends State<DiscoverScreen> {
     final mode = match['mode'] as String? ?? '';
     final numPlayers = match['num_players'] as int?;
     final startDt = match['start_time'] as DateTime?;
+    final endDt = match['end_time'] as DateTime?;
+    final venue = match['venue'] as String?;
     final zip = match['zip_code'] as String?;
     final canAccept = match['can_accept'] as bool? ?? true;
     final spotsLeft = match['spots_left'] as int?;
@@ -1344,6 +1446,15 @@ class _DiscoverScreenState extends State<DiscoverScreen> {
     final requestId = match['request_id'] as String?;
     final sportEmoji = _getSportEmoji(sport);
     final distance = _calculateDistance(match);
+    final teamName = match['team_name'] as String?;
+    final isOpenChallenge = match['is_open_challenge'] as bool? ?? false;
+    final userTeamInviteStatus = match['user_team_invite_status'] as String?; // 'pending', 'accepted', 'denied', or null (backward compatibility)
+    final userTeamInviteStatuses = match['user_team_invite_statuses'] as List<dynamic>?; // List of {status, target_team_id, team_name} for all teams
+    
+    // For open challenge team games, show special message
+    // Also show this format if user's team has a pending invite (even if isOpenChallenge is false now)
+    final bool isOpenChallengeTeamGame = mode == 'team_vs_team' && 
+        (isOpenChallenge || (userTeamInviteStatus == 'pending' && teamName != null));
     
     // Determine match type display
     String matchType;
@@ -1356,6 +1467,9 @@ class _DiscoverScreenState extends State<DiscoverScreen> {
     }
     
     final timeStr = _formatTime(startDt);
+    final dateStr = startDt != null 
+        ? '${startDt.year}-${startDt.month.toString().padLeft(2, '0')}-${startDt.day.toString().padLeft(2, '0')}'
+        : '';
     
     return Card(
       margin: const EdgeInsets.only(bottom: 12),
@@ -1368,40 +1482,84 @@ class _DiscoverScreenState extends State<DiscoverScreen> {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              // Sport, Type, Distance row
-              Row(
-                children: [
-                  Text('$sportEmoji ${_displaySport(sport)}', 
-                    style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
-                  const Text(' • '),
-                  Text(matchType),
-                  const Text(' • '),
-                  Text(distance),
-                ],
-              ),
-              
-              // Team match indicator
-              if (mode == 'team_vs_team') ...[
-                const SizedBox(height: 8),
-                Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                  decoration: BoxDecoration(
-                    color: const Color(0xFF0D7377).withOpacity(0.1),
-                    borderRadius: BorderRadius.circular(4),
-                    border: Border.all(color: const Color(0xFF0D7377)),
-                  ),
-                  child: const Text(
-                    'TEAM GAME',
-                    style: TextStyle(
-                      color: Color(0xFF0D7377),
-                      fontSize: 12,
-                      fontWeight: FontWeight.w600,
-                    ),
+              // For open challenge team games, show special title
+              if (isOpenChallengeTeamGame && teamName != null) ...[
+                Text(
+                  '$teamName ${_displaySport(sport)} Team is looking for an opponent team near by for a match:',
+                  style: const TextStyle(
+                    fontWeight: FontWeight.bold,
+                    fontSize: 16,
                   ),
                 ),
+                const SizedBox(height: 8),
+                // Show distance
+                Row(
+                  children: [
+                    const Icon(Icons.location_on, size: 16, color: Colors.grey),
+                    const SizedBox(width: 4),
+                    Text(
+                      distance,
+                      style: const TextStyle(
+                        color: Colors.grey,
+                        fontSize: 14,
+                        fontWeight: FontWeight.w500,
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 12),
+              ] else ...[
+                // Sport, Type, Distance row
+                Row(
+                  children: [
+                    Text('$sportEmoji ${_displaySport(sport)}', 
+                      style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+                    const Text(' • '),
+                    Text(matchType),
+                    const Text(' • '),
+                    Text(distance),
+                  ],
+                ),
+                // Team match indicator
+                if (mode == 'team_vs_team') ...[
+                  const SizedBox(height: 8),
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFF0D7377).withOpacity(0.1),
+                      borderRadius: BorderRadius.circular(4),
+                      border: Border.all(color: const Color(0xFF0D7377)),
+                    ),
+                    child: const Text(
+                      'TEAM GAME',
+                      style: TextStyle(
+                        color: Color(0xFF0D7377),
+                        fontSize: 12,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ),
+                ],
               ],
               
               const SizedBox(height: 8),
+              
+              // Date
+              if (dateStr.isNotEmpty) ...[
+                Row(
+                  children: [
+                    const Icon(Icons.calendar_today, size: 16, color: Colors.grey),
+                    const SizedBox(width: 4),
+                    Text(
+                      dateStr,
+                      style: const TextStyle(color: Colors.grey, fontSize: 14),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 4),
+              ],
+              
+              // Time
               Row(
                 children: [
                   const Icon(Icons.access_time, size: 16, color: Colors.orange),
@@ -1410,6 +1568,12 @@ class _DiscoverScreenState extends State<DiscoverScreen> {
                     timeStr,
                     style: const TextStyle(color: Colors.orange, fontWeight: FontWeight.w600),
                   ),
+                  if (endDt != null) ...[
+                    Text(
+                      ' - ${_formatTime(endDt)}',
+                      style: const TextStyle(color: Colors.orange, fontWeight: FontWeight.w600),
+                    ),
+                  ],
                   if (mode != 'team_vs_team' && spotsLeft != null) ...[
                     const Text(' | '),
                     Icon(Icons.people, size: 16, color: spotsLeft! > 0 ? Colors.green : Colors.red),
@@ -1421,17 +1585,26 @@ class _DiscoverScreenState extends State<DiscoverScreen> {
                         fontWeight: FontWeight.w600,
                       ),
                     ),
-                  ] else ...[
-                    const Text(' | '),
-                    const Icon(Icons.attach_money, size: 16, color: Colors.blue),
-                    const SizedBox(width: 4),
-                    const Text(
-                      '\$10',
-                      style: TextStyle(color: Colors.blue, fontWeight: FontWeight.w600),
-                    ),
                   ],
                 ],
               ),
+              
+              // Venue
+              if (venue != null && venue.isNotEmpty) ...[
+                const SizedBox(height: 4),
+                Row(
+                  children: [
+                    const Icon(Icons.location_on, size: 16, color: Colors.grey),
+                    const SizedBox(width: 4),
+                    Expanded(
+                      child: Text(
+                        venue,
+                        style: const TextStyle(color: Colors.grey, fontSize: 14),
+                      ),
+                    ),
+                  ],
+                ),
+              ],
               
               const SizedBox(height: 12),
               
@@ -1462,6 +1635,63 @@ class _DiscoverScreenState extends State<DiscoverScreen> {
                     ],
                   ),
                 ),
+              ] else if (mode == 'team_vs_team' && userTeamInviteStatuses != null && userTeamInviteStatuses.isNotEmpty) ...[
+                // User has multiple teams with invites - show combined status
+                _buildMultiTeamStatusDisplay(userTeamInviteStatuses, teamName ?? _displaySport(sport)),
+              ] else if (mode == 'team_vs_team' && userTeamInviteStatus == 'pending') ...[
+                // User's team has already requested to join - show pending status (backward compatibility)
+                Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.all(12),
+                  decoration: BoxDecoration(
+                    color: Colors.orange.shade50,
+                    borderRadius: BorderRadius.circular(8),
+                    border: Border.all(color: Colors.orange.shade300),
+                  ),
+                  child: Row(
+                    children: [
+                      Icon(Icons.hourglass_empty, size: 16, color: Colors.orange[700]),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: Text(
+                          'Request has been sent, wait for the ${teamName ?? _displaySport(sport)} team admin response',
+                          style: TextStyle(
+                            fontSize: 13,
+                            color: Colors.orange[900],
+                            fontWeight: FontWeight.w500,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ] else if (mode == 'team_vs_team' && userTeamInviteStatus == 'denied') ...[
+                // User's team request was denied (backward compatibility)
+                Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.all(12),
+                  decoration: BoxDecoration(
+                    color: Colors.red.shade50,
+                    borderRadius: BorderRadius.circular(8),
+                    border: Border.all(color: Colors.red.shade300),
+                  ),
+                  child: Row(
+                    children: [
+                      Icon(Icons.cancel, size: 16, color: Colors.red[700]),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: Text(
+                          'This request has been denied',
+                          style: TextStyle(
+                            fontSize: 13,
+                            color: Colors.red[900],
+                            fontWeight: FontWeight.w500,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
               ] else ...[
                 // Can join/accept
                 SizedBox(
@@ -1469,15 +1699,105 @@ class _DiscoverScreenState extends State<DiscoverScreen> {
                   child: ElevatedButton(
                     onPressed: () async {
                       if (mode == 'team_vs_team') {
-                        ScaffoldMessenger.of(context).showSnackBar(
-                          SnackBar(content: Text('Request to join ${_displaySport(sport)} team match')),
-                        );
+                        // Team game - request to join open challenge
+                        if (requestId == null) {
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            const SnackBar(content: Text('Invalid game request')),
+                          );
+                          return;
+                        }
+                        try {
+                          // Check if user has multiple admin teams for this sport
+                          final adminTeamsForSport = widget.controller.getAdminTeamsForSport(sport);
+                          
+                          List<String>? selectedTeamIds;
+                          if (adminTeamsForSport.length > 1) {
+                            // Show team selection dialog
+                            selectedTeamIds = await _showTeamSelectionDialog(sport);
+                            if (selectedTeamIds == null || selectedTeamIds.isEmpty) {
+                              return; // User cancelled
+                            }
+                          } else if (adminTeamsForSport.length == 1) {
+                            // Single team - use it directly
+                            final teamId = adminTeamsForSport.first['id'] as String?;
+                            if (teamId != null) {
+                              selectedTeamIds = [teamId];
+                            }
+                          }
+                          
+                          if (selectedTeamIds == null || selectedTeamIds.isEmpty) {
+                            if (mounted) {
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                const SnackBar(content: Text('No team selected')),
+                              );
+                            }
+                            return;
+                          }
+                          
+                          // Join with each selected team
+                          int successCount = 0;
+                          int failCount = 0;
+                          final errors = <String>[];
+                          
+                          for (final teamId in selectedTeamIds) {
+                            try {
+                              await widget.controller.requestToJoinOpenChallengeTeamGame(
+                                requestId: requestId,
+                                sport: sport,
+                                joiningTeamId: teamId,
+                              );
+                              successCount++;
+                            } catch (e) {
+                              failCount++;
+                              errors.add(e.toString());
+                            }
+                          }
+                          
+                          // Reload discovery to update status
+                          await widget.controller.loadDiscoveryPickupMatches();
+                          
+                          if (mounted) {
+                            if (failCount == 0) {
+                              // All successful
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                SnackBar(
+                                  content: Text(successCount > 1
+                                      ? 'Join requests sent for $successCount teams! Admin will review your requests.'
+                                      : 'Join request sent! ${_displaySport(sport)} team admin will review your request.'),
+                                  duration: const Duration(seconds: 3),
+                                ),
+                              );
+                            } else if (successCount > 0) {
+                              // Partial success
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                SnackBar(
+                                  content: Text('$successCount team(s) joined successfully. $failCount team(s) failed: ${errors.first}'),
+                                  duration: const Duration(seconds: 5),
+                                ),
+                              );
+                            } else {
+                              // All failed
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                SnackBar(
+                                  content: Text('Failed to join: ${errors.first}'),
+                                  duration: const Duration(seconds: 5),
+                                ),
+                              );
+                            }
+                          }
+                        } catch (e) {
+                          if (mounted) {
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              SnackBar(content: Text('Failed to join: $e')),
+                            );
+                          }
+                        }
                       } else {
                         // Individual game - request to join
                         await _requestToJoinIndividualGame(requestId!);
                       }
                     },
-                    child: Text(mode == 'team_vs_team' ? 'Request to Join' : 'Request to Join'),
+                    child: Text(mode == 'team_vs_team' ? 'Join' : 'Request to Join'),
                   ),
                 ),
                 // Show organizer approval message for individual games
@@ -1499,6 +1819,162 @@ class _DiscoverScreenState extends State<DiscoverScreen> {
         ),
       ),
     );
+  }
+
+  /// Build status display for multiple teams
+  Widget _buildMultiTeamStatusDisplay(List<dynamic> inviteStatuses, String creatingTeamName) {
+    // Parse statuses
+    final statusList = inviteStatuses.map((s) {
+      if (s is Map<String, dynamic>) {
+        return {
+          'status': s['status'] as String?,
+          'team_name': s['team_name'] as String? ?? 'Unknown Team',
+        };
+      }
+      return null;
+    }).whereType<Map<String, dynamic>>().toList();
+    
+    if (statusList.isEmpty) {
+      return const SizedBox.shrink();
+    }
+    
+    // Group by status
+    final pendingTeams = <String>[];
+    final deniedTeams = <String>[];
+    final acceptedTeams = <String>[];
+    
+    for (final statusInfo in statusList) {
+      final status = (statusInfo['status'] as String?)?.toLowerCase();
+      final teamName = statusInfo['team_name'] as String? ?? 'Unknown Team';
+      
+      if (status == 'pending') {
+        pendingTeams.add(teamName);
+      } else if (status == 'denied') {
+        deniedTeams.add(teamName);
+      } else if (status == 'accepted') {
+        acceptedTeams.add(teamName);
+      }
+    }
+    
+    // Determine which status to show (priority: denied > pending > accepted)
+    if (deniedTeams.isNotEmpty && pendingTeams.isEmpty && acceptedTeams.isEmpty) {
+      // All denied
+      return Container(
+        width: double.infinity,
+        padding: const EdgeInsets.all(12),
+        decoration: BoxDecoration(
+          color: Colors.red.shade50,
+          borderRadius: BorderRadius.circular(8),
+          border: Border.all(color: Colors.red.shade300),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Icon(Icons.cancel, size: 16, color: Colors.red[700]),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    'All requests denied',
+                    style: TextStyle(
+                      fontSize: 13,
+                      color: Colors.red[900],
+                      fontWeight: FontWeight.w500,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+            if (deniedTeams.length > 1) ...[
+              const SizedBox(height: 4),
+              Text(
+                'Teams: ${deniedTeams.join(', ')}',
+                style: TextStyle(
+                  fontSize: 12,
+                  color: Colors.red[800],
+                ),
+              ),
+            ],
+          ],
+        ),
+      );
+    } else if (pendingTeams.isNotEmpty) {
+      // Has pending (may also have denied/accepted)
+      return Container(
+        width: double.infinity,
+        padding: const EdgeInsets.all(12),
+        decoration: BoxDecoration(
+          color: Colors.orange.shade50,
+          borderRadius: BorderRadius.circular(8),
+          border: Border.all(color: Colors.orange.shade300),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Icon(Icons.hourglass_empty, size: 16, color: Colors.orange[700]),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    pendingTeams.length == 1
+                        ? '${pendingTeams.first}: Request sent, waiting for $creatingTeamName admin response'
+                        : 'Requests sent for ${pendingTeams.join(', ')}. Waiting for $creatingTeamName admin response',
+                    style: TextStyle(
+                      fontSize: 13,
+                      color: Colors.orange[900],
+                      fontWeight: FontWeight.w500,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+            if (deniedTeams.isNotEmpty) ...[
+              const SizedBox(height: 4),
+              Text(
+                'Denied: ${deniedTeams.join(', ')}',
+                style: TextStyle(
+                  fontSize: 12,
+                  color: Colors.red[800],
+                ),
+              ),
+            ],
+          ],
+        ),
+      );
+    } else if (acceptedTeams.isNotEmpty) {
+      // All accepted
+      return Container(
+        width: double.infinity,
+        padding: const EdgeInsets.all(12),
+        decoration: BoxDecoration(
+          color: Colors.green.shade50,
+          borderRadius: BorderRadius.circular(8),
+          border: Border.all(color: Colors.green.shade300),
+        ),
+        child: Row(
+          children: [
+            Icon(Icons.check_circle, size: 16, color: Colors.green[700]),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text(
+                acceptedTeams.length == 1
+                    ? '${acceptedTeams.first}: Accepted!'
+                    : 'Accepted for: ${acceptedTeams.join(', ')}',
+                style: TextStyle(
+                  fontSize: 13,
+                  color: Colors.green[900],
+                  fontWeight: FontWeight.w500,
+                ),
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+    
+    return const SizedBox.shrink();
   }
 
   Widget _buildEmptyState() {

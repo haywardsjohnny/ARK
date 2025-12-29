@@ -4,6 +4,9 @@
 -- Drop the existing policy
 DROP POLICY IF EXISTS "Creators can update match requests" ON instant_match_requests;
 
+-- Drop the new policy if it already exists (for idempotency)
+DROP POLICY IF EXISTS "Creators and team admins can update match requests" ON instant_match_requests;
+
 -- Create a new policy that allows:
 -- 1. Creators (created_by or creator_id matches auth.uid())
 -- 2. Team admins of the creating team (team_id matches their admin team)

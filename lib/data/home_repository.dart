@@ -151,11 +151,137 @@ class HomeRepository {
       List<String> teamIds) async {
     if (teamIds.isEmpty) return [];
 
-    final inviteRows = await supa
+    // Get invites where:
+    // 1. User's teams are the target (invited teams) - existing logic
+    // 2. User's teams are the creating team and other teams are joining (open challenge joins)
+    //    - This is for open challenge games where other teams clicked "Join"
+    
+    // First, get invites where user's teams are the target (existing logic)
+    // But exclude invites for games created by user's teams (those are handled separately)
+    final inviteRows1 = await supa
         .from('instant_request_invites')
         .select('id, request_id, target_team_id, status')
         .inFilter('target_team_id', teamIds)
         .eq('status', 'pending');
+    
+    // Get games created by user's teams to filter them out
+    final gamesCreatedByUserTeamsForFilter = await supa
+        .from('instant_match_requests')
+        .select('id')
+        .inFilter('team_id', teamIds)
+        .eq('mode', 'team_vs_team')
+        .neq('status', 'cancelled');
+    
+    final gameIdsCreatedByUserTeamsForFilter = <String>[];
+    if (gamesCreatedByUserTeamsForFilter is List) {
+      for (final game in gamesCreatedByUserTeamsForFilter) {
+        final gameId = game['id'] as String?;
+        if (gameId != null) gameIdsCreatedByUserTeamsForFilter.add(gameId);
+      }
+    }
+    
+    // Filter out invites where:
+    // 1. The game was created by user's team (these are handled in getPendingTeamMatchesForAdmin)
+    // 2. The game is public AND user's team is the responding team (Team X clicked "Join")
+    //    - For public games, if user's team is target_team_id, it means they clicked "Join"
+    //    - These should only appear in Discover with status, NOT in "Pending Admin Approval"
+    // 3. The game is invite-specific (non-public) - these should only appear in getPendingTeamMatchesForAdmin
+    //    - This prevents duplicate entries where the same game appears in both pendingInvites and pendingAdminMatches
+    
+    // First, get all game details for invites in one query
+    final inviteReqIds = <String>[];
+    if (inviteRows1 is List) {
+      for (final inv in inviteRows1) {
+        final reqId = inv['request_id'] as String?;
+        if (reqId != null && !gameIdsCreatedByUserTeamsForFilter.contains(reqId)) {
+          inviteReqIds.add(reqId);
+        }
+      }
+    }
+    
+    // Fetch game details for all invites
+    final gameDetails = <String, Map<String, dynamic>>{};
+    if (inviteReqIds.isNotEmpty) {
+      final gameRows = await supa
+          .from('instant_match_requests')
+          .select('id, team_id, visibility, is_public')
+          .inFilter('id', inviteReqIds);
+      
+      if (gameRows is List) {
+        for (final game in gameRows) {
+          final gameId = game['id'] as String?;
+          if (gameId != null) {
+            gameDetails[gameId] = Map<String, dynamic>.from(game);
+          }
+        }
+      }
+    }
+    
+    // Now filter invites
+    final filteredInviteRows1 = <dynamic>[];
+    if (inviteRows1 is List) {
+      for (final inv in inviteRows1) {
+        final reqId = inv['request_id'] as String?;
+        if (reqId == null) continue;
+        
+        // Skip if the game was created by user's team
+        if (gameIdsCreatedByUserTeamsForFilter.contains(reqId)) {
+          continue;
+        }
+        
+        // Check if this is a public game where user's team is the responding team
+        final gameInfo = gameDetails[reqId];
+        if (gameInfo != null) {
+          final gameTeamId = gameInfo['team_id'] as String?;
+          final visibility = (gameInfo['visibility'] as String?)?.toLowerCase();
+          final isPublic = gameInfo['is_public'] as bool? ?? false;
+          
+          // If this is a public game and the game was NOT created by user's team,
+          // then user's team is the responding team (they clicked "Join")
+          // These should NOT appear in "Pending Admin Approval" - only in Discover
+          if ((visibility == 'public' || isPublic) && 
+              gameTeamId != null && 
+              !teamIds.contains(gameTeamId)) {
+            if (kDebugMode) {
+              print('[DEBUG] Filtering out public game invite: reqId=$reqId, user\'s team is responding team (clicked Join)');
+            }
+            continue; // Skip public games where user's team is the responding team
+          }
+          
+          // IMPORTANT: Filter out invite-specific (non-public) games
+          // These should only appear in getPendingTeamMatchesForAdmin, not here
+          // This prevents duplicate entries in "Pending Admin Approval"
+          if (!(visibility == 'public' || isPublic)) {
+            if (kDebugMode) {
+              print('[DEBUG] Filtering out invite-specific game from getPendingInvitesForTeams: reqId=$reqId (will appear in getPendingTeamMatchesForAdmin instead)');
+            }
+            continue; // Skip invite-specific games - they're handled by getPendingTeamMatchesForAdmin
+          }
+        }
+        
+        // This is a valid invite where user's team is the target (invited)
+        // Only public games should reach here
+        filteredInviteRows1.add(inv);
+      }
+    }
+    
+    // DO NOT include invites for games created by user's teams here
+    // Those are handled separately in getPendingTeamMatchesForAdmin
+    // This keeps public game logic separate from invite-specific team logic
+    
+    // Use only filteredInviteRows1 (invites where user's team is the target, game NOT created by user's team)
+    final allInviteRows = <dynamic>[];
+    allInviteRows.addAll(filteredInviteRows1);
+    
+    // Remove duplicates based on invite ID
+    final uniqueInviteIds = <String>{};
+    final inviteRows = allInviteRows.where((inv) {
+      final id = inv['id'] as String?;
+      if (id == null) return false;
+      if (uniqueInviteIds.contains(id)) return false;
+      uniqueInviteIds.add(id);
+      return true;
+    }).toList();
 
     if (inviteRows is! List) return [];
 
@@ -321,6 +447,43 @@ class HomeRepository {
     );
   }
 
+  /// Request to join an open challenge team game
+  /// Creates an invite from the joining team to the creating team
+  Future<void> requestToJoinOpenChallengeTeamGame({
+    required String requestId,
+    required String joiningTeamId,
+    required String userId,
+  }) async {
+    // Check if invite already exists
+    final existingInvite = await supa
+        .from('instant_request_invites')
+        .select('id, status')
+        .eq('request_id', requestId)
+        .eq('target_team_id', joiningTeamId)
+        .maybeSingle();
+    
+    if (existingInvite != null) {
+      final status = (existingInvite['status'] as String?)?.toLowerCase();
+      if (status == 'pending') {
+        throw Exception('You have already requested to join this game');
+      } else if (status == 'accepted') {
+        throw Exception('Your team has already been accepted for this game');
+      } else if (status == 'denied') {
+        // Allow re-requesting if previously denied
+      }
+    }
+
+    // Create new invite with pending status
+    await supa
+        .from('instant_request_invites')
+        .insert({
+          'request_id': requestId,
+          'target_team_id': joiningTeamId,
+          'status': 'pending',
+          'target_type': 'team',  // Required field for team invites
+        });
+  }
+
   /// ✅ FIXED: Approve invite using RPC (so client does NOT write to team_match_attendance)
   ///
   /// IMPORTANT: Your RPC MUST accept the actor id:
@@ -388,12 +551,15 @@ class HomeRepository {
       }
     }
     
-    if (adminTeams.isEmpty || userZipCode == null) {
+    if (adminTeams.isEmpty) {
       if (kDebugMode) {
-        print('[DEBUG] getPendingTeamMatchesForAdmin: Returning empty - adminTeams.isEmpty=${adminTeams.isEmpty}, userZipCode==null=${userZipCode == null}');
+        print('[DEBUG] getPendingTeamMatchesForAdmin: Returning empty - adminTeams.isEmpty=true');
       }
       return [];
     }
+    
+    // Note: userZipCode can be null - we'll handle it gracefully in radius checks
+    // For invite-specific games, we'll skip radius checks if ZIP is null (since team was specifically invited)
 
     final adminTeamIds = adminTeams.map((t) => t['id'] as String).toList();
     final adminSports = adminTeams.map((t) => (t['sport'] as String? ?? '').toLowerCase()).toSet();
@@ -466,14 +632,25 @@ class HomeRepository {
         continue;
       }
 
-      // Skip if this request is from one of user's admin teams
-      if (adminTeamIds.contains(reqTeamId)) {
-        if (kDebugMode) print('[DEBUG] Skipping request $reqId: created by user\'s own team');
+      // Check if this request is from one of user's admin teams
+      final isCreatedByUserTeam = adminTeamIds.contains(reqTeamId);
+      
+      // For public games created by user's team, we want to show them if another team has responded
+      // For non-public games created by user's team, skip them (they're not pending admin approval)
+      if (isCreatedByUserTeam && !(visibility == 'public' || isPublic)) {
+        if (kDebugMode) print('[DEBUG] Skipping request $reqId: created by user\'s own team (non-public game)');
         continue;
       }
-
-      if (!adminSports.contains(reqSport)) {
+      
+      // For games NOT created by user's team, skip if sport doesn't match
+      if (!isCreatedByUserTeam && !adminSports.contains(reqSport)) {
         if (kDebugMode) print('[DEBUG] Skipping request $reqId: sport mismatch (reqSport=$reqSport, adminSports=$adminSports)');
+        continue;
+      }
+      
+      // For games created by user's team, ensure sport matches
+      if (isCreatedByUserTeam && !adminSports.contains(reqSport)) {
+        if (kDebugMode) print('[DEBUG] Skipping request $reqId: sport mismatch for user\'s own team (reqSport=$reqSport, adminSports=$adminSports)');
         continue;
       }
 
@@ -508,16 +685,18 @@ class HomeRepository {
           print('[DEBUG] Request $reqId: Public game, teamNotificationRadius=$teamNotificationRadius, isWithinRadius=$isWithinRadius');
         }
       } else {
-        // Non-public games: Apply radius check
+        // Non-public games (invite-specific): For invite-specific games, if ZIP is null,
+        // assume within radius since the team was specifically invited
         if (reqZip == null || userZipCode == null) {
           if (kDebugMode) {
-            print('[DEBUG] Skipping request $reqId: Missing ZIP codes (reqZip=$reqZip, userZipCode=$userZipCode)');
+            print('[DEBUG] Request $reqId: Non-public game with missing ZIP codes (reqZip=$reqZip, userZipCode=$userZipCode) - assuming within radius for invite-specific game');
           }
-          continue; // Need ZIP codes for radius check
+          isWithinRadius = true; // Invite-specific games: assume within radius if ZIP unavailable
+        } else {
+          // If ZIP codes match (same area), definitely within range
+          // Otherwise, check if game radius overlaps with team notification radius
+          isWithinRadius = reqZip == userZipCode || reqRadiusMiles >= teamNotificationRadius;
         }
-        // If ZIP codes match (same area), definitely within range
-        // Otherwise, check if game radius overlaps with team notification radius
-        isWithinRadius = reqZip == userZipCode || reqRadiusMiles >= teamNotificationRadius;
         if (kDebugMode) {
           print('[DEBUG] Request $reqId: Non-public, teamNotificationRadius=$teamNotificationRadius, isWithinRadius=$isWithinRadius (reqZip=$reqZip, userZipCode=$userZipCode, reqRadius=$reqRadiusMiles)');
         }
@@ -550,35 +729,145 @@ class HomeRepository {
         continue;
       }
       
-      // Skip if invite already exists for this request and admin team
-      final inviteKey = '$reqId:$adminTeamId';
-      if (existingInviteKeys.contains(inviteKey)) {
-        if (kDebugMode) print('[DEBUG] Skipping request $reqId: Invite already exists for adminTeamId=$adminTeamId');
-        continue; // Skip - invite already exists
-      }
-      
-      // Visibility check already done above - public games are included
-      
-      // Get team info
-      final teamInfo = await supa
-          .from('teams')
-          .select('id, name, sport, zip_code')
-          .eq('id', reqTeamId)
-          .maybeSingle();
+      // SEPARATE LOGIC: Public games vs Invite-specific teams
+      if (isCreatedByUserTeam) {
+        // PUBLIC GAME LOGIC: Only show if another team has responded (clicked "Join")
+        if (!(visibility == 'public' || isPublic)) {
+          if (kDebugMode) print('[DEBUG] Skipping request $reqId: Created by user\'s team but not public');
+          continue;
+        }
+        
+        // Check if there's a pending invite from another team (not the user's team)
+        final gameInvites = await supa
+            .from('instant_request_invites')
+            .select('id, target_team_id, status')
+            .eq('request_id', reqId);
+        
+        if (gameInvites is! List || gameInvites.isEmpty) {
+          if (kDebugMode) print('[DEBUG] Skipping request $reqId: Public game created by user\'s team but no invites exist yet');
+          continue;
+        }
+        
+        // Find ALL pending invites from other teams (not the user's team)
+        // This allows showing multiple teams (Team X, Team Y, etc.) that have requested to join
+        final pendingInvitesFromOtherTeams = gameInvites.where((inv) {
+          final targetTeamId = inv['target_team_id'] as String?;
+          final status = (inv['status'] as String?)?.toLowerCase();
+          return targetTeamId != null 
+              && !adminTeamIds.contains(targetTeamId) 
+              && status == 'pending';
+        }).toList();
+        
+        if (pendingInvitesFromOtherTeams.isEmpty) {
+          if (kDebugMode) print('[DEBUG] Skipping request $reqId: No pending invites from other teams');
+          continue;
+        }
+        
+        // Get team info (the creating team - Team A)
+        final teamInfo = await supa
+            .from('teams')
+            .select('id, name, sport, zip_code')
+            .eq('id', reqTeamId)
+            .maybeSingle();
 
-      if (teamInfo != null) {
-        if (kDebugMode) {
-          print('[DEBUG] ✓ Adding pending match: requestId=$reqId, teamName=${teamInfo['name']}, adminTeamId=$adminTeamId');
+        if (teamInfo == null) {
+          if (kDebugMode) print('[DEBUG] Skipping request $reqId: teamInfo is null');
+          continue;
         }
-        pendingMatches.add({
-          'request': req,
-          'team': teamInfo,
-          'admin_team': matchingAdminTeam,
-        });
+        
+        // Create a separate entry for EACH pending invite (Team X, Team Y, etc.)
+        for (final pendingInvite in pendingInvitesFromOtherTeams) {
+          final respondingTeamId = pendingInvite['target_team_id'] as String?;
+          
+          // Get responding team info (Team X, Team Y, etc.)
+          Map<String, dynamic>? respondingTeamInfo;
+          if (respondingTeamId != null) {
+            respondingTeamInfo = await supa
+                .from('teams')
+                .select('id, name, sport')
+                .eq('id', respondingTeamId)
+                .maybeSingle();
+          }
+          
+          if (kDebugMode) {
+            print('[DEBUG] ✓ Adding pending match (PUBLIC GAME): requestId=$reqId, teamName=${teamInfo['name']}, respondingTeamName=${respondingTeamInfo?['name']}');
+          }
+          pendingMatches.add({
+            'request': req,
+            'team': teamInfo,
+            'admin_team': matchingAdminTeam,
+            'responding_team': respondingTeamInfo,
+            'responding_team_id': respondingTeamId, // Add this for deny function
+          });
+        }
+        continue; // Done with this public game
       } else {
-        if (kDebugMode) {
-          print('[DEBUG] Skipping request $reqId: teamInfo is null');
+        // INVITE-SPECIFIC TEAM LOGIC: Games NOT created by user's team
+        // IMPORTANT: Public games should NOT appear here - they should only appear in Discover
+        // Only invite-specific games (non-public) should appear in "Pending Admin Approval"
+        if (visibility == 'public' || isPublic) {
+          if (kDebugMode) print('[DEBUG] Skipping request $reqId: Public game NOT created by user\'s team - should only appear in Discover, not Pending Admin Approval');
+          continue; // Public games should only appear in Discover, not in Pending Admin Approval
         }
+        
+        // Check if user's admin team is in the list of invited teams
+        // Get all invites for this game to check if user's team is invited
+        final gameInvites = await supa
+            .from('instant_request_invites')
+            .select('target_team_id, status')
+            .eq('request_id', reqId);
+        
+        if (gameInvites is! List || gameInvites.isEmpty) {
+          if (kDebugMode) print('[DEBUG] Skipping request $reqId: No invites found for this game');
+          continue;
+        }
+        
+        // Check if user's admin team is one of the invited teams
+        // IMPORTANT: Show to ALL invited team admins, regardless of invite status
+        // (pending, accepted, denied - admins should see it if their team was invited)
+        final isUserTeamInvited = gameInvites.any((inv) {
+          final targetTeamId = inv['target_team_id'] as String?;
+          return targetTeamId == adminTeamId;
+        });
+        
+        if (!isUserTeamInvited) {
+          if (kDebugMode) print('[DEBUG] Skipping request $reqId: User\'s admin team $adminTeamId is not in the invited teams list');
+          continue;
+        }
+        
+        // Check invite status - only show if status is 'pending' (not accepted/denied)
+        final userTeamInvite = gameInvites.firstWhere(
+          (inv) => inv['target_team_id'] == adminTeamId,
+          orElse: () => <String, dynamic>{},
+        );
+        
+        final inviteStatus = (userTeamInvite['status'] as String?)?.toLowerCase();
+        if (inviteStatus != 'pending') {
+          if (kDebugMode) {
+            print('[DEBUG] Skipping request $reqId: Invite status is $inviteStatus (not pending)');
+          }
+          continue; // Only show pending invites in "Pending Admin Approval"
+        }
+        
+        // Get team info (the creating team)
+        final teamInfo = await supa
+            .from('teams')
+            .select('id, name, sport, zip_code')
+            .eq('id', reqTeamId)
+            .maybeSingle();
+
+        if (teamInfo != null) {
+          if (kDebugMode) {
+            print('[DEBUG] ✓ Adding pending match (INVITE-SPECIFIC): requestId=$reqId, teamName=${teamInfo['name']}, adminTeamId=$adminTeamId');
+          }
+          pendingMatches.add({
+            'request': req,
+            'team': teamInfo,
+            'admin_team': matchingAdminTeam,
+            'responding_team': null,  // No responding team for invite-specific games
+          });
+        }
+        continue; // Done with this invite-specific game
       }
     }
     
@@ -753,14 +1042,33 @@ class HomeRepository {
 
     if (reqs.isEmpty) return [];
 
+    // Deduplicate by request_id to prevent duplicates when user switches teams
+    // (e.g., if user is creator and has attendance record, RPC might return both)
+    final seenRequestIds = <String>{};
+    final deduplicatedReqs = <dynamic>[];
+    for (final req in reqs) {
+      final reqId = req['id'] as String?;
+      if (reqId != null && !seenRequestIds.contains(reqId)) {
+        seenRequestIds.add(reqId);
+        deduplicatedReqs.add(req);
+      } else if (reqId != null && kDebugMode) {
+        print('[DEBUG] loadAllMatchesForUser: Filtered out duplicate game $reqId');
+      }
+    }
+
+    if (kDebugMode && deduplicatedReqs.length < reqs.length) {
+      print('[DEBUG] loadAllMatchesForUser: Deduplicated ${reqs.length} matches to ${deduplicatedReqs.length} unique games');
+    }
+
     // Extract request IDs for fetching additional data
-    final requestIds = reqs
+    final requestIds = deduplicatedReqs
         .map<String>((r) => r['id'] as String)
         .toSet()
         .toList();
 
     // Now fetch team names and attendance data (same as before)
-    return _enrichTeamMatchesWithDetails(reqs, requestIds, myUserId);
+    // Use deduplicatedReqs to prevent processing duplicates
+    return _enrichTeamMatchesWithDetails(deduplicatedReqs, requestIds, myUserId);
   }
 
   // Helper function to enrich match requests with team names and attendance
@@ -813,19 +1121,41 @@ class HomeRepository {
       if (creatorId != null) allUserIds.add(creatorId);
     }
 
-    final users = allUserIds.isEmpty
-        ? <dynamic>[]
-        : await supa
+    final Map<String, String> userNameById = {};
+    if (allUserIds.isNotEmpty) {
+      try {
+        // Use RPC function to get display names (bypasses RLS and includes email fallback)
+        final displayNamesResult = await supa.rpc(
+          'get_user_display_names',
+          params: {'p_user_ids': allUserIds.toList()},
+        );
+        
+        if (displayNamesResult is List) {
+          for (final u in displayNamesResult) {
+            final id = u['user_id'] as String?;
+            final displayName = u['display_name'] as String?;
+            if (id != null && displayName != null) {
+              userNameById[id] = displayName;
+            }
+          }
+        }
+      } catch (e) {
+        if (kDebugMode) {
+          print('[DEBUG] Failed to fetch user display names via RPC: $e');
+        }
+        // Fallback to direct query (will only return current user due to RLS)
+        final users = await supa
             .from('users')
             .select('id, full_name')
             .inFilter('id', allUserIds.toList());
-
-    final Map<String, String> userNameById = {};
-    if (users is List) {
-      for (final u in users) {
-        final id = u['id'] as String?;
-        if (id != null) {
-          userNameById[id] = (u['full_name'] as String?) ?? 'Player';
+        
+        if (users is List) {
+          for (final u in users) {
+            final id = u['id'] as String?;
+            if (id != null) {
+              userNameById[id] = (u['full_name'] as String?) ?? 'Player';
+            }
+          }
         }
       }
     }
@@ -894,46 +1224,236 @@ class HomeRepository {
 
       final attendees = attendanceByRequest[reqId] ?? [];
 
+      // Get ALL members of both teams (not just those with attendance records)
+      final allTeamAMembers = await supa
+          .from('team_members')
+          .select('user_id, role')
+          .eq('team_id', teamAId);
+      
+      final allTeamBMembers = await supa
+          .from('team_members')
+          .select('user_id, role')
+          .eq('team_id', teamBId);
+      
+      // Build a map of all user IDs in both teams
+      final allUserIdsInBothTeams = <String>{};
+      final Map<String, String> userRoleInTeamA = {};
+      final Map<String, String> userRoleInTeamB = {};
+      
+      if (allTeamAMembers is List) {
+        for (final m in allTeamAMembers) {
+          final uid = m['user_id'] as String?;
+          final role = (m['role'] as String?)?.toLowerCase() ?? 'member';
+          if (uid != null) {
+            allUserIdsInBothTeams.add(uid);
+            userRoleInTeamA[uid] = role;
+          }
+        }
+      }
+      
+      if (allTeamBMembers is List) {
+        for (final m in allTeamBMembers) {
+          final uid = m['user_id'] as String?;
+          final role = (m['role'] as String?)?.toLowerCase() ?? 'member';
+          if (uid != null) {
+            allUserIdsInBothTeams.add(uid);
+            userRoleInTeamB[uid] = role;
+          }
+        }
+      }
+      
+      // Build initial rosters from attendance records (preserve existing data)
       final teamAPlayers = <Map<String, dynamic>>[];
       final teamBPlayers = <Map<String, dynamic>>[];
-
+      
+      // Map attendance status by user_id and team_id
+      final Map<String, String> attendanceStatusByUserTeam = {};
       for (final a in attendees) {
         final uid = a['user_id'] as String?;
         final tid = a['team_id'] as String?;
         final st = (a['status'] as String?)?.toLowerCase() ?? 'pending';
-        if (uid == null || tid == null) continue;
-
-        // Get role for this user in this team
-        final role = roleByUserTeam['$uid-$tid'] ?? 'member';
-        final isAdmin = role == 'admin';
-
-        final item = {
-          'user_id': uid,
-          'name': userNameById[uid] ?? 'Player',
-          'status': st,
-          'role': role,
-          'is_admin': isAdmin,
-        };
-
-        if (tid == teamAId) teamAPlayers.add(item);
-        if (tid == teamBId) teamBPlayers.add(item);
+        if (uid != null && tid != null) {
+          attendanceStatusByUserTeam['$uid-$tid'] = st;
+          
+          // Get role for this user in this team
+          final role = roleByUserTeam['$uid-$tid'] ?? 'member';
+          final isAdmin = (role == 'admin' || role == 'captain');
+          
+          final item = {
+            'user_id': uid,
+            'name': userNameById[uid] ?? 'Player',
+            'status': st,
+            'role': role,
+            'is_admin': isAdmin,
+          };
+          
+          if (tid == teamAId) teamAPlayers.add(item);
+          if (tid == teamBId) teamBPlayers.add(item);
+        }
       }
 
-      // can switch side if member of both teams
+      // Apply roster assignment rules for ALL users
+      for (final userId in allUserIdsInBothTeams) {
+        final roleInTeamA = userRoleInTeamA[userId];
+        final roleInTeamB = userRoleInTeamB[userId];
+        final isAdminOfTeamA = (roleInTeamA == 'admin' || roleInTeamA == 'captain');
+        final isAdminOfTeamB = (roleInTeamB == 'admin' || roleInTeamB == 'captain');
+        final isMemberOfTeamA = roleInTeamA != null;
+        final isMemberOfTeamB = roleInTeamB != null;
+        
+        // Get attendance status (prefer Team A, then Team B, then 'pending')
+        String attendanceStatus = attendanceStatusByUserTeam['$userId-$teamAId'] ?? 
+                                  attendanceStatusByUserTeam['$userId-$teamBId'] ?? 
+                                  'pending';
+        
+        // Find existing entry in rosters (if any)
+        final existingInTeamA = teamAPlayers.indexWhere((p) => p['user_id'] == userId);
+        final existingInTeamB = teamBPlayers.indexWhere((p) => p['user_id'] == userId);
+        
+        // Rule 1: Admin always stays on the side where they are admin
+        if (isAdminOfTeamA) {
+          // User is admin of Team A - MUST be in Team A roster
+          if (existingInTeamB >= 0) {
+            teamBPlayers.removeAt(existingInTeamB);
+            if (kDebugMode) {
+              print('[DEBUG] Game $reqId: Removed user $userId from Team B (admin of Team A)');
+            }
+          }
+          if (existingInTeamA < 0) {
+            // Not in Team A roster - add them
+            teamAPlayers.add({
+              'user_id': userId,
+              'name': userNameById[userId] ?? 'Player',
+              'status': attendanceStatus,
+              'role': roleInTeamA ?? 'member',
+              'is_admin': true,
+            });
+            if (kDebugMode) {
+              print('[DEBUG] Game $reqId: Added user $userId to Team A (admin of Team A)');
+            }
+          } else {
+            // Update existing entry to ensure admin flag is set
+            teamAPlayers[existingInTeamA]['is_admin'] = true;
+            teamAPlayers[existingInTeamA]['role'] = roleInTeamA ?? 'member';
+          }
+        } else if (isAdminOfTeamB) {
+          // User is admin of Team B - MUST be in Team B roster
+          if (existingInTeamA >= 0) {
+            teamAPlayers.removeAt(existingInTeamA);
+            if (kDebugMode) {
+              print('[DEBUG] Game $reqId: Removed user $userId from Team A (admin of Team B)');
+            }
+          }
+          if (existingInTeamB < 0) {
+            // Not in Team B roster - add them
+            teamBPlayers.add({
+              'user_id': userId,
+              'name': userNameById[userId] ?? 'Player',
+              'status': attendanceStatus,
+              'role': roleInTeamB ?? 'member',
+              'is_admin': true,
+            });
+            if (kDebugMode) {
+              print('[DEBUG] Game $reqId: Added user $userId to Team B (admin of Team B)');
+            }
+          } else {
+            // Update existing entry to ensure admin flag is set
+            teamBPlayers[existingInTeamB]['is_admin'] = true;
+            teamBPlayers[existingInTeamB]['role'] = roleInTeamB ?? 'member';
+          }
+        }
+        // Rule 2: If user is member of both teams (and not admin of either), prioritize creating team (Team A)
+        else if (isMemberOfTeamA && isMemberOfTeamB) {
+          // User is member of both teams - put them in Team A (creating team)
+          if (existingInTeamB >= 0) {
+            teamBPlayers.removeAt(existingInTeamB);
+            if (kDebugMode) {
+              print('[DEBUG] Game $reqId: Removed user $userId from Team B (member of both teams, prioritizing Team A)');
+            }
+          }
+          if (existingInTeamA < 0) {
+            // Not in Team A roster - add them
+            teamAPlayers.add({
+              'user_id': userId,
+              'name': userNameById[userId] ?? 'Player',
+              'status': attendanceStatus,
+              'role': roleInTeamA ?? 'member',
+              'is_admin': false,
+            });
+            if (kDebugMode) {
+              print('[DEBUG] Game $reqId: Added user $userId to Team A (member of both teams, prioritizing creating team)');
+            }
+          }
+        }
+        // Rule 3: If user is only a member of one team, put them in that team's roster
+        else if (isMemberOfTeamA && !isMemberOfTeamB) {
+          if (existingInTeamB >= 0) {
+            teamBPlayers.removeAt(existingInTeamB);
+          }
+          if (existingInTeamA < 0) {
+            teamAPlayers.add({
+              'user_id': userId,
+              'name': userNameById[userId] ?? 'Player',
+              'status': attendanceStatus,
+              'role': roleInTeamA ?? 'member',
+              'is_admin': false,
+            });
+            if (kDebugMode) {
+              print('[DEBUG] Game $reqId: Added user $userId to Team A (only member of Team A)');
+            }
+          }
+        } else if (isMemberOfTeamB && !isMemberOfTeamA) {
+          if (existingInTeamA >= 0) {
+            teamAPlayers.removeAt(existingInTeamA);
+          }
+          if (existingInTeamB < 0) {
+            teamBPlayers.add({
+              'user_id': userId,
+              'name': userNameById[userId] ?? 'Player',
+              'status': attendanceStatus,
+              'role': roleInTeamB ?? 'member',
+              'is_admin': false,
+            });
+            if (kDebugMode) {
+              print('[DEBUG] Game $reqId: Added user $userId to Team B (only member of Team B)');
+            }
+          }
+        }
+      }
+      
+      // Get current user's team ID for can_switch_side and my_team_id
       bool canSwitchSide = false;
-      final membershipRows = await supa
-          .from('team_members')
-          .select('team_id')
-          .eq('user_id', myUserId)
-          .inFilter('team_id', [teamAId, teamBId]);
-
-      if (membershipRows is List && membershipRows.length >= 2) {
+      final isCurrentUserMemberOfTeamA = userRoleInTeamA.containsKey(myUserId);
+      final isCurrentUserMemberOfTeamB = userRoleInTeamB.containsKey(myUserId);
+      
+      if (isCurrentUserMemberOfTeamA && isCurrentUserMemberOfTeamB) {
         canSwitchSide = true;
       }
-
-      // Get user's attendance status from RPC result
-      final userAttendanceStatus = (r['user_attendance_status'] as String?)?.toLowerCase() ?? 'accepted';
-      final userTeamId = r['user_team_id'] as String?;
+      
+      // Determine current user's team ID
+      var userTeamId = r['user_team_id'] as String?;
+      
+      // Override based on admin status
+      if (userRoleInTeamA[myUserId] == 'admin' || userRoleInTeamA[myUserId] == 'captain') {
+        userTeamId = teamAId;
+      } else if (userRoleInTeamB[myUserId] == 'admin' || userRoleInTeamB[myUserId] == 'captain') {
+        userTeamId = teamBId;
+      } else if (isCurrentUserMemberOfTeamA) {
+        userTeamId = teamAId;
+      } else if (isCurrentUserMemberOfTeamB) {
+        userTeamId = teamBId;
+      }
+      
+      // Get user's attendance status
+      final userAttendanceStatus = (r['user_attendance_status'] as String?)?.toLowerCase() ?? 
+                                  attendanceStatusByUserTeam['$myUserId-$userTeamId'] ?? 
+                                  'accepted';
+      
+      if (kDebugMode) {
+        print('[DEBUG] Game $reqId: Final rosters - Team A: ${teamAPlayers.length} players, Team B: ${teamBPlayers.length} players');
+        print('[DEBUG] Game $reqId: Current user $myUserId -> userTeamId=$userTeamId');
+      }
+      
       // Get match request status (for filtering cancelled matches)
       final matchStatus = (r['status'] as String?)?.toLowerCase() ?? '';
 
@@ -1094,17 +1614,53 @@ class HomeRepository {
     // in "Awaiting Opponent Confirmation" not "Pending Approval"
     // Also filter out games where the user's team is not the creating team or the matched team
     // (e.g., if Team B accepts, Team C members should not see it in "Pending Approval")
-    final nonCancelledReqs = (reqs as List).where((r) {
+    // NEW LOGIC: After acceptance, all Team A admins/members should get pending approval
+    // (except if they're admin on the accepting team - they see it under that team)
+    // All accepting team members should also get pending approval
+    
+    // First, check admin status for all matched teams to optimize queries
+    final matchedTeamIds = reqs
+        .map((r) => r['matched_team_id'] as String?)
+        .whereType<String>()
+        .toSet();
+    
+    final Map<String, bool> userAdminStatusByTeamId = {};
+    if (matchedTeamIds.isNotEmpty) {
+      try {
+        final adminChecks = await supa
+            .from('team_members')
+            .select('team_id, role')
+            .eq('user_id', myUserId)
+            .inFilter('team_id', matchedTeamIds.toList());
+        
+        if (adminChecks is List) {
+          for (final check in adminChecks) {
+            final teamId = check['team_id'] as String?;
+            final role = (check['role'] as String?)?.toLowerCase();
+            if (teamId != null) {
+              userAdminStatusByTeamId[teamId] = role == 'admin' || role == 'captain';
+            }
+          }
+        }
+      } catch (e) {
+        if (kDebugMode) {
+          print('[ERROR] Failed to check admin status for matched teams: $e');
+        }
+      }
+    }
+    
+    final nonCancelledReqs = <dynamic>[];
+    for (final r in reqs) {
       final status = (r['status'] as String?)?.toLowerCase();
-      final matchedTeamId = r['matched_team_id'];
+      final matchedTeamId = r['matched_team_id'] as String?;
       final creatingTeamId = r['team_id'] as String?;
       
       // Exclude cancelled matches
-      if (status == 'cancelled') return false;
+      if (status == 'cancelled') continue;
       
       // Exclude games awaiting opponent confirmation (matched_team_id is null)
       // These games should only appear in "Awaiting Opponent Confirmation"
-      if (matchedTeamId == null) return false;
+      if (matchedTeamId == null) continue;
       
       // Get the user's team ID for this game from attendance record
       final reqId = r['id'] as String?;
@@ -1117,16 +1673,37 @@ class HomeRepository {
         final isUserOnCreatingTeam = userTeamId == creatingTeamId;
         final isUserOnMatchedTeam = userTeamId == matchedTeamId;
         
+        // Check if user is admin of the accepting team (matched team)
+        final isUserAdminOfAcceptingTeam = userAdminStatusByTeamId[matchedTeamId] ?? false;
+        
+        // Include if:
+        // 1. User is on creating team (Team A) - all members/admins should see it
+        // 2. User is on matched team (Team Y) - all members should see it
+        // EXCEPT: If user is admin of accepting team AND also member of creating team,
+        // they should see it under the accepting team (update myTeamByReqId)
         if (!isUserOnCreatingTeam && !isUserOnMatchedTeam) {
           if (kDebugMode) {
             print('[DEBUG] Filtering out game $reqId: userTeamId=$userTeamId, creatingTeamId=$creatingTeamId, matchedTeamId=$matchedTeamId');
           }
-          return false; // User's team is neither creating team nor matched team
+          continue; // User's team is neither creating team nor matched team
+        }
+        
+        // Additional check: If user is admin of accepting team and also member of creating team,
+        // they should see it under the accepting team (not the creating team)
+        if (isUserAdminOfAcceptingTeam && isUserOnCreatingTeam) {
+          if (kDebugMode) {
+            print('[DEBUG] User is admin of accepting team ($matchedTeamId) and member of creating team ($creatingTeamId) - showing under accepting team');
+          }
+          // Update userTeamId to the accepting team for this game
+          // This ensures they see it under the accepting team
+          if (reqId != null) {
+            myTeamByReqId[reqId] = matchedTeamId;
+          }
         }
       }
       
-      return true;
-    }).toList();
+      nonCancelledReqs.add(r);
+    }
 
     if (kDebugMode) {
       final cancelledCount = (reqs as List).where((r) => (r['status'] as String?)?.toLowerCase() == 'cancelled').length;
@@ -1167,7 +1744,43 @@ class HomeRepository {
       }
     }
 
-    // 4) Build rows
+    // 4) Get invites for all games to determine if they're open challenges
+    final allRequestIds = nonCancelledReqs
+        .map((r) => r['id'] as String?)
+        .where((id) => id != null)
+        .cast<String>()
+        .toList();
+    
+    final Map<String, bool> isOpenChallengeByReqId = {};
+    if (allRequestIds.isNotEmpty) {
+      final invites = await supa
+          .from('instant_request_invites')
+          .select('request_id, status')
+          .inFilter('request_id', allRequestIds);
+      
+      if (invites is List) {
+        final invitesByReqId = <String, List<dynamic>>{};
+        for (final inv in invites) {
+          final reqId = inv['request_id'] as String?;
+          if (reqId != null) {
+            invitesByReqId.putIfAbsent(reqId, () => []).add(inv);
+          }
+        }
+        
+        // A game is an open challenge if it has no invites at all
+        for (final reqId in allRequestIds) {
+          final gameInvites = invitesByReqId[reqId] ?? [];
+          isOpenChallengeByReqId[reqId] = gameInvites.isEmpty;
+        }
+      } else {
+        // If query fails, assume all are open challenges
+        for (final reqId in allRequestIds) {
+          isOpenChallengeByReqId[reqId] = true;
+        }
+      }
+    }
+
+    // 5) Build rows
     final rows = <Map<String, dynamic>>[];
 
     for (final r in nonCancelledReqs) {
@@ -1195,6 +1808,7 @@ class HomeRepository {
 
       final venue = r['venue'] as String?;
       final isConfirmed = teamBId != null;
+      final isOpenChallenge = isOpenChallengeByReqId[reqId] ?? true;
 
       rows.add({
         'request_id': reqId,
@@ -1210,6 +1824,7 @@ class HomeRepository {
         'my_team_id': myTeamByReqId[reqId],
         'my_status': myStatusByReqId[reqId] ?? 'pending',
         'is_confirmed': isConfirmed, // true if matched, false if pending
+        'is_open_challenge': isOpenChallenge,
       });
     }
 
@@ -1324,19 +1939,41 @@ class HomeRepository {
       if (creatorId != null) allUserIds.add(creatorId);
     }
 
-    final users = allUserIds.isEmpty
-        ? <dynamic>[]
-        : await supa
+    final Map<String, String> userNameById = {};
+    if (allUserIds.isNotEmpty) {
+      try {
+        // Use RPC function to get display names (bypasses RLS and includes email fallback)
+        final displayNamesResult = await supa.rpc(
+          'get_user_display_names',
+          params: {'p_user_ids': allUserIds.toList()},
+        );
+        
+        if (displayNamesResult is List) {
+          for (final u in displayNamesResult) {
+            final id = u['user_id'] as String?;
+            final displayName = u['display_name'] as String?;
+            if (id != null && displayName != null) {
+              userNameById[id] = displayName;
+            }
+          }
+        }
+      } catch (e) {
+        if (kDebugMode) {
+          print('[DEBUG] Failed to fetch user display names via RPC: $e');
+        }
+        // Fallback to direct query (will only return current user due to RLS)
+        final users = await supa
             .from('users')
             .select('id, full_name')
             .inFilter('id', allUserIds.toList());
-
-    final Map<String, String> userNameById = {};
-    if (users is List) {
-      for (final u in users) {
-        final id = u['id'] as String?;
-        if (id != null) {
-          userNameById[id] = (u['full_name'] as String?) ?? 'Player';
+        
+        if (users is List) {
+          for (final u in users) {
+            final id = u['id'] as String?;
+            if (id != null) {
+              userNameById[id] = (u['full_name'] as String?) ?? 'Player';
+            }
+          }
         }
       }
     }
@@ -1484,6 +2121,12 @@ class HomeRepository {
       String userId, List<String> userTeamIds) async {
     if (userTeamIds.isEmpty) return [];
 
+    // Define variables outside try block so we can use them in catch block
+    final result = <Map<String, dynamic>>[];
+    List<dynamic> allGamesFinal = [];
+    final teamNames = <String, String>{};
+    final userTeamIdByGameId = <String, String>{};
+
     try {
       // First, get all games where user has an attendance record (this ensures RLS allows access)
       // AND where matched_team_id is null (awaiting opponent confirmation)
@@ -1492,16 +2135,116 @@ class HomeRepository {
           .select('request_id, team_id')
           .eq('user_id', userId);
       
+      if (kDebugMode) {
+        print('[DEBUG] getAwaitingOpponentConfirmationGames: Raw attendance query returned ${userAttendance is List ? userAttendance.length : 0} records');
+        if (userAttendance is List) {
+          for (final att in userAttendance) {
+            print('[DEBUG]   - request_id: ${att['request_id']}, team_id: ${att['team_id']}');
+          }
+        }
+      }
+      
       final Set<String> gameIdsWithAttendance = {};
-      final Map<String, String> userTeamIdByGameId = {}; // Map game ID to user's team ID in that game
+      // userTeamIdByGameId is already defined outside try block
+      final Map<String, List<String>> allUserTeamsByGameId = {}; // Map game ID to all user's team IDs in that game
+      
       if (userAttendance is List) {
+        // First pass: collect all attendance records
         for (final att in userAttendance) {
           final reqId = att['request_id'] as String?;
           final teamId = att['team_id'] as String?;
           if (reqId != null) {
             gameIdsWithAttendance.add(reqId);
             if (teamId != null) {
-              userTeamIdByGameId[reqId] = teamId;
+              allUserTeamsByGameId.putIfAbsent(reqId, () => []).add(teamId);
+            }
+          }
+        }
+        
+        if (kDebugMode) {
+          print('[DEBUG] Collected attendance: gameIdsWithAttendance=$gameIdsWithAttendance, allUserTeamsByGameId=$allUserTeamsByGameId');
+        }
+        
+        // Second pass: prioritize creating team over invited teams
+        // Get creating team IDs for all games
+        if (gameIdsWithAttendance.isNotEmpty) {
+          final gameRows = await supa
+              .from('instant_match_requests')
+              .select('id, team_id')
+              .inFilter('id', gameIdsWithAttendance.toList());
+          
+          final Map<String, String> creatingTeamIdByGameId = {};
+          if (gameRows is List) {
+            for (final game in gameRows) {
+              final gameId = game['id'] as String?;
+              final creatingTeamId = game['team_id'] as String?;
+              if (gameId != null && creatingTeamId != null) {
+                creatingTeamIdByGameId[gameId] = creatingTeamId;
+              }
+            }
+          }
+          
+          // Now determine user's team for each game, prioritizing creating team
+          for (final reqId in gameIdsWithAttendance) {
+            final userTeamsForGame = allUserTeamsByGameId[reqId] ?? [];
+            final creatingTeamId = creatingTeamIdByGameId[reqId];
+            
+            if (kDebugMode) {
+              print('[DEBUG] Game $reqId: userTeamsForGame=$userTeamsForGame, creatingTeamId=$creatingTeamId');
+            }
+            
+            // Priority: If user is a member of the creating team, use that
+            // Otherwise, use the first team found (for invited teams)
+            if (creatingTeamId != null && userTeamsForGame.contains(creatingTeamId)) {
+              userTeamIdByGameId[reqId] = creatingTeamId;
+              if (kDebugMode) {
+                print('[DEBUG] ✓ Game $reqId: User is on creating team $creatingTeamId (prioritized over ${userTeamsForGame.where((t) => t != creatingTeamId).join(', ')})');
+              }
+            } else if (userTeamsForGame.isNotEmpty) {
+              // User is only on invited teams according to attendance records
+              // BUT: If creatingTeamId exists, verify if user is actually a member of creating team
+              // This handles the case where attendance record might be missing due to RLS or timing
+              if (creatingTeamId != null && !userTeamsForGame.contains(creatingTeamId)) {
+                // Double-check: verify if user is actually a member of the creating team
+                try {
+                  final isMemberOfCreatingTeam = await supa
+                      .from('team_members')
+                      .select('user_id')
+                      .eq('team_id', creatingTeamId)
+                      .eq('user_id', userId)
+                      .maybeSingle();
+                  
+                  if (isMemberOfCreatingTeam != null) {
+                    // User IS a member of creating team, but attendance record is missing
+                    // Use creating team ID anyway (prioritize creating team)
+                    userTeamIdByGameId[reqId] = creatingTeamId;
+                    if (kDebugMode) {
+                      print('[WARNING] Game $reqId: User IS a member of creating team $creatingTeamId, but attendance record is missing!');
+                      print('[WARNING] Using creating team ID anyway (prioritizing creating team over invited teams)');
+                    }
+                  } else {
+                    // User is NOT a member of creating team, use first invited team
+                    userTeamIdByGameId[reqId] = userTeamsForGame.first;
+                    if (kDebugMode) {
+                      print('[WARNING] Game $reqId: User is NOT a member of creating team $creatingTeamId, using first invited team: ${userTeamsForGame.first}');
+                    }
+                  }
+                } catch (e) {
+                  // If check fails, fall back to first invited team
+                  userTeamIdByGameId[reqId] = userTeamsForGame.first;
+                  if (kDebugMode) {
+                    print('[ERROR] Failed to verify team membership for game $reqId: $e');
+                    print('[DEBUG] Using first invited team: ${userTeamsForGame.first}');
+                  }
+                }
+              } else {
+                userTeamIdByGameId[reqId] = userTeamsForGame.first;
+                if (kDebugMode) {
+                  print('[DEBUG] Game $reqId: User is on invited team(s) ${userTeamsForGame.join(', ')}, using first: ${userTeamsForGame.first}');
+                }
+              }
+            } else if (kDebugMode) {
+              print('[WARNING] Game $reqId: No user teams found for this game');
             }
           }
         }
@@ -1512,24 +2255,121 @@ class HomeRepository {
         print('[DEBUG] User team mapping: $userTeamIdByGameId');
       }
       
-      if (gameIdsWithAttendance.isEmpty) {
+      // ALSO get games created by user's teams (even if no attendance record exists yet)
+      // This ensures newly created games (public or invite-specific) appear immediately
+      // Use RPC function to bypass RLS - get_all_matches_for_user returns games created by user
+      List<dynamic> gamesCreatedByUserTeams = [];
+      try {
+        // Get all games for user via RPC (includes games created by user)
+        final allUserGamesResult = await supa.rpc(
+          'get_all_matches_for_user',
+          params: {'p_user_id': userId},
+        );
+        
+        if (allUserGamesResult is List) {
+          // Filter to only games awaiting opponent confirmation (created by user's teams)
+          gamesCreatedByUserTeams = allUserGamesResult.where((game) {
+            final mode = (game['mode'] as String?)?.toLowerCase();
+            final status = (game['status'] as String?)?.toLowerCase();
+            final matchedTeamId = game['matched_team_id'];
+            final teamId = game['team_id'] as String?;
+            
+            return mode == 'team_vs_team' &&
+                   status != 'cancelled' &&
+                   (status == 'open' || status == 'pending') &&
+                   matchedTeamId == null &&
+                   teamId != null &&
+                   userTeamIds.contains(teamId);
+          }).toList();
+          
+          if (kDebugMode) {
+            print('[DEBUG] Found ${gamesCreatedByUserTeams.length} games created by user\'s teams via get_all_matches_for_user RPC');
+            for (final game in gamesCreatedByUserTeams) {
+              print('[DEBUG]   - Game ${game['id']}: status=${game['status']}, team_id=${game['team_id']}');
+            }
+          }
+        }
+      } catch (e) {
         if (kDebugMode) {
-          print('[DEBUG] getAwaitingOpponentConfirmationGames: No attendance records found for user');
+          print('[ERROR] Failed to get games via get_all_matches_for_user RPC: $e');
+        }
+      }
+      
+      final Set<String> allGameIds = gameIdsWithAttendance.toSet();
+      if (gamesCreatedByUserTeams is List) {
+        for (final game in gamesCreatedByUserTeams) {
+          final gameId = game['id'] as String?;
+          final teamId = game['team_id'] as String?;
+          if (gameId != null && teamId != null) {
+            allGameIds.add(gameId);
+            // If user doesn't have attendance record for this game, add it to the mapping
+            if (!gameIdsWithAttendance.contains(gameId)) {
+              userTeamIdByGameId[gameId] = teamId;
+              if (kDebugMode) {
+                print('[DEBUG] Added game $gameId created by user\'s team $teamId (no attendance record yet)');
+              }
+            }
+          }
+        }
+      }
+      
+      if (allGameIds.isEmpty) {
+        if (kDebugMode) {
+          print('[DEBUG] getAwaitingOpponentConfirmationGames: No games found (no attendance records and no games created by user\'s teams)');
         }
         return [];
       }
       
-      // Get all games where user has attendance records
-      // Use RPC function to bypass RLS - this ensures all members (not just admins) can see games
-      final allGamesResult = await supa.rpc(
-        'get_match_requests_for_attendance',
-        params: {
-          'p_user_id': userId,
-          'p_request_ids': gameIdsWithAttendance.toList(),
-        },
-      );
+      // Get games with attendance records via RPC (for games where user has attendance)
+      final gamesWithAttendanceIds = gameIdsWithAttendance.toList();
+      List<dynamic> allGamesRaw = [];
       
-      final allGamesRaw = allGamesResult is List ? allGamesResult : <dynamic>[];
+      if (gamesWithAttendanceIds.isNotEmpty) {
+        final allGamesResult = await supa.rpc(
+          'get_match_requests_for_attendance',
+          params: {
+            'p_user_id': userId,
+            'p_request_ids': gamesWithAttendanceIds,
+          },
+        );
+        allGamesRaw = allGamesResult is List ? allGamesResult : <dynamic>[];
+      }
+      
+      // Also add games created by user's teams from RPC results (even without attendance records)
+      // These games are already in the correct format from get_all_matches_for_user RPC
+      final gamesCreatedByTeamsIds = allGameIds
+          .where((id) => !gameIdsWithAttendance.contains(id))
+          .toList();
+      
+      if (gamesCreatedByTeamsIds.isNotEmpty && gamesCreatedByUserTeams.isNotEmpty) {
+        // Add games from RPC results that match the IDs we need
+        for (final game in gamesCreatedByUserTeams) {
+          final gameId = game['id'] as String?;
+          if (gameId != null && gamesCreatedByTeamsIds.contains(gameId)) {
+            // Convert to same format as RPC function returns
+            allGamesRaw.add({
+              'id': game['id'],
+              'sport': game['sport'],
+              'mode': game['mode'],
+              'zip_code': game['zip_code'],
+              'team_id': game['team_id'],
+              'matched_team_id': game['matched_team_id'],
+              'start_time_1': game['start_time_1'],
+              'start_time_2': game['start_time_2'],
+              'venue': game['venue'],
+              'status': game['status'],
+              'expected_players_per_team': game['expected_players_per_team'],
+              'created_by': game['created_by'],
+              'creator_id': game['creator_id'],
+              'show_team_a_roster': game['show_team_a_roster'],
+              'show_team_b_roster': game['show_team_b_roster'],
+            });
+          }
+        }
+        if (kDebugMode) {
+          print('[DEBUG] Added ${gamesCreatedByUserTeams.length} games created by user\'s teams from RPC results (no attendance records)');
+        }
+      }
       
       // Filter to only team_vs_team games awaiting opponent confirmation
       // Exclude cancelled games explicitly
@@ -1557,67 +2397,65 @@ class HomeRepository {
         return [];
       }
       
-      // Need to fetch additional fields (details, created_by, creator_id, visibility, is_public)
-      // that aren't in the RPC function return
-      // Since user has attendance records, RLS should allow access via the policy in migration 024
+      // RPC function already returns: details, created_by, creator_id
+      // We only need to fetch: visibility, is_public (if not already in RPC result)
+      // Try to get these from invites table or use defaults
       final gameIdsForAdditionalFields = allGames.map<String>((g) => g['id'] as String).toList();
       
       Map<String, Map<String, dynamic>> additionalByGameId = {};
+      
+      // Try to get visibility and is_public from invites table (safer than direct table query)
       try {
-        final additionalFields = await supa
-            .from('instant_match_requests')
-            .select('id, details, created_by, creator_id, visibility, is_public')
-            .inFilter('id', gameIdsForAdditionalFields);
+        // For invite-specific games, visibility is 'invited' and is_public is false
+        // For public games, visibility is 'public' and is_public is true
+        // We can infer this from whether there are specific team invites or not
+        // Use RPC function or direct query with explicit column selection to avoid RLS issues
+        final inviteRows = await supa
+            .from('instant_request_invites')
+            .select('request_id')
+            .inFilter('request_id', gameIdsForAdditionalFields.isEmpty ? ['00000000-0000-0000-0000-000000000000'] : gameIdsForAdditionalFields);
         
-        if (additionalFields is List) {
-          for (final f in additionalFields) {
-            final id = f['id'] as String?;
-            if (id != null) {
-              additionalByGameId[id] = {
-                'details': f['details'],
-                'created_by': f['created_by'],
-                'creator_id': f['creator_id'],
-                'visibility': f['visibility'],
-                'is_public': f['is_public'],
-              };
-              if (kDebugMode) {
-                print('[DEBUG] Fetched additional fields for game $id: created_by=${f['created_by']}, creator_id=${f['creator_id']}');
-              }
+        final Set<String> gamesWithInvites = {};
+        if (inviteRows is List) {
+          for (final inv in inviteRows) {
+            final reqId = inv['request_id'] as String?;
+            if (reqId != null) {
+              gamesWithInvites.add(reqId);
             }
           }
+        }
+        
+        // Set defaults based on whether game has invites
+        for (final gameId in gameIdsForAdditionalFields) {
+          if (gamesWithInvites.contains(gameId)) {
+            // Has specific invites = invite-specific game
+            additionalByGameId[gameId] = {
+              'visibility': 'invited',
+              'is_public': false,
+            };
+          } else {
+            // No specific invites = public/open challenge game
+            additionalByGameId[gameId] = {
+              'visibility': 'public',
+              'is_public': true,
+            };
+          }
+        }
+        
+        if (kDebugMode) {
+          print('[DEBUG] Set visibility/is_public for ${additionalByGameId.length} games based on invites');
         }
       } catch (e) {
         if (kDebugMode) {
-          print('[ERROR] Failed to fetch additional fields for games: $e');
-          print('[DEBUG] This might be an RLS issue. Will try to get creator from invites table.');
+          print('[ERROR] Failed to determine visibility from invites: $e');
+          print('[DEBUG] Using defaults: visibility=invited, is_public=false');
         }
-        // Try to get creator_id from invites table as fallback
-        try {
-          final inviteRows = await supa
-              .from('instant_request_invites')
-              .select('request_id, created_by')
-              .inFilter('request_id', gameIdsForAdditionalFields);
-          
-          if (inviteRows is List) {
-            for (final inv in inviteRows) {
-              final reqId = inv['request_id'] as String?;
-              final createdBy = inv['created_by'] as String?;
-              if (reqId != null && createdBy != null) {
-                if (additionalByGameId[reqId] == null) {
-                  additionalByGameId[reqId] = {};
-                }
-                additionalByGameId[reqId]!['created_by'] = createdBy;
-                additionalByGameId[reqId]!['creator_id'] = createdBy;
-                if (kDebugMode) {
-                  print('[DEBUG] Got creator from invites table for game $reqId: $createdBy');
-                }
-              }
-            }
-          }
-        } catch (e2) {
-          if (kDebugMode) {
-            print('[ERROR] Failed to fetch creator from invites table: $e2');
-          }
+        // Default to invite-specific if we can't determine
+        for (final gameId in gameIdsForAdditionalFields) {
+          additionalByGameId[gameId] = {
+            'visibility': 'invited',
+            'is_public': false,
+          };
         }
       }
       
@@ -1637,7 +2475,7 @@ class HomeRepository {
         };
       }).toList();
       
-      final allGamesFinal = enrichedGames;
+      allGamesFinal = enrichedGames;
       
       if (kDebugMode) {
         print('[DEBUG] getAwaitingOpponentConfirmationGames: Found ${allGamesFinal.length} games via RPC');
@@ -1647,38 +2485,47 @@ class HomeRepository {
       final gameIds = allGamesFinal.map<String>((g) => g['id'] as String).toList();
       
       // Get all invites for these games (including all statuses to determine if it's an open challenge)
-      final invites = await supa
-          .from('instant_request_invites')
-          .select('request_id, target_team_id, status')
-          .inFilter('request_id', gameIds);
-      
-      // Group invites by request_id
+      // Wrap in try-catch to handle RLS policy errors
       final Map<String, List<Map<String, dynamic>>> invitesByRequestId = {};
-      if (invites is List) {
-        for (final inv in invites) {
-          final reqId = inv['request_id'] as String?;
-          if (reqId != null) {
-            invitesByRequestId.putIfAbsent(reqId, () => []).add(inv);
-          }
-        }
-        if (kDebugMode) {
-          print('[DEBUG] Fetched ${invites.length} invites for ${gameIds.length} games');
-          print('[DEBUG] Invites by request_id: ${invitesByRequestId.keys.length} games have invites');
-          for (final entry in invitesByRequestId.entries.take(3)) {
-            print('[DEBUG] Game ${entry.key.substring(0, 8)}: ${entry.value.length} invites');
-            for (final inv in entry.value) {
-              print('[DEBUG]   - Team ${inv['target_team_id']}, Status: ${inv['status']}');
+      try {
+        final invites = await supa
+            .from('instant_request_invites')
+            .select('request_id, target_team_id, status')
+            .inFilter('request_id', gameIds.isEmpty ? ['00000000-0000-0000-0000-000000000000'] : gameIds);
+        
+        // Group invites by request_id
+        if (invites is List) {
+          for (final inv in invites) {
+            final reqId = inv['request_id'] as String?;
+            if (reqId != null) {
+              invitesByRequestId.putIfAbsent(reqId, () => []).add(inv);
             }
           }
+          if (kDebugMode) {
+            print('[DEBUG] Fetched ${invites.length} invites for ${gameIds.length} games');
+            print('[DEBUG] Invites by request_id: ${invitesByRequestId.keys.length} games have invites');
+            for (final entry in invitesByRequestId.entries.take(3)) {
+              print('[DEBUG] Game ${entry.key.substring(0, 8)}: ${entry.value.length} invites');
+              for (final inv in entry.value) {
+                print('[DEBUG]   - Team ${inv['target_team_id']}, Status: ${inv['status']}');
+              }
+            }
+          }
+        } else {
+          if (kDebugMode) {
+            print('[DEBUG] No invites found or error fetching invites');
+          }
         }
-      } else {
+      } catch (e) {
         if (kDebugMode) {
-          print('[DEBUG] No invites found or error fetching invites');
+          print('[ERROR] Failed to fetch invites (RLS or column error): $e');
+          print('[DEBUG] Continuing without invite data - will use defaults');
         }
+        // Continue without invite data - we'll use defaults
       }
       
-      // Since user has attendance records for these games, they should see all of them
-      // Only filter out games where all invites have been accepted/denied (game is confirmed or cancelled)
+      // Filter games: Include all games awaiting opponent confirmation
+      // For newly created games, they should appear immediately even if invites query failed
       final filteredGames = <dynamic>[];
       for (final game in allGamesFinal) {
         final reqId = game['id'] as String;
@@ -1691,103 +2538,65 @@ class HomeRepository {
           if (kDebugMode) {
             print('[DEBUG] Filtering out cancelled game from awaiting confirmation: $reqId, status=$status');
           }
-          continue; // Skip cancelled games - they should not appear in "Awaiting Opponent Confirmation"
+          continue; // Skip cancelled games
         }
         
         final gameInvites = invitesByRequestId[reqId] ?? [];
-        
-        // Get the user's team ID for this game from attendance record
         final userTeamIdForThisGame = userTeamIdByGameId[reqId];
+        final creatingTeamId = game['team_id'] as String?;
+        final isUserOnCreatingTeam = creatingTeamId != null && userTeamIdForThisGame == creatingTeamId;
         
-        // Check if the user's team has denied the invite
-        // If so, exclude this game from the list (team members shouldn't see denied games)
-        if (userTeamIdForThisGame != null && gameInvites.isNotEmpty) {
-          // Find the invite for the user's team
-          Map<String, dynamic>? userTeamInvite;
-          for (final inv in gameInvites) {
-            final targetTeamId = inv['target_team_id'] as String?;
-            if (targetTeamId == userTeamIdForThisGame) {
-              userTeamInvite = inv;
-              break;
-            }
+        // If user is on creating team, always include (they created it or are part of creating team)
+        if (isUserOnCreatingTeam) {
+          filteredGames.add(game);
+          if (kDebugMode) {
+            print('[DEBUG] Including game $reqId: User is on creating team');
           }
+          continue;
+        }
+        
+        // If user is on invited team, check if that team denied
+        if (userTeamIdForThisGame != null && gameInvites.isNotEmpty) {
+          final userTeamDenied = gameInvites.any((inv) {
+            final targetTeamId = inv['target_team_id'] as String?;
+            final invStatus = (inv['status'] as String?)?.toLowerCase();
+            return targetTeamId == userTeamIdForThisGame && invStatus == 'denied';
+          });
           
-          if (userTeamInvite != null) {
-            final userTeamInviteStatus = (userTeamInvite['status'] as String?)?.toLowerCase();
+          if (userTeamDenied) {
             if (kDebugMode) {
-              print('[DEBUG] Game $reqId: userTeamId=$userTeamIdForThisGame, inviteStatus=$userTeamInviteStatus');
+              print('[DEBUG] Filtering out game where user team denied: $reqId');
             }
-            if (userTeamInviteStatus == 'denied') {
-              if (kDebugMode) {
-                print('[DEBUG] Filtering out game where user team denied: $reqId, userTeamId=$userTeamIdForThisGame');
-              }
-              continue; // Skip games where the user's team has denied
-            }
-          } else if (kDebugMode) {
-            print('[DEBUG] Game $reqId: No invite found for userTeamId=$userTeamIdForThisGame, allInvites=${gameInvites.map((i) => '${i['target_team_id']}:${i['status']}').join(', ')}');
+            continue; // Skip games where the user's team has denied
           }
         }
         
-        // Check if any invite is still pending
+        // Check if any invite is still pending or it's an open challenge
         final hasPendingInvite = gameInvites.any((inv) => 
           (inv['status'] as String?)?.toLowerCase() == 'pending'
         );
         final isOpenChallenge = gameInvites.isEmpty;
         
-        // Include if:
-        // 1. It's an open challenge (no invites), OR
-        // 2. There are still pending invites (game still awaiting opponent confirmation)
-        // Since user has attendance record, they're part of this game and should see it
-        // BUT exclude if their team has denied (checked above)
-        // Also exclude if user is on an invited team that has denied (already checked above)
+        // Include if open challenge or has pending invites
         if (isOpenChallenge || hasPendingInvite) {
-          // Double-check: if user is on an invited team and that team denied, don't include
-          if (userTeamIdForThisGame != null) {
-            final creatingTeamId = game['team_id'] as String?;
-            final isUserOnCreatingTeam = creatingTeamId != null && userTeamIdForThisGame == creatingTeamId;
-            
-            // Only check denial if user is NOT on the creating team
-            if (!isUserOnCreatingTeam) {
-              final userTeamDenied = gameInvites.any((inv) {
-                final targetTeamId = inv['target_team_id'] as String?;
-                final status = (inv['status'] as String?)?.toLowerCase();
-                return targetTeamId == userTeamIdForThisGame && status == 'denied';
-              });
-              
-              if (userTeamDenied) {
-                if (kDebugMode) {
-                  print('[DEBUG] Final check: Filtering out game where user team denied: $reqId');
-                }
-                continue; // Skip games where the user's team has denied
-              }
-            }
-          }
-          
           filteredGames.add(game);
         }
       }
       
       if (kDebugMode) {
-        print('[DEBUG] getAwaitingOpponentConfirmationGames: Filtered ${filteredGames.length} games from ${allGames.length} total games with attendance');
-        print('[DEBUG] User team IDs: $userTeamIds');
-        if (filteredGames.isNotEmpty) {
-          for (final game in filteredGames.take(3)) {
-            final reqId = game['id'] as String;
-            final invites = invitesByRequestId[reqId] ?? [];
-            print('[DEBUG] Game ${reqId.substring(0, 8)}: team_id=${game['team_id']}, invites=${invites.length}, pending=${invites.where((i) => (i['status'] as String?)?.toLowerCase() == 'pending').length}');
-          }
+        print('[DEBUG] getAwaitingOpponentConfirmationGames: Filtered ${filteredGames.length} games from ${allGamesFinal.length} total games');
+        if (filteredGames.isEmpty && allGamesFinal.isNotEmpty) {
+          print('[WARNING] All games were filtered out - this might indicate an issue');
         }
       }
       
-      if (filteredGames.isEmpty) {
-        if (kDebugMode) {
-          print('[DEBUG] getAwaitingOpponentConfirmationGames: No games match criteria after filtering');
-        }
-        return [];
+      // IMPORTANT: If we have games but filteredGames is empty (due to invite query failure),
+      // include all games anyway - they're newly created and should appear
+      final finalGames = filteredGames.isNotEmpty ? filteredGames : allGamesFinal;
+      
+      if (kDebugMode && filteredGames.isEmpty && allGamesFinal.isNotEmpty) {
+        print('[WARNING] Using allGamesFinal (${allGamesFinal.length} games) because filteredGames is empty - invites query may have failed');
       }
-
-      // Use filteredGames as the final list
-      final finalGames = filteredGames;
 
       // Get team names - include all teams from games, invites, AND user's teams from attendance records
       final allTeamIds = <String>{};
@@ -1795,8 +2604,9 @@ class HomeRepository {
         final teamId = g['team_id'] as String?;
         if (teamId != null) allTeamIds.add(teamId);
       }
-      if (invites is List) {
-        for (final inv in invites) {
+      // Add team IDs from invites (using invitesByRequestId which is available outside try-catch)
+      for (final invitesList in invitesByRequestId.values) {
+        for (final inv in invitesList) {
           final teamId = inv['target_team_id'] as String?;
           if (teamId != null) allTeamIds.add(teamId);
         }
@@ -1810,7 +2620,6 @@ class HomeRepository {
         print('[DEBUG] Fetching team names for ${allTeamIds.length} teams: $allTeamIds');
       }
 
-      final teamNames = <String, String>{};
       if (allTeamIds.isNotEmpty) {
         final teamRows = await supa
             .from('teams')
@@ -1865,10 +2674,11 @@ class HomeRepository {
       }
 
       // Build result list - only include games with pending invites or open challenge
-      final result = <Map<String, dynamic>>[];
+      // NEW LOGIC: Determine team assignments based on admin roles and team memberships
       for (final game in finalGames) {
-        final reqId = game['id'] as String;
-        final gameInvites = invitesByRequestId[reqId] ?? [];
+        try {
+          final reqId = game['id'] as String;
+          final gameInvites = invitesByRequestId[reqId] ?? [];
         
         // Check if any invite is still pending
         final hasPendingInvite = gameInvites.any((inv) => 
@@ -1887,79 +2697,70 @@ class HomeRepository {
           // Get the user's team ID for this game from attendance record
           final userTeamIdForThisGame = userTeamIdByGameId[reqId];
           
-          // Determine which team the user belongs to
-          final isUserOnCreatingTeam = creatingTeamId != null && userTeamIdForThisGame == creatingTeamId;
-          
-          // Get opponent team names (for specific invites) or mark as "Open Challenge"
-          // Include ALL invites (not just pending) to determine opponent teams
-          // This ensures we show the correct opponent names even if some invites are accepted/denied
-          final allInvitesForOpponentNames = gameInvites.toList();
-          final pendingInvites = gameInvites.where((inv) => 
-            (inv['status'] as String?)?.toLowerCase() == 'pending'
-          ).toList();
-          
-          // Build opponent team names from ALL invites (to show all invited teams)
-          // First, ensure all invited team names are fetched
-          final opponentTeamIds = allInvitesForOpponentNames
+          // Get ALL invited team IDs from invites
+          final allInvitedTeamIds = gameInvites
               .map((inv) => inv['target_team_id'] as String?)
-              .where((tid) => tid != null)
-              .cast<String>()
+              .whereType<String>()
               .toSet();
           
-          // Fetch any missing team names before building opponentTeamNames
-          final missingTeamIds = opponentTeamIds.where((tid) => 
-            !teamNames.containsKey(tid) || teamNames[tid] == null || teamNames[tid]!.isEmpty
-          ).toList();
-          
-          if (missingTeamIds.isNotEmpty) {
+          // Check if user is admin of any invited team
+          String? userAdminTeamId;
+          if (allInvitedTeamIds.isNotEmpty) {
             try {
-              final missingTeamRows = await supa
-                  .from('teams')
-                  .select('id, name')
-                  .inFilter('id', missingTeamIds);
-              if (missingTeamRows is List) {
-                for (final t in missingTeamRows) {
-                  final id = t['id'] as String?;
-                  if (id != null) {
-                    teamNames[id] = (t['name'] as String?) ?? '';
-                  }
-                }
+              final adminCheck = await supa
+                  .from('team_members')
+                  .select('team_id')
+                  .eq('user_id', userId)
+                  .inFilter('team_id', allInvitedTeamIds.toList())
+                  .inFilter('role', ['admin', 'captain']);
+              
+              if (adminCheck is List && adminCheck.isNotEmpty) {
+                // User is admin of at least one invited team - use the first one
+                userAdminTeamId = adminCheck.first['team_id'] as String?;
                 if (kDebugMode) {
-                  print('[DEBUG] Fetched ${missingTeamRows.length} missing team names for opponent teams: $missingTeamIds');
+                  print('[DEBUG] User $userId is admin of invited team: $userAdminTeamId');
                 }
               }
             } catch (e) {
               if (kDebugMode) {
-                print('[ERROR] Failed to fetch missing team names: $e');
+                print('[ERROR] Failed to check admin status: $e');
               }
             }
           }
           
-          final opponentTeamNames = allInvitesForOpponentNames
-              .map((inv) => teamNames[inv['target_team_id'] as String?] ?? 'Unknown Team')
-              .where((name) => name.isNotEmpty && name != 'Unknown Team')
-              .toList();
-          
-          if (kDebugMode) {
-            print('[DEBUG] Game $reqId: opponentTeamIds=$opponentTeamIds, opponentTeamNames=$opponentTeamNames, allInvitesForOpponentNames.length=${allInvitesForOpponentNames.length}');
+          // Check if user is member of creating team
+          bool isUserMemberOfCreatingTeam = false;
+          if (creatingTeamId != null) {
+            try {
+              final memberCheck = await supa
+                  .from('team_members')
+                  .select('user_id')
+                  .eq('team_id', creatingTeamId)
+                  .eq('user_id', userId)
+                  .maybeSingle();
+              isUserMemberOfCreatingTeam = memberCheck != null;
+            } catch (e) {
+              if (kDebugMode) {
+                print('[ERROR] Failed to check creating team membership: $e');
+              }
+            }
           }
           
-          // Determine user's team name and which team ID to use
+          // Determine user's team assignment based on new rules:
+          // 1. If user is admin of an invited team → show that admin team as "Your Team"
+          // 2. If user is member of creating team (and NOT admin of any invited team) → show creating team as "Your Team"
+          // 3. If user is member of invited team (and not admin, and not member of creating team) → show their invited team as "Your Team"
+          // 4. If user is member of both creating team and invited team (and not admin of invited team) → show creating team as "Your Team"
+          
           String myTeamName;
           List<String> otherTeamNames;
           String? myTeamId;
           
-          if (isUserOnCreatingTeam) {
-            // User is on the creating team
-            myTeamName = creatingTeamName;
-            myTeamId = creatingTeamId;
-            otherTeamNames = opponentTeamNames;
-          } else if (userTeamIdForThisGame != null) {
-            // User is on an invited team - use the team ID from attendance record
-            myTeamId = userTeamIdForThisGame;
+          if (userAdminTeamId != null) {
+            // Rule 1: User is admin of an invited team → show that team as "Your Team", created team as "Opponent"
+            myTeamId = userAdminTeamId;
             myTeamName = teamNames[myTeamId] ?? '';
             if (myTeamName.isEmpty) {
-              // If team name not found, try to fetch it
               try {
                 final teamRow = await supa
                     .from('teams')
@@ -1968,69 +2769,106 @@ class HomeRepository {
                     .maybeSingle();
                 if (teamRow != null) {
                   myTeamName = (teamRow['name'] as String?) ?? 'My Team';
-                  teamNames[myTeamId] = myTeamName; // Cache it
+                  teamNames[myTeamId] = myTeamName;
                 } else {
                   myTeamName = 'My Team';
                 }
               } catch (e) {
-                if (kDebugMode) {
-                  print('[ERROR] Failed to fetch team name for $myTeamId: $e');
-                }
                 myTeamName = 'My Team';
               }
             }
-            // User is on an invited team - show creating team and other invited teams as opponents
+            // Opponent is the creating team
             otherTeamNames = [creatingTeamName];
-            // Add other invited teams (from ALL invites, not just pending)
-            for (final inv in allInvitesForOpponentNames) {
-              final tid = inv['target_team_id'] as String?;
-              if (tid != null && tid != userTeamIdForThisGame && tid != creatingTeamId) {
-                final name = teamNames[tid];
-                if (kDebugMode) {
-                  print('[DEBUG] Invited team member view: checking invite team $tid, name=$name, userTeamId=$userTeamIdForThisGame, creatingTeamId=$creatingTeamId');
+            if (kDebugMode) {
+              print('[DEBUG] User is admin of invited team $myTeamId: showing as "Your Team", created team as opponent');
+            }
+          } else if (isUserMemberOfCreatingTeam) {
+            // Rule 2 & 4: User is member of creating team (and not admin of any invited team)
+            // Show creating team as "Your Team", all invited teams as "Opponent"
+            myTeamId = creatingTeamId;
+            myTeamName = creatingTeamName;
+            
+            // Build opponent team names from ALL invites
+            final opponentTeamIds = allInvitedTeamIds.toList();
+            final missingTeamIds = opponentTeamIds.where((tid) => 
+              !teamNames.containsKey(tid) || teamNames[tid] == null || teamNames[tid]!.isEmpty
+            ).toList();
+            
+            if (missingTeamIds.isNotEmpty) {
+              try {
+                final missingTeamRows = await supa
+                    .from('teams')
+                    .select('id, name')
+                    .inFilter('id', missingTeamIds);
+                if (missingTeamRows is List) {
+                  for (final t in missingTeamRows) {
+                    final id = t['id'] as String?;
+                    if (id != null) {
+                      teamNames[id] = (t['name'] as String?) ?? '';
+                    }
+                  }
                 }
-                if (name != null && name.isNotEmpty && !otherTeamNames.contains(name)) {
-                  otherTeamNames.add(name);
-                  if (kDebugMode) {
-                    print('[DEBUG] Added opponent team: $name');
-                  }
-                } else if (name == null || name.isEmpty) {
-                  // Try to fetch team name if not in cache
-                  try {
-                    final teamRow = await supa
-                        .from('teams')
-                        .select('name')
-                        .eq('id', tid)
-                        .maybeSingle();
-                    if (teamRow != null) {
-                      final fetchedName = (teamRow['name'] as String?) ?? '';
-                      if (fetchedName.isNotEmpty) {
-                        teamNames[tid] = fetchedName; // Cache it
-                        if (!otherTeamNames.contains(fetchedName)) {
-                          otherTeamNames.add(fetchedName);
-                          if (kDebugMode) {
-                            print('[DEBUG] Fetched and added opponent team: $fetchedName');
-                          }
-                        }
-                      }
-                    }
-                  } catch (e) {
-                    if (kDebugMode) {
-                      print('[ERROR] Failed to fetch team name for $tid: $e');
-                    }
-                  }
+              } catch (e) {
+                if (kDebugMode) {
+                  print('[ERROR] Failed to fetch missing team names: $e');
                 }
               }
             }
             
+            otherTeamNames = opponentTeamIds
+                .map((tid) => teamNames[tid] ?? 'Unknown Team')
+                .where((name) => name.isNotEmpty && name != 'Unknown Team')
+                .toList();
+            
             if (kDebugMode) {
-              print('[DEBUG] Final otherTeamNames for invited team member: $otherTeamNames');
+              print('[DEBUG] User is member of creating team: showing as "Your Team", invited teams as opponents: $otherTeamNames');
+            }
+          } else if (userTeamIdForThisGame != null && allInvitedTeamIds.contains(userTeamIdForThisGame)) {
+            // Rule 3: User is member of invited team (and not admin, and not member of creating team)
+            // Show their invited team as "Your Team", created team as "Opponent"
+            myTeamId = userTeamIdForThisGame;
+            myTeamName = teamNames[myTeamId] ?? '';
+            if (myTeamName.isEmpty) {
+              try {
+                final teamRow = await supa
+                    .from('teams')
+                    .select('name')
+                    .eq('id', myTeamId)
+                    .maybeSingle();
+                if (teamRow != null) {
+                  myTeamName = (teamRow['name'] as String?) ?? 'My Team';
+                  teamNames[myTeamId] = myTeamName;
+                } else {
+                  myTeamName = 'My Team';
+                }
+              } catch (e) {
+                myTeamName = 'My Team';
+              }
+            }
+            // Opponent is the creating team
+            otherTeamNames = [creatingTeamName];
+            if (kDebugMode) {
+              print('[DEBUG] User is member of invited team (not admin, not member of creating team): showing as "Your Team", created team as opponent');
             }
           } else {
-            // Fallback (shouldn't happen if attendance records are correct)
-            myTeamName = creatingTeamName;
-            myTeamId = creatingTeamId;
-            otherTeamNames = opponentTeamNames;
+            // Fallback: Use existing logic
+            final isUserOnCreatingTeam = creatingTeamId != null && userTeamIdForThisGame == creatingTeamId;
+            if (isUserOnCreatingTeam) {
+              myTeamName = creatingTeamName;
+              myTeamId = creatingTeamId;
+              otherTeamNames = allInvitedTeamIds
+                  .map((tid) => teamNames[tid] ?? 'Unknown Team')
+                  .where((name) => name.isNotEmpty && name != 'Unknown Team')
+                  .toList();
+            } else if (userTeamIdForThisGame != null) {
+              myTeamId = userTeamIdForThisGame;
+              myTeamName = teamNames[myTeamId] ?? 'My Team';
+              otherTeamNames = [creatingTeamName];
+            } else {
+              myTeamName = creatingTeamName;
+              myTeamId = creatingTeamId;
+              otherTeamNames = [];
+            }
           }
 
           final startTime1 = game['start_time_1'] as String?;
@@ -2057,9 +2895,9 @@ class HomeRepository {
           
           if (kDebugMode) {
             print('[DEBUG] Game $reqId: gameInvites.length=${gameInvites.length}, isOpenChallenge=$isOpenChallengeGame');
-            print('[DEBUG] Game $reqId: isUserOnCreatingTeam=$isUserOnCreatingTeam, creatingTeamId=$creatingTeamId, userTeamIdForThisGame=$userTeamIdForThisGame');
-            print('[DEBUG] Game $reqId: opponentTeamNames=$opponentTeamNames, otherTeamNames=$otherTeamNames');
-            print('[DEBUG] Game $reqId: allInvitesForOpponentNames=${allInvitesForOpponentNames.map((i) => '${i['target_team_id']}').join(', ')}');
+            print('[DEBUG] Game $reqId: creatingTeamId=$creatingTeamId, userTeamIdForThisGame=$userTeamIdForThisGame');
+            print('[DEBUG] Game $reqId: myTeamName=$myTeamName, myTeamId=$myTeamId, otherTeamNames=$otherTeamNames');
+            print('[DEBUG] Game $reqId: allInvitedTeamIds=${allInvitedTeamIds.toList()}');
           }
           
           // Fetch creator name if not already fetched
@@ -2088,6 +2926,7 @@ class HomeRepository {
             'team_id': creatingTeamId,
             'my_team_id': myTeamId,
             'team_name': myTeamName, // This should be the user's team name from attendance record
+            'creating_team_name': creatingTeamName, // The team that created the game
             'opponent_teams': otherTeamNames,
             // Only set is_open_challenge to true if there are NO opponent teams
             // If there are opponent teams, it's NOT an open challenge (even if gameInvites was empty)
@@ -2107,13 +2946,110 @@ class HomeRepository {
             print('[DEBUG] Added game $reqId: myTeamName=$myTeamName, creatorName=$creatorName');
             print('[DEBUG] Added game $reqId: isOpenChallenge=$isOpenChallengeGame, otherTeamNames=$otherTeamNames, final is_open_challenge=${isOpenChallengeGame && otherTeamNames.isEmpty}');
           }
+        } // End of if (hasPendingInvite || isOpenChallenge)
+        } catch (e) {
+          // If processing one game fails, log and continue with next game
+          if (kDebugMode) {
+            print('[ERROR] Failed to process game ${game['id']}: $e');
+          }
+          // Continue to next game
         }
       }
 
       return result;
-    } catch (e) {
+    } catch (e, stackTrace) {
       if (kDebugMode) {
         print('[ERROR] getAwaitingOpponentConfirmationGames: $e');
+        print('[ERROR] Stack trace: $stackTrace');
+      }
+      // If we have partial results, return them instead of empty list
+      if (result.isNotEmpty) {
+        if (kDebugMode) {
+          print('[WARNING] Returning ${result.length} partial results despite error');
+        }
+        return result;
+      }
+      // If we have games but no results built yet, try to build basic results
+      // This handles the case where error happens before result building loop
+      try {
+        if (allGamesFinal.isNotEmpty) {
+          if (kDebugMode) {
+            print('[WARNING] Error occurred but we have ${allGamesFinal.length} games - building basic results');
+          }
+          
+          // Fetch team names if not already fetched
+          final teamIdsToFetch = <String>{};
+          for (final game in allGamesFinal) {
+            final creatingTeamId = game['team_id'] as String?;
+            final userTeamIdForThisGame = userTeamIdByGameId[game['id'] as String] ?? creatingTeamId;
+            if (creatingTeamId != null) teamIdsToFetch.add(creatingTeamId);
+            if (userTeamIdForThisGame != null) teamIdsToFetch.add(userTeamIdForThisGame);
+          }
+          
+          // Fetch missing team names
+          final missingTeamIds = teamIdsToFetch.where((tid) => !teamNames.containsKey(tid) || teamNames[tid]?.isEmpty == true).toList();
+          if (missingTeamIds.isNotEmpty) {
+            try {
+              final teamRows = await supa
+                  .from('teams')
+                  .select('id, name')
+                  .inFilter('id', missingTeamIds);
+              if (teamRows is List) {
+                for (final t in teamRows) {
+                  final id = t['id'] as String?;
+                  if (id != null) {
+                    teamNames[id] = (t['name'] as String?) ?? '';
+                  }
+                }
+              }
+            } catch (e2) {
+              if (kDebugMode) {
+                print('[ERROR] Failed to fetch team names in catch block: $e2');
+              }
+            }
+          }
+          
+          // Build basic results without invite data
+          for (final game in allGamesFinal) {
+            final reqId = game['id'] as String;
+            final creatingTeamId = game['team_id'] as String?;
+            final userTeamIdForThisGame = userTeamIdByGameId[reqId] ?? creatingTeamId;
+            final creatingTeamName = teamNames[creatingTeamId] ?? 'Unknown Team';
+            final myTeamName = teamNames[userTeamIdForThisGame] ?? 'My Team';
+            
+            // Determine if it's an open challenge (no invites = open challenge)
+            // Since invites query failed, assume it's an open challenge for newly created games
+            final isOpenChallenge = true; // Default to open challenge if we can't determine
+            
+            result.add({
+              'request_id': reqId,
+              'sport': game['sport'],
+              'team_id': creatingTeamId,
+              'my_team_id': userTeamIdForThisGame,
+              'team_name': myTeamName,
+              'creating_team_name': creatingTeamName,
+              'opponent_teams': [],
+              'is_open_challenge': isOpenChallenge,
+              'start_time': null,
+              'end_time': null,
+              'venue': game['venue'],
+              'details': game['details'],
+              'creator_id': game['created_by'] ?? game['creator_id'],
+              'creator_name': 'Unknown',
+              'status': game['status'],
+              'visibility': game['visibility'] ?? 'invited',
+              'is_public': game['is_public'] ?? false,
+            });
+          }
+          if (kDebugMode) {
+            print('[WARNING] Built ${result.length} basic results from ${allGamesFinal.length} games');
+          }
+          return result;
+        }
+      } catch (e2) {
+        if (kDebugMode) {
+          print('[ERROR] Failed to build basic results: $e2');
+        }
       }
       return [];
     }

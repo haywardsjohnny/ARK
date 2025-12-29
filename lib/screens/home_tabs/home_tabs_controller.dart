@@ -248,7 +248,7 @@ class HomeTabsController extends ChangeNotifier {
 
     loadingAllMatches = true;
     lastError = null;
-    notifyListeners();
+    // Don't notify listeners here - wait until data is loaded to prevent rebuild loops
 
     try {
       await loadHiddenGames();
@@ -293,7 +293,7 @@ class HomeTabsController extends ChangeNotifier {
 
     loadingIndividualMatches = true;
     lastError = null;
-    notifyListeners();
+    // Don't notify listeners here - wait until data is loaded to prevent rebuild loops
 
     try {
       final supa = Supabase.instance.client;
@@ -344,7 +344,7 @@ class HomeTabsController extends ChangeNotifier {
       if (allRequestIds.isEmpty) {
         allMyIndividualMatches = [];
         loadingIndividualMatches = false;
-        notifyListeners();
+        notifyListeners(); // Notify that loading is complete (even with empty result)
         return;
       }
 
@@ -573,11 +573,67 @@ class HomeTabsController extends ChangeNotifier {
         awaitingOpponentConfirmationGames.removeWhere((m) => m['request_id'] == requestId);
         notifyListeners();
       }
+      
+      // Note: Denying an invite keeps the game active (still visible in Discover)
+      // This is handled in the denyInvite repository function
     } catch (e) {
       lastError = 'denyInvite failed: $e';
       notifyListeners();
       rethrow;
     }
+  }
+
+  /// Request to join an open challenge team game
+  Future<void> requestToJoinOpenChallengeTeamGame({
+    required String requestId,
+    required String sport,
+    String? joiningTeamId, // Optional: if provided, use this team; otherwise find first matching team
+  }) async {
+    final uid = currentUserId;
+    if (uid == null) return;
+
+    try {
+      String? teamId = joiningTeamId;
+      
+      // If team ID not provided, find first admin team for this sport (backward compatibility)
+      if (teamId == null) {
+        final matchingTeam = adminTeams.firstWhere(
+          (t) => (t['sport'] as String? ?? '').toLowerCase() == sport.toLowerCase(),
+          orElse: () => <String, dynamic>{},
+        );
+
+        if (matchingTeam.isEmpty) {
+          throw Exception('You must be an admin of a $sport team to join this game');
+        }
+
+        teamId = matchingTeam['id'] as String?;
+        if (teamId == null) {
+          throw Exception('Team ID not found');
+        }
+      }
+
+      await repo.requestToJoinOpenChallengeTeamGame(
+        requestId: requestId,
+        joiningTeamId: teamId,
+        userId: uid,
+      );
+
+      // Reload pending games for admin to show the new request
+      await loadPendingGamesForAdmin();
+      // Reload discovery matches to update the UI
+      await loadDiscoveryPickupMatches();
+    } catch (e) {
+      lastError = 'requestToJoinOpenChallengeTeamGame failed: $e';
+      notifyListeners();
+      rethrow;
+    }
+  }
+  
+  /// Get admin teams for a specific sport
+  List<Map<String, dynamic>> getAdminTeamsForSport(String sport) {
+    return adminTeams.where((t) => 
+      (t['sport'] as String? ?? '').toLowerCase() == sport.toLowerCase()
+    ).toList();
   }
 
   /// ✅ NEW: Cancel for both teams (soft cancel) - organizer only
@@ -722,17 +778,89 @@ class HomeTabsController extends ChangeNotifier {
         }
       }
       
+      // Get user's team IDs to filter out games created by user's teams
+      final userTeamIds = <String>[];
+      for (final team in adminTeams) {
+        final teamId = team['id'] as String?;
+        if (teamId != null) userTeamIds.add(teamId);
+      }
+      // Also get non-admin teams user is member of
+      final nonAdminTeams = await repo.getNonAdminTeams(uid);
+      for (final team in nonAdminTeams) {
+        final teamId = team['id'] as String?;
+        if (teamId != null && !userTeamIds.contains(teamId)) {
+          userTeamIds.add(teamId);
+        }
+      }
+      
       // Load ALL public matches (individual AND team matches)
       // Team matches can only be accepted by admins of teams in the same sport
-      // Note: We exclude user's own matches from discovery, but they should see them in "My Games"
-      final matches = await supa
+      // Note: We exclude user's own matches AND games created by user's teams from discovery
+      var matchesQuery = supa
           .from('instant_match_requests')
           .select(
-            'id, sport, zip_code, mode, start_time_1, start_time_2, venue, status, created_by, num_players, created_at, visibility, is_public, friends_group_id, proficiency_level')
+            'id, sport, zip_code, mode, start_time_1, start_time_2, venue, status, created_by, num_players, created_at, visibility, is_public, friends_group_id, proficiency_level, team_id')
           .neq('status', 'cancelled')
-          .neq('created_by', uid) // Don't show own matches in discovery
+          .neq('created_by', uid); // Don't show own matches in discovery
+      
+      // Filter out games created by user's teams (for team games)
+      if (userTeamIds.isNotEmpty) {
+        matchesQuery = matchesQuery.not('team_id', 'in', userTeamIds);
+      }
+      
+      // Also filter out games that have been matched (matched_team_id is set)
+      // These games are already confirmed and should not appear in Discover
+      final matches = await matchesQuery
+          .isFilter('matched_team_id', null) // Only show games that haven't been matched yet
           .order('created_at', ascending: false)
           .limit(100);
+      
+      // Get all invite statuses for user's teams to show request status
+      // Changed to support multiple teams per game: request_id -> List<{status, target_team_id, team_name}>
+      final userTeamInvites = <String, List<Map<String, dynamic>>>{}; // request_id -> [{status, target_team_id, team_name}, ...]
+      if (userTeamIds.isNotEmpty) {
+        try {
+          final inviteRows = await supa
+              .from('instant_request_invites')
+              .select('request_id, target_team_id, status')
+              .inFilter('target_team_id', userTeamIds);
+          
+          // Get team names for all teams
+          final teamNameMap = <String, String>{};
+          final teamRows = await supa
+              .from('teams')
+              .select('id, name')
+              .inFilter('id', userTeamIds);
+          if (teamRows is List) {
+            for (final team in teamRows) {
+              final teamId = team['id'] as String?;
+              final teamName = team['name'] as String?;
+              if (teamId != null && teamName != null) {
+                teamNameMap[teamId] = teamName;
+              }
+            }
+          }
+          
+          if (inviteRows is List) {
+            for (final inv in inviteRows) {
+              final reqId = inv['request_id'] as String?;
+              final teamId = inv['target_team_id'] as String?;
+              final status = inv['status'] as String?;
+              if (reqId != null && teamId != null && status != null) {
+                userTeamInvites.putIfAbsent(reqId, () => []).add({
+                  'status': status,
+                  'target_team_id': teamId,
+                  'team_name': teamNameMap[teamId] ?? 'Unknown Team',
+                });
+              }
+            }
+          }
+        } catch (e) {
+          if (kDebugMode) {
+            print('[DEBUG] Error fetching user team invites: $e');
+          }
+        }
+      }
       
       if (matches is List) {
         final List<Map<String, dynamic>> result = [];
@@ -860,6 +988,66 @@ class HomeTabsController extends ChangeNotifier {
           // If distance couldn't be calculated, include it (might be nearby)
           // User can filter it out using the distance filter if needed
           
+          // For team games, get team name and check if it's an open challenge
+          String? teamName;
+          bool isOpenChallenge = false;
+          if (mode == 'team_vs_team') {
+            final teamId = m['team_id'] as String?;
+            if (teamId != null) {
+              try {
+                final teamRow = await supa
+                    .from('teams')
+                    .select('name')
+                    .eq('id', teamId)
+                    .maybeSingle();
+                if (teamRow != null) {
+                  teamName = teamRow['name'] as String?;
+                }
+              } catch (e) {
+                if (kDebugMode) {
+                  print('[DEBUG] Error fetching team name: $e');
+                }
+              }
+              
+              // Check if it's an open challenge (no accepted invites exist)
+              // If a team has already joined (accepted invite), don't show in Discover
+              if (matchId != null) {
+                try {
+                  final invites = await supa
+                      .from('instant_request_invites')
+                      .select('id, status')
+                      .eq('request_id', matchId);
+                  
+                  // Check if any invite has been accepted
+                  bool hasAcceptedInvite = false;
+                  if (invites is List) {
+                    hasAcceptedInvite = invites.any((inv) => 
+                      (inv['status'] as String?)?.toLowerCase() == 'accepted'
+                    );
+                  }
+                  
+                  // If there's an accepted invite, this is no longer an open challenge
+                  // Don't show it in Discover
+                  if (hasAcceptedInvite) {
+                    if (kDebugMode) {
+                      print('[DEBUG] Game $matchId has accepted invite - filtering out from Discover');
+                    }
+                    continue; // Skip this game - it's been joined
+                  }
+                  
+                  isOpenChallenge = (invites is List && invites.isEmpty);
+                } catch (e) {
+                  if (kDebugMode) {
+                    print('[DEBUG] Error checking invites: $e');
+                  }
+                }
+              }
+            }
+          }
+          
+          // Get invite statuses for user's teams (if any) - now supports multiple teams
+          final inviteStatuses = userTeamInvites[matchId] ?? [];
+          
           result.add({
             'request_id': m['id'] as String,
             'sport': m['sport'],
@@ -873,6 +1061,12 @@ class HomeTabsController extends ChangeNotifier {
             'can_accept': canAccept, // Flag indicating if user can accept this game
             'proficiency_level': m['proficiency_level'], // For readiness filtering
             'distance_miles': distanceMiles, // Distance in miles from user ZIP to game ZIP
+            'team_name': teamName, // Team name for team games
+            'is_open_challenge': isOpenChallenge, // Whether it's an open challenge
+            'user_team_invite_statuses': inviteStatuses, // List of {status, target_team_id, team_name} for all user's teams
+            // For backward compatibility, also include single status (first one if exists)
+            'user_team_invite_status': inviteStatuses.isNotEmpty ? inviteStatuses.first['status'] as String? : null,
+            'user_team_invite_team_id': inviteStatuses.isNotEmpty ? inviteStatuses.first['target_team_id'] as String? : null,
           });
         }
 
@@ -1287,6 +1481,8 @@ class HomeTabsController extends ChangeNotifier {
       await loadAdminTeamsAndInvites();
       await loadAwaitingOpponentConfirmationGames();
       await loadAllMyMatches(); // Refresh confirmed games
+      await loadMyPendingAvailabilityMatches(); // Refresh pending availability for confirmed games
+      await loadDiscoveryPickupMatches(); // Remove game from Discover (it's now matched)
       notifyListeners();
     } catch (e) {
       final errorMsg = e.toString();
@@ -1323,6 +1519,7 @@ class HomeTabsController extends ChangeNotifier {
       );
       // Refresh lists after successful deny
       await loadPendingGamesForAdmin();
+      await loadDiscoveryPickupMatches(); // Reload discovery so denied teams see the status
       notifyListeners();
     } catch (e) {
       lastError = 'denyPendingAdminMatch failed: $e';

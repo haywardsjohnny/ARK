@@ -180,6 +180,7 @@ GRANT EXECUTE ON FUNCTION accept_pending_admin_match(UUID, UUID, UUID) TO authen
 -- ============================================
 -- This function returns match requests for which the user has attendance records
 -- It bypasses RLS to ensure users can see requests they're involved in
+DROP FUNCTION IF EXISTS get_match_requests_for_attendance(UUID, UUID[]);
 CREATE OR REPLACE FUNCTION get_match_requests_for_attendance(
     p_user_id UUID,
     p_request_ids UUID[]
@@ -212,6 +213,7 @@ BEGIN
     END IF;
 
     -- Return match requests (bypasses RLS due to SECURITY DEFINER)
+    -- Note: expected_players_per_team is added in migration 015
     RETURN QUERY
     SELECT 
         imr.id,
@@ -223,8 +225,7 @@ BEGIN
         imr.start_time_1,
         imr.start_time_2,
         imr.venue,
-        imr.status,
-        imr.expected_players_per_team
+        imr.status
     FROM instant_match_requests imr
     WHERE imr.id = ANY(p_request_ids)
       AND imr.mode = 'team_vs_team';
@@ -239,6 +240,9 @@ GRANT EXECUTE ON FUNCTION get_match_requests_for_attendance(UUID, UUID[]) TO aut
 -- ============================================
 -- This function returns confirmed team matches where the user has responded (accepted or declined)
 -- It bypasses RLS to ensure all users can see their confirmed matches
+-- Drop all overloaded versions to avoid PostgREST ambiguity
+DROP FUNCTION IF EXISTS get_confirmed_matches_for_user(UUID, INTEGER, INTEGER);
+DROP FUNCTION IF EXISTS get_confirmed_matches_for_user(UUID);
 CREATE OR REPLACE FUNCTION get_confirmed_matches_for_user(
     p_user_id UUID
 )
@@ -264,6 +268,7 @@ AS $$
 BEGIN
     -- Return confirmed match requests where user has responded (accepted or declined)
     -- This bypasses RLS due to SECURITY DEFINER
+    -- Note: expected_players_per_team is added in migration 015
     RETURN QUERY
     SELECT 
         imr.id,
@@ -279,8 +284,7 @@ BEGIN
         imr.created_by,
         imr.creator_id,
         tma.status AS user_attendance_status,
-        tma.team_id AS user_team_id,
-        imr.expected_players_per_team
+        tma.team_id AS user_team_id
     FROM instant_match_requests imr
     INNER JOIN team_match_attendance tma ON tma.request_id = imr.id
     WHERE tma.user_id = p_user_id
@@ -299,6 +303,7 @@ GRANT EXECUTE ON FUNCTION get_confirmed_matches_for_user(UUID) TO authenticated;
 -- ============================================
 -- This function returns all team matches where the user has responded (accepted or declined)
 -- including cancelled matches. It bypasses RLS to ensure all users can see their matches
+DROP FUNCTION IF EXISTS get_all_matches_for_user(UUID);
 CREATE OR REPLACE FUNCTION get_all_matches_for_user(
     p_user_id UUID
 )
@@ -316,8 +321,7 @@ RETURNS TABLE (
     created_by UUID,
     creator_id UUID,
     user_attendance_status TEXT,
-    user_team_id UUID,
-    expected_players_per_team INTEGER
+    user_team_id UUID
 )
 LANGUAGE plpgsql
 SECURITY DEFINER
@@ -325,6 +329,7 @@ AS $$
 BEGIN
     -- Return all match requests where user has responded (accepted or declined)
     -- This includes cancelled matches. This bypasses RLS due to SECURITY DEFINER
+    -- Note: expected_players_per_team is added in migration 015
     RETURN QUERY
     SELECT 
         imr.id,
@@ -340,8 +345,7 @@ BEGIN
         imr.created_by,
         imr.creator_id,
         tma.status AS user_attendance_status,
-        tma.team_id AS user_team_id,
-        imr.expected_players_per_team
+        tma.team_id AS user_team_id
     FROM instant_match_requests imr
     INNER JOIN team_match_attendance tma ON tma.request_id = imr.id
     WHERE tma.user_id = p_user_id
@@ -349,7 +353,6 @@ BEGIN
       AND imr.mode = 'team_vs_team'
       AND imr.matched_team_id IS NOT NULL;
     -- Note: We include cancelled matches here (no status filter)
-    -- Note: expected_players_per_team is now in sport_expected_players lookup table
 END;
 $$;
 

@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
@@ -83,22 +84,99 @@ class _TeamProfileScreenState extends State<TeamProfileScreen> {
         };
       }).toList();
 
-      // 3) Load user details for all member user_ids
+      // 3) Load user details for all member user_ids using RPC function for better display names
       final userIds = membersList.map((m) => m['user_id'] as String).toList();
       Map<String, Map<String, dynamic>> userById = {};
 
       if (userIds.isNotEmpty) {
-        final usersRows = await supa
-            .from('users')
-            .select('id, full_name, photo_url, base_zip_code')
-            .inFilter('id', userIds);
+        bool rpcSuccess = false;
+        try {
+          // Try using the RPC function first for better display names (includes email fallback)
+          final displayNamesResult = await supa.rpc(
+            'get_user_display_names',
+            params: {'p_user_ids': userIds},
+          );
+          
+          if (displayNamesResult is List && displayNamesResult.isNotEmpty) {
+            rpcSuccess = true;
+            if (kDebugMode) {
+              print('[DEBUG] RPC returned ${displayNamesResult.length} user display names for ${userIds.length} requested users');
+            }
+            for (final u in displayNamesResult) {
+              final uid = u['user_id'] as String?;
+              final displayName = u['display_name'] as String?;
+              if (uid != null && displayName != null) {
+                userById[uid] = {
+                  'full_name': displayName, // Use display_name from RPC (includes email fallback)
+                  'photo_url': u['photo_url'] as String?,
+                  'base_zip_code': null, // RPC doesn't return this, fetch separately if needed
+                };
+                if (kDebugMode) {
+                  print('[DEBUG] User $uid: display_name = $displayName');
+                }
+              }
+            }
+          } else {
+            if (kDebugMode) {
+              print('[DEBUG] RPC returned empty or invalid result: $displayNamesResult');
+            }
+          }
+        } catch (e) {
+          // Log error for debugging
+          if (kDebugMode) {
+            print('[DEBUG] Failed to fetch user display names via RPC: $e');
+            print('[DEBUG] RPC error details: ${e.toString()}');
+          }
+          // Fallback to regular query if RPC fails (will only return current user due to RLS)
+        }
+        
+        // Fetch photo_url and base_zip_code for users we got from RPC
+        // Only fetch for users we already have in userById
+        final fetchedUserIds = userById.keys.toList();
+        if (fetchedUserIds.isNotEmpty) {
+          try {
+            final usersRows = await supa
+                .from('users')
+                .select('id, full_name, photo_url, base_zip_code')
+                .inFilter('id', fetchedUserIds);
 
-        for (final u in usersRows as List) {
-          userById[u['id'] as String] = {
-            'full_name': u['full_name'],
-            'photo_url': u['photo_url'],
-            'base_zip_code': u['base_zip_code'],
-          };
+            for (final u in usersRows as List) {
+              final uid = u['id'] as String;
+              if (userById.containsKey(uid)) {
+                // Update with photo_url and base_zip_code
+                userById[uid]!['photo_url'] = u['photo_url'];
+                userById[uid]!['base_zip_code'] = u['base_zip_code'];
+              }
+            }
+          } catch (e) {
+            if (kDebugMode) {
+              print('[DEBUG] Failed to fetch photo_url/base_zip_code: $e');
+            }
+          }
+        }
+        
+        // For users not fetched by RPC, try direct query (will only work for current user due to RLS)
+        final missingUserIds = userIds.where((id) => !userById.containsKey(id)).toList();
+        if (missingUserIds.isNotEmpty) {
+          try {
+            final usersRows = await supa
+                .from('users')
+                .select('id, full_name, photo_url, base_zip_code')
+                .inFilter('id', missingUserIds);
+
+            for (final u in usersRows as List) {
+              final uid = u['id'] as String;
+              userById[uid] = {
+                'full_name': u['full_name'],
+                'photo_url': u['photo_url'],
+                'base_zip_code': u['base_zip_code'],
+              };
+            }
+          } catch (e) {
+            if (kDebugMode) {
+              print('[DEBUG] Failed to fetch missing users: $e');
+            }
+          }
         }
       }
 
@@ -107,10 +185,16 @@ class _TeamProfileScreenState extends State<TeamProfileScreen> {
       for (final m in membersList) {
         final uid = m['user_id'] as String;
         final userInfo = userById[uid] ?? {};
+        // Use display_name from RPC if available, otherwise use full_name, otherwise fallback
+        String displayName = userInfo['full_name'] as String? ?? '';
+        if (displayName.trim().isEmpty) {
+          // Use a shorter, more readable user identifier as last resort
+          displayName = 'User ${uid.substring(0, 8)}';
+        }
         combinedMembers.add({
           'user_id': uid,
           'role': m['role'],
-          'full_name': userInfo['full_name'] ?? 'Unknown',
+          'full_name': displayName,
           'photo_url': userInfo['photo_url'],
           'base_zip_code': userInfo['base_zip_code'],
         });

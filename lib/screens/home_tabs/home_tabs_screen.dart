@@ -3136,6 +3136,11 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
     final venue = req['venue'] as String?;
     final teamId = req['team_id'] as String?;
     
+    // Get inviting team name (the team that created the invite)
+    final invitingTeamName = invite['request_team_name'] as String? ?? 'Team';
+    // Get user's team name (the team that received the invite)
+    final yourTeamName = invite['target_team_name'] as String?;
+    
     DateTime? startDt;
     DateTime? endDt;
     if (startTime1 != null) {
@@ -3149,14 +3154,10 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
       } catch (_) {}
     }
 
-    String? teamName;
-    if (teamId != null) {
-      final team = _controller.adminTeams.firstWhere(
-        (t) => t['id'] == teamId,
-        orElse: () => <String, dynamic>{},
-      );
-      teamName = team['name'] as String?;
-    }
+    // Build the title message: "<Inviting Team Name> <Sport> team is inviting for a match with your <your team>. Please confirm."
+    final titleMessage = yourTeamName != null && yourTeamName.isNotEmpty
+        ? '$invitingTeamName ${_displaySport(sport)} team is inviting for a match with your $yourTeamName. Please confirm.'
+        : '$invitingTeamName ${_displaySport(sport)} team is inviting for a match. Please confirm.';
 
     return Card(
       margin: const EdgeInsets.only(bottom: 12),
@@ -3174,20 +3175,12 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       Text(
-                        '${_displaySport(sport)} - Team Invite',
+                        titleMessage,
                         style: const TextStyle(
                           fontSize: 16,
                           fontWeight: FontWeight.bold,
                         ),
                       ),
-                      if (teamName != null)
-                        Text(
-                          'Your team: $teamName',
-                          style: TextStyle(
-                            fontSize: 14,
-                            color: Colors.grey.shade700,
-                          ),
-                        ),
                     ],
                   ),
                 ),
@@ -3288,14 +3281,31 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
   Widget _buildPendingAdminMatchCard(Map<String, dynamic> match) {
     final req = match['request'] as Map<String, dynamic>?;
     final team = match['team'] as Map<String, dynamic>?;
+    final respondingTeam = match['responding_team'] as Map<String, dynamic>?;
+    final adminTeam = match['admin_team'] as Map<String, dynamic>?;
     if (req == null || team == null) return const SizedBox.shrink();
 
     final sport = req['sport'] as String? ?? '';
     final sportEmoji = _getSportEmoji(sport);
-    final teamName = team['name'] as String? ?? 'Unknown Team';
+    final invitingTeamName = team['name'] as String? ?? 'Unknown Team';
+    final respondingTeamName = respondingTeam?['name'] as String?;
+    final yourTeamName = adminTeam?['name'] as String?; // User's team that received the invite
+    final visibility = req['visibility'] as String?;
+    final isPublic = req['is_public'] as bool? ?? false;
     final startTime1 = req['start_time_1'] as String?;
     final startTime2 = req['start_time_2'] as String?;
     final venue = req['venue'] as String?;
+    
+    // Debug logging
+    if (kDebugMode) {
+      print('[DEBUG] _buildPendingAdminMatchCard:');
+      print('  - visibility: $visibility');
+      print('  - is_public: $isPublic');
+      print('  - respondingTeam: $respondingTeam');
+      print('  - respondingTeamName: $respondingTeamName');
+      print('  - invitingTeamName: $invitingTeamName');
+      print('  - yourTeamName: $yourTeamName');
+    }
     
     DateTime? startDt;
     DateTime? endDt;
@@ -3308,6 +3318,21 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
       try {
         endDt = DateTime.parse(startTime2).toLocal();
       } catch (_) {}
+    }
+
+    // Build the message: Use new format for all games
+    final String titleMessage;
+    final bool isPublicGame = (visibility?.toLowerCase() == 'public') || isPublic;
+    
+    if (isPublicGame && respondingTeamName != null && respondingTeamName.isNotEmpty) {
+      // Public game: "<Team X> has responded to <Team A> <Sport> Team match request. Please confirm :"
+      titleMessage = '$respondingTeamName has responded to $invitingTeamName ${_displaySport(sport)} Team match request. Please confirm :';
+    } else if (!isPublicGame && yourTeamName != null && yourTeamName.isNotEmpty) {
+      // Invite-specific game: "<Inviting Team Name> <Sport> team is inviting for a match with your <your team>. Please confirm."
+      titleMessage = '$invitingTeamName ${_displaySport(sport)} team is inviting for a match with your $yourTeamName. Please confirm.';
+    } else {
+      // Fallback: Use old format if we don't have the necessary information
+      titleMessage = 'Team Match - Admin Approval';
     }
 
     return Card(
@@ -3326,20 +3351,23 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      const Text(
-                        'Team Match - Admin Approval',
+                      Text(
+                        titleMessage,
                         style: TextStyle(
-                          fontSize: 16,
+                          fontSize: (respondingTeamName != null || (yourTeamName != null && !((visibility?.toLowerCase() == 'public') || (req['is_public'] as bool? ?? false)))) ? 15 : 16,
                           fontWeight: FontWeight.bold,
                         ),
                       ),
-                      Text(
-                        'Requesting team: $teamName',
-                        style: TextStyle(
-                          fontSize: 14,
-                          color: Colors.grey.shade700,
+                      // Only show "Requesting team" if we're using the old format (fallback)
+                      if (titleMessage == 'Team Match - Admin Approval') ...[
+                        Text(
+                          'Requesting team: $invitingTeamName',
+                          style: TextStyle(
+                            fontSize: 14,
+                            color: Colors.grey.shade700,
+                          ),
                         ),
-                      ),
+                      ],
                     ],
                   ),
                 ),
@@ -3418,10 +3446,25 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
                     final teamId = matchingTeam['id'] as String?;
                     if (requestId == null || teamId == null) return;
                     
+                    // Check if this is a public game
+                    final visibility = req['visibility'] as String?;
+                    final isPublic = req['is_public'] as bool? ?? false;
+                    final isPublicGame = (visibility?.toLowerCase() == 'public') || isPublic;
+                    
+                    // For public games, we need to deny the responding team's invite
+                    // The responding_team_id is the team that clicked "Join" (Team X, Team Y, etc.)
+                    final respondingTeamId = match['responding_team_id'] as String?;
+                    final respondingTeam = match['responding_team'] as Map<String, dynamic>?;
+                    
+                    // For public games, use responding team ID; for non-public, use creating team ID
+                    final targetTeamIdForDeny = (isPublicGame && respondingTeamId != null) 
+                        ? respondingTeamId 
+                        : teamId;
+                    
                     try {
                       await _controller.denyPendingAdminMatch(
                         requestId: requestId,
-                        myAdminTeamId: teamId,
+                        myAdminTeamId: targetTeamIdForDeny,
                       );
                       if (mounted) {
                         ScaffoldMessenger.of(context).showSnackBar(
@@ -3654,6 +3697,11 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
 
     final isOnTeamA = myTeamId == game['team_a_id'];
     final myTeamName = isOnTeamA ? teamAName : (teamBName ?? 'Opponent Team');
+    final opponentTeamName = isOnTeamA ? (teamBName ?? 'Opponent Team') : teamAName;
+    final isOpenChallenge = game['is_open_challenge'] as bool? ?? false;
+    
+    // For confirmed specific team invites (not open challenge), show custom message
+    final isSpecificTeamInvite = isConfirmed && !isOpenChallenge && teamBName != null && teamBName.isNotEmpty;
 
     return Card(
       margin: const EdgeInsets.only(bottom: 12),
@@ -3672,22 +3720,34 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      Text(
-                        '${_displaySport(sport)} • Team Match',
-                        style: const TextStyle(
-                          fontSize: 16,
-                          fontWeight: FontWeight.bold,
+                      // For confirmed specific team invites, show custom message
+                      if (isSpecificTeamInvite)
+                        Text(
+                          'You have a match with "$opponentTeamName". Please confirm your availability:',
+                          style: const TextStyle(
+                            fontSize: 16,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        )
+                      else
+                        Text(
+                          '${_displaySport(sport)} • Team Match',
+                          style: const TextStyle(
+                            fontSize: 16,
+                            fontWeight: FontWeight.bold,
+                          ),
                         ),
-                      ),
-                      Text(
-                        isConfirmed
-                            ? 'You are in: $myTeamName'
-                            : 'You are in: $myTeamName • Waiting for opponent',
-                        style: TextStyle(
-                          fontSize: 14,
-                          color: Colors.grey.shade700,
+                      // Only show "You are in" subtitle for non-specific team invites or non-confirmed games
+                      if (!isSpecificTeamInvite)
+                        Text(
+                          isConfirmed
+                              ? 'You are in: $myTeamName'
+                              : 'You are in: $myTeamName • Waiting for opponent',
+                          style: TextStyle(
+                            fontSize: 14,
+                            color: Colors.grey.shade700,
+                          ),
                         ),
-                      ),
                     ],
                   ),
                 ),
@@ -4381,20 +4441,21 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
   Widget _buildMyGamesTab() {
     // Load all matches when tab is opened (if not already loaded or loading)
     // Use a one-time flag to prevent infinite loops
+    // IMPORTANT: This check must happen BEFORE any rebuilds to prevent infinite loops
     if (!_controller.myGamesTabLoadInitiated) {
-      if (_controller.allMyMatches.isEmpty && !_controller.loadingAllMatches) {
-        _controller.myGamesTabLoadInitiated = true;
-        WidgetsBinding.instance.addPostFrameCallback((_) {
-          _controller.loadAllMyMatches();
-        });
-      }
+      _controller.myGamesTabLoadInitiated = true; // Set flag immediately to prevent multiple calls
       
-      // Also load individual games
-      if (_controller.allMyIndividualMatches.isEmpty && !_controller.loadingIndividualMatches) {
-        WidgetsBinding.instance.addPostFrameCallback((_) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        // Load team matches if needed
+        if (_controller.allMyMatches.isEmpty && !_controller.loadingAllMatches) {
+          _controller.loadAllMyMatches();
+        }
+        
+        // Load individual games if needed
+        if (_controller.allMyIndividualMatches.isEmpty && !_controller.loadingIndividualMatches) {
           _controller.loadAllMyIndividualMatches();
-        });
-      }
+        }
+      });
     }
 
     return Scaffold(
@@ -4603,7 +4664,7 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
               Icon(Icons.hourglass_empty, color: Colors.orange.shade700, size: 20),
               const SizedBox(width: 8),
               Text(
-                'Awaiting Opponent Confirmation',
+                'Games Awaiting confirmation',
                 style: TextStyle(
                   fontSize: 18,
                   fontWeight: FontWeight.bold,
@@ -4623,6 +4684,7 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
     final sport = game['sport'] as String? ?? '';
     final sportEmoji = _getSportEmoji(sport);
     final teamName = game['team_name'] as String? ?? 'My Team';
+    final creatingTeamName = game['creating_team_name'] as String? ?? 'Team';
     final opponentTeams = game['opponent_teams'] as List<dynamic>? ?? [];
     final isOpenChallenge = game['is_open_challenge'] as bool? ?? false;
     final startDt = game['start_time'] as DateTime?;
@@ -4633,6 +4695,29 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
     final creatingTeamId = game['team_id'] as String?; // The team that created the game
     final myTeamId = game['my_team_id'] as String?; // The user's team in this game
     final isUserOnCreatingTeam = creatingTeamId != null && myTeamId == creatingTeamId;
+
+    // Build the message based on whether user is on creating team or invited team
+    String gameTitleMessage;
+    
+    if (isUserOnCreatingTeam) {
+      // For Team A (creating team): "<Invite Team name> is checking with <Opponent Team name 1>, <Opponent Team name 2> teams for a match"
+      if (isOpenChallenge && opponentTeams.isEmpty) {
+        // Open challenge - no specific teams
+        gameTitleMessage = '$creatingTeamName is checking for a match';
+      } else if (opponentTeams.isNotEmpty) {
+        // Specific team invites
+        final opponentNamesList = opponentTeams.map((t) => t.toString()).toList();
+        final teamsList = opponentNamesList.join(', ');
+        gameTitleMessage = '$creatingTeamName is checking with $teamsList teams for a match';
+      } else {
+        // Fallback
+        gameTitleMessage = '$creatingTeamName is checking for a match';
+      }
+    } else {
+      // For Team B/C (invited teams): "<Invite Team name> <Sport> Team is Inviting you <your Team name> team for a match"
+      final sportDisplay = _displaySport(sport);
+      gameTitleMessage = '$creatingTeamName $sportDisplay Team is Inviting you $teamName team for a match';
+    }
 
     return Card(
       margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
@@ -4652,7 +4737,7 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       Text(
-                        '${_displaySport(sport)} • Team Match',
+                        gameTitleMessage,
                         style: const TextStyle(
                           fontSize: 16,
                           fontWeight: FontWeight.bold,

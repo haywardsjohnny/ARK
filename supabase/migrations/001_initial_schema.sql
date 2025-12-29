@@ -174,15 +174,19 @@ BEGIN
 END;
 $$ language 'plpgsql';
 
+DROP TRIGGER IF EXISTS update_users_updated_at ON users;
 CREATE TRIGGER update_users_updated_at BEFORE UPDATE ON users
     FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
 
+DROP TRIGGER IF EXISTS update_teams_updated_at ON teams;
 CREATE TRIGGER update_teams_updated_at BEFORE UPDATE ON teams
     FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
 
+DROP TRIGGER IF EXISTS update_invites_updated_at ON instant_request_invites;
 CREATE TRIGGER update_invites_updated_at BEFORE UPDATE ON instant_request_invites
     FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
 
+DROP TRIGGER IF EXISTS update_attendance_updated_at ON team_match_attendance;
 CREATE TRIGGER update_attendance_updated_at BEFORE UPDATE ON team_match_attendance
     FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
 

@@ -4,6 +4,9 @@
 -- Drop existing insert policy if it exists (we'll recreate it with additional conditions)
 DROP POLICY IF EXISTS "Organizers can insert attendance records" ON individual_game_attendance;
 
+-- Drop the new policy if it already exists (for idempotency)
+DROP POLICY IF EXISTS "Organizers and users can insert attendance records" ON individual_game_attendance;
+
 -- Create policy that allows:
 -- 1. Organizers to insert attendance records for their games
 -- 2. Users to insert their own attendance records (for requesting to join public games)
