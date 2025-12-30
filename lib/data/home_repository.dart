@@ -1148,12 +1148,12 @@ class HomeRepository {
             .from('users')
             .select('id, full_name')
             .inFilter('id', allUserIds.toList());
-        
-        if (users is List) {
-          for (final u in users) {
-            final id = u['id'] as String?;
-            if (id != null) {
-              userNameById[id] = (u['full_name'] as String?) ?? 'Player';
+
+    if (users is List) {
+      for (final u in users) {
+        final id = u['id'] as String?;
+        if (id != null) {
+          userNameById[id] = (u['full_name'] as String?) ?? 'Player';
             }
           }
         }
@@ -1966,12 +1966,12 @@ class HomeRepository {
             .from('users')
             .select('id, full_name')
             .inFilter('id', allUserIds.toList());
-        
-        if (users is List) {
-          for (final u in users) {
-            final id = u['id'] as String?;
-            if (id != null) {
-              userNameById[id] = (u['full_name'] as String?) ?? 'Player';
+
+    if (users is List) {
+      for (final u in users) {
+        final id = u['id'] as String?;
+        if (id != null) {
+          userNameById[id] = (u['full_name'] as String?) ?? 'Player';
             }
           }
         }

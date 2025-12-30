@@ -3,7 +3,6 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 import '../services/location_service.dart';
 import '../widgets/global_search_sheet.dart';
 
-import 'profile_setup_screen.dart';
 import 'team_profile_screen.dart';
 import 'teams_screen.dart';
 
@@ -23,8 +22,6 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
   Map<String, dynamic>? _userRow;
   List<String> _sports = [];
   int _teamsCount = 0;
-  int _notificationRadius = 25; // Default 25 miles
-  List<String> _notificationSports = []; // Empty = all sports
   List<Map<String, dynamic>> _teams = [];
   List<Map<String, dynamic>> _friends = [];
   List<Map<String, dynamic>> _incomingRequests = [];
@@ -38,6 +35,15 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
   // 'none' | 'accepted' | 'outgoing' | 'incoming'
   String _friendRelationship = 'none';
   String? _friendRequestIdForProfile; // request row id when pending
+
+  // Edit mode state
+  bool _isEditing = false;
+  final TextEditingController _nameEditController = TextEditingController();
+  final TextEditingController _bioEditController = TextEditingController();
+  String? _editHomeCity;
+  String? _editHomeState;
+  String? _editHomeZipCode;
+  bool _savingProfile = false;
 
   // simple list of sports to choose from when creating a team or editing interests
   final List<String> _allSportsOptions = [
@@ -56,6 +62,13 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
   void initState() {
     super.initState();
     _initAndLoad();
+  }
+
+  @override
+  void dispose() {
+    _nameEditController.dispose();
+    _bioEditController.dispose();
+    super.dispose();
   }
 
   Future<void> _initAndLoad() async {
@@ -91,10 +104,10 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
     final userId = _effectiveUserId!;
 
     try {
-      // 1) Load main user row (including notification preferences)
+      // 1) Load main user row (including bio and home location)
       final userRow = await supa
           .from('users')
-          .select('id, full_name, base_zip_code, photo_url, notification_radius_miles, notification_sports')
+          .select('id, full_name, photo_url, bio, home_city, home_state, home_zip_code')
           .eq('id', userId)
           .maybeSingle();
 
@@ -353,11 +366,6 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
         _userRow = userRow != null ? Map<String, dynamic>.from(userRow) : null;
         _sports = sports;
         _teamsCount = teamsCount;
-        
-        // Load notification preferences
-        _notificationRadius = (userRow?['notification_radius_miles'] as int?) ?? 25;
-        final sportsArray = userRow?['notification_sports'] as List<dynamic>?;
-        _notificationSports = sportsArray?.map((s) => s.toString()).toList() ?? [];
         _teams = teams;
         _friends = friends;
         _incomingRequests = incomingRequests;
@@ -365,6 +373,15 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
         _friendRequestIdForProfile = relReqId;
         _friendsGroups = groups;
         _loading = false;
+        
+        // Update edit controllers if not in edit mode
+        if (!_isEditing && _userRow != null) {
+          _nameEditController.text = _userRow!['full_name'] as String? ?? '';
+          _bioEditController.text = _userRow!['bio'] as String? ?? '';
+          _editHomeCity = _userRow!['home_city'] as String?;
+          _editHomeState = _userRow!['home_state'] as String?;
+          _editHomeZipCode = _userRow!['home_zip_code'] as String?;
+        }
       });
     } catch (e) {
       setState(() => _loading = false);
@@ -372,6 +389,84 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text('Failed to load profile: $e')),
       );
+    }
+  }
+
+  void _startEditing() {
+    if (_userRow == null) return;
+    setState(() {
+      _isEditing = true;
+      _nameEditController.text = _userRow!['full_name'] as String? ?? '';
+      _bioEditController.text = _userRow!['bio'] as String? ?? '';
+      _editHomeCity = _userRow!['home_city'] as String?;
+      _editHomeState = _userRow!['home_state'] as String?;
+      _editHomeZipCode = _userRow!['home_zip_code'] as String?;
+    });
+  }
+
+  void _cancelEditing() {
+    setState(() {
+      _isEditing = false;
+      _nameEditController.text = _userRow?['full_name'] as String? ?? '';
+      _bioEditController.text = _userRow?['bio'] as String? ?? '';
+      _editHomeCity = _userRow?['home_city'] as String?;
+      _editHomeState = _userRow?['home_state'] as String?;
+      _editHomeZipCode = _userRow?['home_zip_code'] as String?;
+    });
+  }
+
+  Future<void> _saveProfile() async {
+    if (_effectiveUserId == null) return;
+
+    setState(() => _savingProfile = true);
+
+    final supa = Supabase.instance.client;
+    try {
+      await supa.from('users').update({
+        'full_name': _nameEditController.text.trim(),
+        'bio': _bioEditController.text.trim(),
+        'home_city': _editHomeCity,
+        'home_state': _editHomeState,
+        'home_zip_code': _editHomeZipCode,
+        'updated_at': DateTime.now().toIso8601String(),
+      }).eq('id', _effectiveUserId!);
+
+      setState(() {
+        _isEditing = false;
+        _savingProfile = false;
+      });
+
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Profile updated successfully!')),
+      );
+
+      await _loadProfile();
+    } catch (e) {
+      setState(() => _savingProfile = false);
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Failed to save profile: $e')),
+      );
+    }
+  }
+
+  Future<void> _showHomeLocationPicker() async {
+    final result = await showDialog<Map<String, String>>(
+      context: context,
+      builder: (context) => _HomeLocationPickerDialog(
+        currentCity: _editHomeCity,
+        currentState: _editHomeState,
+        currentZip: _editHomeZipCode,
+      ),
+    );
+
+    if (result != null) {
+      setState(() {
+        _editHomeCity = result['city'];
+        _editHomeState = result['state'];
+        _editHomeZipCode = result['zip'];
+      });
     }
   }
 
@@ -2382,17 +2477,9 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
           ),
           if (_isSelf)
             IconButton(
-              tooltip: 'Edit profile',
-              icon: const Icon(Icons.edit),
-              onPressed: () async {
-                await Navigator.of(context).push(
-                  MaterialPageRoute(
-                    builder: (_) => const ProfileSetupScreen(),
-                  ),
-                );
-                if (!mounted) return;
-                await _loadProfile();
-              },
+              tooltip: _isEditing ? 'Cancel editing' : 'Edit profile',
+              icon: Icon(_isEditing ? Icons.close : Icons.edit),
+              onPressed: _isEditing ? _cancelEditing : _startEditing,
             ),
           if (_isSelf)
             IconButton(
@@ -2473,37 +2560,88 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
                                           crossAxisAlignment:
                                               CrossAxisAlignment.start,
                                           children: [
-                                            Text(
-                                              (_userRow!['full_name']
-                                                          as String?) ??
-                                                  'No Name',
-                                              style: const TextStyle(
-                                                fontSize: 20,
-                                                fontWeight:
-                                                    FontWeight.bold,
-                                              ),
-                                            ),
-                                            const SizedBox(height: 4),
-                                            if (_isSelf &&
-                                                authUser?.email != null)
-                                              Text(
-                                                authUser!.email!,
+                                            if (_isEditing)
+                                              TextField(
+                                                controller: _nameEditController,
                                                 style: const TextStyle(
-                                                  fontSize: 13,
-                                                  color: Colors.grey,
+                                                  fontSize: 20,
+                                                  fontWeight: FontWeight.bold,
+                                                ),
+                                                decoration: const InputDecoration(
+                                                  border: OutlineInputBorder(),
+                                                  contentPadding: EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                                                ),
+                                              )
+                                            else
+                                              Text(
+                                                (_userRow!['full_name']
+                                                            as String?) ??
+                                                    'No Name',
+                                                style: const TextStyle(
+                                                  fontSize: 20,
+                                                  fontWeight:
+                                                      FontWeight.bold,
                                                 ),
                                               ),
                                             const SizedBox(height: 4),
-                                            Text(
-                                              () {
-                                                // Location is now device-based, not ZIP-based
-                                                return 'Location: Device-based';
-                                              }(),
-                                              style: const TextStyle(
-                                                fontSize: 14,
-                                                color: Colors.black87,
+                                            if (_isEditing)
+                                              InkWell(
+                                                onTap: _showHomeLocationPicker,
+                                                child: Container(
+                                                  padding: const EdgeInsets.all(12),
+                                                  decoration: BoxDecoration(
+                                                    border: Border.all(color: Colors.grey.shade400),
+                                                    borderRadius: BorderRadius.circular(4),
+                                                  ),
+                                                  child: Row(
+                                                    children: [
+                                                      const Icon(Icons.location_on, size: 16, color: Colors.grey),
+                                                      const SizedBox(width: 8),
+                                                      Expanded(
+                                                        child: Text(
+                                                          () {
+                                                            if (_editHomeCity != null && _editHomeState != null && _editHomeCity!.isNotEmpty && _editHomeState!.isNotEmpty) {
+                                                              if (_editHomeZipCode != null && _editHomeZipCode!.isNotEmpty) {
+                                                                return '$_editHomeCity, $_editHomeState $_editHomeZipCode';
+                                                              }
+                                                              return '$_editHomeCity, $_editHomeState';
+                                                            } else if (_editHomeZipCode != null && _editHomeZipCode!.isNotEmpty) {
+                                                              return _editHomeZipCode!;
+                                                            }
+                                                            return 'Tap to set home location';
+                                                          }(),
+                                                          style: TextStyle(
+                                                            color: (_editHomeCity != null && _editHomeState != null) ? Colors.black87 : Colors.grey,
+                                                          ),
+                                                        ),
+                                                      ),
+                                                      const Icon(Icons.chevron_right, size: 16, color: Colors.grey),
+                                                    ],
+                                                  ),
+                                                ),
+                                              )
+                                            else
+                                              Text(
+                                                () {
+                                                  final homeCity = _userRow!['home_city'] as String?;
+                                                  final homeState = _userRow!['home_state'] as String?;
+                                                  final homeZip = _userRow!['home_zip_code'] as String?;
+                                                  
+                                                  if (homeCity != null && homeState != null && homeCity.isNotEmpty && homeState.isNotEmpty) {
+                                                    if (homeZip != null && homeZip.isNotEmpty) {
+                                                      return '$homeCity, $homeState $homeZip';
+                                                    }
+                                                    return '$homeCity, $homeState';
+                                                  } else if (homeZip != null && homeZip.isNotEmpty) {
+                                                    return homeZip;
+                                                  }
+                                                  return 'Location: Not set';
+                                                }(),
+                                                style: const TextStyle(
+                                                  fontSize: 14,
+                                                  color: Colors.black87,
+                                                ),
                                               ),
-                                            ),
                                             const SizedBox(height: 8),
                                             Row(
                                               children: <Widget>[
@@ -2530,6 +2668,29 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
                                       ),
                                     ],
                                   ),
+                                  if (_isSelf && _isEditing) ...[
+                                    const SizedBox(height: 12),
+                                    Row(
+                                      mainAxisAlignment: MainAxisAlignment.end,
+                                      children: [
+                                        TextButton(
+                                          onPressed: _savingProfile ? null : _cancelEditing,
+                                          child: const Text('Cancel'),
+                                        ),
+                                        const SizedBox(width: 8),
+                                        ElevatedButton(
+                                          onPressed: _savingProfile ? null : _saveProfile,
+                                          child: _savingProfile
+                                              ? const SizedBox(
+                                                  width: 16,
+                                                  height: 16,
+                                                  child: CircularProgressIndicator(strokeWidth: 2),
+                                                )
+                                              : const Text('Save'),
+                                        ),
+                                      ],
+                                    ),
+                                  ],
                                   if (!_isSelf) ...[
                                     const SizedBox(height: 12),
                                     _buildFriendHeaderAction(),
@@ -2541,9 +2702,9 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
 
                           const SizedBox(height: 16),
 
-                          // Notification Preferences Section (only for self)
+                          // Bio Section (only for self)
                           if (_isSelf) ...[
-                            _buildNotificationPreferencesSection(),
+                            _buildBioSection(),
                             const SizedBox(height: 24),
                           ],
 
@@ -3122,8 +3283,11 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
                 ),
     );
   }
-
-  Widget _buildNotificationPreferencesSection() {
+  
+  Widget _buildBioSection() {
+    final bio = _userRow?['bio'] as String?;
+    final bioText = bio != null && bio.isNotEmpty ? bio : 'No bio added yet.';
+    
     return Card(
       shape: RoundedRectangleBorder(
         borderRadius: BorderRadius.circular(16),
@@ -3136,10 +3300,10 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
           children: [
             Row(
               children: [
-                const Icon(Icons.notifications_active, color: Colors.orange),
+                const Icon(Icons.person, color: Colors.blue),
                 const SizedBox(width: 8),
                 const Text(
-                  'Notification Preferences',
+                  'Bio',
                   style: TextStyle(
                     fontSize: 18,
                     fontWeight: FontWeight.bold,
@@ -3148,134 +3312,215 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
               ],
             ),
             const SizedBox(height: 16),
-            
-            // Notification Radius
-            Text(
-              'Notification Radius: $_notificationRadius miles',
-              style: const TextStyle(
-                fontSize: 14,
-                fontWeight: FontWeight.w500,
-              ),
-            ),
-            const SizedBox(height: 8),
-            Slider(
-              value: _notificationRadius.toDouble(),
-              min: 5,
-              max: 100,
-              divisions: 19,
-              label: '$_notificationRadius miles',
-              onChanged: (value) {
-                setState(() {
-                  _notificationRadius = value.round();
-                });
-              },
-            ),
-            const SizedBox(height: 16),
-            
-            // Sports Selection
-            const Text(
-              'Notify me about games in:',
-              style: TextStyle(
-                fontSize: 14,
-                fontWeight: FontWeight.w500,
-              ),
-            ),
-            const SizedBox(height: 8),
-            Wrap(
-              spacing: 8,
-              runSpacing: 8,
-              children: [
-                // "All Sports" option
-                FilterChip(
-                  label: const Text('All Sports'),
-                  selected: _notificationSports.isEmpty,
-                  onSelected: (selected) {
-                    setState(() {
-                      if (selected) {
-                        _notificationSports = [];
-                      } else {
-                        // If deselecting "All Sports", select all individual sports
-                        _notificationSports = const [
-                          'badminton', 'basketball', 'cricket', 'football',
-                          'pickleball', 'soccer', 'table_tennis', 'tennis', 'volleyball'
-                        ];
-                      }
-                    });
-                  },
+            if (_isEditing)
+              TextField(
+                controller: _bioEditController,
+                decoration: const InputDecoration(
+                  border: OutlineInputBorder(),
+                  hintText: 'Enter your bio...',
                 ),
-                // Individual sports
-                ...const [
-                  'Badminton', 'Basketball', 'Cricket', 'Football',
-                  'Pickleball', 'Soccer', 'Table Tennis', 'Tennis', 'Volleyball'
-                ].map((sport) {
-                  final sportKey = sport.toLowerCase().replaceAll(' ', '_');
-                  return FilterChip(
-                    label: Text(sport),
-                    selected: _notificationSports.isEmpty || _notificationSports.contains(sportKey),
-                    onSelected: (selected) {
-                      setState(() {
-                        if (_notificationSports.isEmpty) {
-                          // If "All Sports" was selected, switch to individual selection
-                          _notificationSports = const [
-                            'badminton', 'basketball', 'cricket', 'football',
-                            'pickleball', 'soccer', 'table_tennis', 'tennis', 'volleyball'
-                          ];
-                        }
-                        if (selected) {
-                          if (!_notificationSports.contains(sportKey)) {
-                            _notificationSports.add(sportKey);
-                          }
-                        } else {
-                          _notificationSports.remove(sportKey);
-                        }
-                        // If all sports selected, switch to "All Sports" mode
-                        if (_notificationSports.length == 9) {
-                          _notificationSports = [];
-                        }
-                      });
-                    },
-                  );
-                }),
-              ],
-            ),
-            const SizedBox(height: 16),
-            
-            // Save button
-            ElevatedButton.icon(
-              onPressed: _saveNotificationPreferences,
-              icon: const Icon(Icons.save),
-              label: const Text('Save Preferences'),
-              style: ElevatedButton.styleFrom(
-                backgroundColor: Colors.orange,
-                foregroundColor: Colors.white,
+                maxLines: 4,
+              )
+            else
+              Text(
+                bioText,
+                style: TextStyle(
+                  fontSize: 14,
+                  color: (bio == null || bio.isEmpty) ? Colors.grey : Colors.black87,
+                  fontStyle: (bio == null || bio.isEmpty) ? FontStyle.italic : FontStyle.normal,
+                ),
               ),
-            ),
           ],
         ),
       ),
     );
   }
+}
 
-  Future<void> _saveNotificationPreferences() async {
-    final supa = Supabase.instance.client;
-    final userId = _effectiveUserId;
-    if (userId == null) return;
+// Simplified location picker dialog for home location selection
+class _HomeLocationPickerDialog extends StatefulWidget {
+  final String? currentCity;
+  final String? currentState;
+  final String? currentZip;
+
+  const _HomeLocationPickerDialog({
+    this.currentCity,
+    this.currentState,
+    this.currentZip,
+  });
+
+  @override
+  State<_HomeLocationPickerDialog> createState() => _HomeLocationPickerDialogState();
+}
+
+class _HomeLocationPickerDialogState extends State<_HomeLocationPickerDialog> {
+  final TextEditingController _searchController = TextEditingController();
+  List<Map<String, String>> _searchResults = [];
+  bool _isSearching = false;
+
+  @override
+  void initState() {
+    super.initState();
+    if (widget.currentCity != null && widget.currentState != null) {
+      _searchController.text = '${widget.currentCity}, ${widget.currentState}';
+    }
+  }
+
+  Future<void> _searchLocations(String query) async {
+    if (query.trim().isEmpty) {
+      setState(() {
+        _searchResults = [];
+      });
+      return;
+    }
+
+    setState(() {
+      _isSearching = true;
+    });
 
     try {
-      await supa.from('users').update({
-        'notification_radius_miles': _notificationRadius,
-        'notification_sports': _notificationSports.isEmpty ? null : _notificationSports,
-      }).eq('id', userId);
-
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Notification preferences saved!')),
-      );
+      final results = await LocationService.searchLocations(query);
+      setState(() {
+        _searchResults = results;
+        _isSearching = false;
+      });
     } catch (e) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Failed to save preferences: $e')),
-      );
+      setState(() {
+        _isSearching = false;
+      });
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Error searching: $e')),
+        );
+      }
     }
+  }
+
+  void _selectLocation(Map<String, String> location) {
+    Navigator.of(context).pop({
+      'city': location['city'] ?? '',
+      'state': location['state'] ?? '',
+      'zip': location['zip'] ?? '',
+      'display': location['display'] ?? '',
+    });
+  }
+
+  @override
+  void dispose() {
+    _searchController.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Dialog(
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+      child: Container(
+        constraints: const BoxConstraints(maxWidth: 500, maxHeight: 600),
+        padding: const EdgeInsets.all(20),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            // Header
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                const Text(
+                  'Set Home Location',
+                  style: TextStyle(
+                    fontSize: 20,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+                IconButton(
+                  icon: const Icon(Icons.close),
+                  onPressed: () => Navigator.of(context).pop(),
+                ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            const Text(
+              'Search for your home city or enter a ZIP code',
+              style: TextStyle(fontSize: 14, color: Colors.grey),
+            ),
+            const SizedBox(height: 16),
+
+            // Search Field
+            TextField(
+              controller: _searchController,
+              decoration: InputDecoration(
+                hintText: 'Enter city name or ZIP code',
+                prefixIcon: const Icon(Icons.search),
+                border: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                contentPadding: const EdgeInsets.symmetric(
+                  horizontal: 12,
+                  vertical: 8,
+                ),
+              ),
+              onChanged: (value) {
+                if (value.length >= 3) {
+                  _searchLocations(value);
+                } else {
+                  setState(() {
+                    _searchResults = [];
+                  });
+                }
+              },
+            ),
+
+            // Search Results
+            if (_searchController.text.length >= 3) ...[
+              const SizedBox(height: 16),
+              const Text(
+                'Search Results:',
+                style: TextStyle(
+                  fontSize: 14,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+              const SizedBox(height: 8),
+              Expanded(
+                child: _isSearching
+                    ? const Center(child: CircularProgressIndicator())
+                    : _searchResults.isEmpty
+                        ? const Center(
+                            child: Text(
+                              'No results found',
+                              style: TextStyle(color: Colors.grey),
+                            ),
+                          )
+                        : ListView.builder(
+                            itemCount: _searchResults.length,
+                            itemBuilder: (context, index) {
+                              final location = _searchResults[index];
+                              return ListTile(
+                                leading: const Icon(Icons.location_on),
+                                title: Text(location['display']!),
+                                subtitle: Text('ZIP: ${location['zip']}'),
+                                onTap: () => _selectLocation(location),
+                              );
+                            },
+                          ),
+              ),
+            ],
+
+            // Action Buttons
+            const SizedBox(height: 16),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.end,
+              children: [
+                TextButton(
+                  onPressed: () => Navigator.of(context).pop(),
+                  child: const Text('Cancel'),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
   }
 }

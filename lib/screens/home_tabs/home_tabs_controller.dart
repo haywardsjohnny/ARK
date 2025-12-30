@@ -30,10 +30,16 @@ class HomeTabsController extends ChangeNotifier {
   List<Map<String, dynamic>> pendingIndividualGames = []; // Individual games with pending requests
   List<Map<String, dynamic>> awaitingOpponentConfirmationGames = []; // Team games awaiting opponent acceptance
   List<Map<String, dynamic>> publicPendingGames = []; // Public games matching notification preferences
+  List<Map<String, dynamic>> profileNotifications = []; // Recent team/friends group additions (notifications)
   bool loadingConfirmedMatches = false;
   bool loadingAllMatches = false;
   bool loadingIndividualMatches = false;
   bool loadingDiscoveryMatches = false;
+  
+  // Caching for discovery matches (30 second TTL)
+  DateTime? _discoveryCacheTime;
+  List<Map<String, dynamic>>? _cachedDiscoveryMatches;
+  static const _discoveryCacheTTL = Duration(seconds: 30);
   bool loadingAwaitingOpponentGames = false;
   bool myGamesTabLoadInitiated = false; // Prevent infinite loops
 
@@ -64,6 +70,7 @@ class HomeTabsController extends ChangeNotifier {
       await loadPendingIndividualGames();
       await loadAwaitingOpponentConfirmationGames();
       await loadPublicPendingGames();
+      await loadProfileNotifications();
       setupRealtimeAttendance();
     } catch (e) {
       lastError = 'Init failed: $e';
@@ -719,9 +726,20 @@ class HomeTabsController extends ChangeNotifier {
   }
   
   /// Load discovery/pickup matches (individual matches open for joining)
-  Future<void> loadDiscoveryPickupMatches() async {
+  /// Uses 30-second cache to improve performance and reduce database load
+  Future<void> loadDiscoveryPickupMatches({bool forceRefresh = false}) async {
     final uid = currentUserId;
     if (uid == null) return;
+
+    // Use cache if available and not expired (unless force refresh)
+    if (!forceRefresh && 
+        _cachedDiscoveryMatches != null && 
+        _discoveryCacheTime != null &&
+        DateTime.now().difference(_discoveryCacheTime!) < _discoveryCacheTTL) {
+      discoveryPickupMatches = _cachedDiscoveryMatches!;
+      // Don't set loading flag when using cache - UI already has data
+      return;
+    }
 
     loadingDiscoveryMatches = true;
     lastError = null;
@@ -796,24 +814,97 @@ class HomeTabsController extends ChangeNotifier {
       // Load ALL public matches (individual AND team matches)
       // Team matches can only be accepted by admins of teams in the same sport
       // Note: We exclude user's own matches AND games created by user's teams from discovery
+      if (kDebugMode) {
+        print('[DEBUG] Discovery query setup: uid=$uid, userTeamIds=${userTeamIds.length} teams');
+      }
+      
+      // Build query for discovery - we need to handle team_id filtering carefully
+      // Individual games have team_id = NULL, and .not('team_id', 'in', list) can exclude NULL values incorrectly
+      // So we'll filter team games in code instead
       var matchesQuery = supa
           .from('instant_match_requests')
           .select(
-            'id, sport, zip_code, mode, start_time_1, start_time_2, venue, status, created_by, num_players, created_at, visibility, is_public, friends_group_id, proficiency_level, team_id')
+            'id, sport, zip_code, mode, start_time_1, start_time_2, venue, status, created_by, num_players, created_at, visibility, is_public, friends_group_id, proficiency_level, team_id, matched_team_id')
           .neq('status', 'cancelled')
           .neq('created_by', uid); // Don't show own matches in discovery
       
-      // Filter out games created by user's teams (for team games)
-      if (userTeamIds.isNotEmpty) {
-        matchesQuery = matchesQuery.not('team_id', 'in', userTeamIds);
+      // Note: We're NOT filtering team_id here because .not('team_id', 'in', list) 
+      // can incorrectly exclude individual games (team_id IS NULL).
+      // We'll filter out team games created by user's teams in code below.
+      if (kDebugMode && userTeamIds.isNotEmpty) {
+        print('[DEBUG] Discovery query: Will filter out ${userTeamIds.length} user team games in code (not in query to preserve individual games)');
       }
       
-      // Also filter out games that have been matched (matched_team_id is set)
-      // These games are already confirmed and should not appear in Discover
-      final matches = await matchesQuery
-          .isFilter('matched_team_id', null) // Only show games that haven't been matched yet
-          .order('created_at', ascending: false)
-          .limit(100);
+      // Load matches - we'll filter matched_team_id in code since PostgREST syntax for IS NULL is tricky
+      // Limit to 100 matches initially for faster loading
+      List<Map<String, dynamic>> allMatches = [];
+      try {
+        final result = await matchesQuery
+            .order('created_at', ascending: false)
+            .limit(100); // Increased limit to show more games including newly created ones
+        if (result is List) {
+          allMatches = result.cast<Map<String, dynamic>>();
+        }
+      } catch (e) {
+        if (kDebugMode) {
+          print('[ERROR] Discovery query failed: $e');
+        }
+        allMatches = [];
+      }
+      
+      if (kDebugMode) {
+        print('[DEBUG] Discovery query completed: Found ${allMatches.length} total matches before filtering matched_team_id');
+        final individualGames = allMatches.where((m) => m['mode'] != 'team_vs_team').toList();
+        final teamGames = allMatches.where((m) => m['mode'] == 'team_vs_team').toList();
+        print('[DEBUG] Breakdown: ${individualGames.length} individual games, ${teamGames.length} team games');
+        
+        if (individualGames.isEmpty && allMatches.isNotEmpty) {
+          print('[DEBUG] ⚠️  WARNING: Found ${allMatches.length} total games but 0 individual games!');
+          print('[DEBUG] All games are team_vs_team - individual public games may not be getting created or RLS is blocking them');
+        }
+        
+        if (allMatches.isNotEmpty) {
+          print('[DEBUG] Sample matches BEFORE matched_team_id filter:');
+          for (final m in allMatches.take(10)) {
+            final matchId = m['id'] as String?;
+            final mode = m['mode'] as String?;
+            final visibility = m['visibility'] as String?;
+            final isPublic = m['is_public'] as bool?;
+            final status = m['status'] as String?;
+            final createdBy = m['created_by'] as String?;
+            final matchedTeamId = m['matched_team_id'];
+            final teamId = m['team_id'];
+            print('  - ID: ${matchId?.substring(0, 8)}, mode: $mode, visibility: $visibility, is_public: $isPublic, status: $status, created_by: ${createdBy?.substring(0, 8)}, team_id: $teamId, matched_team_id: $matchedTeamId');
+          }
+        } else {
+          print('[DEBUG] ⚠️  No matches found in query! Check RLS policies and query filters.');
+        }
+      }
+      
+      // Filter out games that have been matched (matched_team_id is set)
+      // For individual games (mode='pickup'), matched_team_id is always null, so they pass this filter
+      // For team games, only show unmatched ones (matched_team_id IS NULL)
+      var matches = allMatches.where((m) => m['matched_team_id'] == null).toList();
+      
+      // Filter out team games created by user's teams (individual games have team_id = null, so they pass through)
+      if (userTeamIds.isNotEmpty) {
+        final beforeTeamFilter = matches.length;
+        matches = matches.where((m) {
+          final teamId = m['team_id'];
+          // Keep individual games (team_id is null) and team games NOT created by user's teams
+          return teamId == null || !userTeamIds.contains(teamId);
+        }).toList();
+        if (kDebugMode) {
+          print('[DEBUG] Filtered out ${beforeTeamFilter - matches.length} team games created by user\'s teams');
+        }
+      }
+      
+      if (kDebugMode) {
+        print('[DEBUG] After filtering matched_team_id==null and user team games: ${matches.length} matches remain');
+        final unmatchedIndividual = matches.where((m) => m['mode'] != 'team_vs_team').toList();
+        final unmatchedTeam = matches.where((m) => m['mode'] == 'team_vs_team').toList();
+        print('[DEBUG] Final breakdown: ${unmatchedIndividual.length} individual, ${unmatchedTeam.length} team');
+      }
       
       // Get all invite statuses for user's teams to show request status
       // Changed to support multiple teams per game: request_id -> List<{status, target_team_id, team_name}>
@@ -863,13 +954,20 @@ class HomeTabsController extends ChangeNotifier {
       }
       
       if (matches is List) {
-        final List<Map<String, dynamic>> result = [];
+        List<Map<String, dynamic>> result = [];
 
         if (kDebugMode) {
           print('🔍 Discovery: Found ${matches.length} total matches');
           // Debug: Print visibility and is_public for each match
-          for (final m in matches.take(5)) {
-            print('🔍 Match: visibility=${m['visibility']}, is_public=${m['is_public']}, mode=${m['mode']}, sport=${m['sport']}');
+          for (final m in matches.take(10)) {
+            final matchId = m['id'] as String?;
+            final mode = m['mode'] as String?;
+            final visibility = m['visibility'] as String?;
+            final isPublic = m['is_public'] as bool?;
+            final status = m['status'] as String?;
+            final createdBy = m['created_by'] as String?;
+            final matchedTeamId = m['matched_team_id'];
+            print('🔍 Match ${matchId?.substring(0, 8)}: mode=$mode, visibility=$visibility, is_public=$isPublic, status=$status, created_by=${createdBy?.substring(0, 8)}, matched_team_id=$matchedTeamId');
           }
         }
 
@@ -913,6 +1011,8 @@ class HomeTabsController extends ChangeNotifier {
             print('🎮 Match: ${sport.toUpperCase()} | Mode: $mode | Visibility: $visibility | isPublic: $isPublic | canSee: $canSee | ID: ${matchId?.substring(0, 8)}');
             if (!canSee) {
               print('   ⚠️  Match filtered out - visibility check failed');
+            } else if (mode != 'team_vs_team') {
+              print('   ✅ Individual public game included in discovery');
             }
           }
 
@@ -976,11 +1076,19 @@ class HomeTabsController extends ChangeNotifier {
             }
           }
           
-          // Initial load: Only include games within 100 miles to limit data size
-          // User can then filter within this 100-mile range using the distance filter
-          if (distanceMiles != null && distanceMiles > 100) {
+          // For individual public games, be more lenient with distance filter
+          // Only filter out if distance is clearly too far (> 200 miles)
+          // This ensures newly created games appear even if distance calculation is slightly off
+          if (mode != 'team_vs_team' && distanceMiles != null && distanceMiles > 200) {
             if (kDebugMode) {
-              print('[DEBUG] Game ${m['id']?.toString().substring(0, 8)} filtered out - distance ${distanceMiles.toStringAsFixed(1)} miles > 100 miles');
+              print('[DEBUG] Individual game ${m['id']?.toString().substring(0, 8)} filtered out - distance ${distanceMiles.toStringAsFixed(1)} miles > 200 miles');
+            }
+            continue; // Skip games beyond 200 miles
+          }
+          // For team games, keep 100 mile limit
+          else if (mode == 'team_vs_team' && distanceMiles != null && distanceMiles > 100) {
+            if (kDebugMode) {
+              print('[DEBUG] Team game ${m['id']?.toString().substring(0, 8)} filtered out - distance ${distanceMiles.toStringAsFixed(1)} miles > 100 miles');
             }
             continue; // Skip games beyond 100 miles
           }
@@ -988,66 +1096,7 @@ class HomeTabsController extends ChangeNotifier {
           // If distance couldn't be calculated, include it (might be nearby)
           // User can filter it out using the distance filter if needed
           
-          // For team games, get team name and check if it's an open challenge
-          String? teamName;
-          bool isOpenChallenge = false;
-          if (mode == 'team_vs_team') {
-            final teamId = m['team_id'] as String?;
-            if (teamId != null) {
-              try {
-                final teamRow = await supa
-                    .from('teams')
-                    .select('name')
-                    .eq('id', teamId)
-                    .maybeSingle();
-                if (teamRow != null) {
-                  teamName = teamRow['name'] as String?;
-                }
-              } catch (e) {
-                if (kDebugMode) {
-                  print('[DEBUG] Error fetching team name: $e');
-                }
-              }
-              
-              // Check if it's an open challenge (no accepted invites exist)
-              // If a team has already joined (accepted invite), don't show in Discover
-              if (matchId != null) {
-                try {
-                  final invites = await supa
-                      .from('instant_request_invites')
-                      .select('id, status')
-                      .eq('request_id', matchId);
-                  
-                  // Check if any invite has been accepted
-                  bool hasAcceptedInvite = false;
-                  if (invites is List) {
-                    hasAcceptedInvite = invites.any((inv) => 
-                      (inv['status'] as String?)?.toLowerCase() == 'accepted'
-                    );
-                  }
-                  
-                  // If there's an accepted invite, this is no longer an open challenge
-                  // Don't show it in Discover
-                  if (hasAcceptedInvite) {
-                    if (kDebugMode) {
-                      print('[DEBUG] Game $matchId has accepted invite - filtering out from Discover');
-                    }
-                    continue; // Skip this game - it's been joined
-                  }
-                  
-                  isOpenChallenge = (invites is List && invites.isEmpty);
-                } catch (e) {
-                  if (kDebugMode) {
-                    print('[DEBUG] Error checking invites: $e');
-                  }
-                }
-              }
-            }
-          }
-          
-          // Get invite statuses for user's teams (if any) - now supports multiple teams
-          final inviteStatuses = userTeamInvites[matchId] ?? [];
-          
+          // Store match for batch processing (team names and invites will be fetched in batch)
           result.add({
             'request_id': m['id'] as String,
             'sport': m['sport'],
@@ -1058,23 +1107,152 @@ class HomeTabsController extends ChangeNotifier {
             'venue': m['venue'],
             'num_players': m['num_players'],
             'created_by': m['created_by'],
-            'can_accept': canAccept, // Flag indicating if user can accept this game
-            'proficiency_level': m['proficiency_level'], // For readiness filtering
-            'distance_miles': distanceMiles, // Distance in miles from user ZIP to game ZIP
-            'team_name': teamName, // Team name for team games
-            'is_open_challenge': isOpenChallenge, // Whether it's an open challenge
-            'user_team_invite_statuses': inviteStatuses, // List of {status, target_team_id, team_name} for all user's teams
-            // For backward compatibility, also include single status (first one if exists)
-            'user_team_invite_status': inviteStatuses.isNotEmpty ? inviteStatuses.first['status'] as String? : null,
-            'user_team_invite_team_id': inviteStatuses.isNotEmpty ? inviteStatuses.first['target_team_id'] as String? : null,
+            'can_accept': canAccept,
+            'proficiency_level': m['proficiency_level'],
+            'distance_miles': distanceMiles,
+            'team_id': m['team_id'], // Store team_id for batch lookup
+            'match_id': matchId, // Store for batch invite check
           });
         }
+        
+        // Batch fetch team names for all team games (eliminates N+1 queries)
+        final teamGameMatches = result.where((r) => r['mode'] == 'team_vs_team').toList();
+        final teamIds = teamGameMatches
+            .map((r) => r['team_id'] as String?)
+            .whereType<String>()
+            .toSet()
+            .toList();
+        
+        final Map<String, String> teamNameMap = {};
+        if (teamIds.isNotEmpty) {
+          try {
+            final teamRows = await supa
+                .from('teams')
+                .select('id, name')
+                .inFilter('id', teamIds);
+            
+            if (teamRows is List) {
+              for (final team in teamRows) {
+                final teamId = team['id'] as String?;
+                final teamName = team['name'] as String?;
+                if (teamId != null && teamName != null) {
+                  teamNameMap[teamId] = teamName;
+                }
+              }
+            }
+          } catch (e) {
+            if (kDebugMode) {
+              print('[DEBUG] Error batch fetching team names: $e');
+            }
+          }
+        }
+        
+        // Batch fetch invite statuses for all team games (eliminates N+1 queries)
+        final matchIds = teamGameMatches
+            .map((r) => r['match_id'] as String?)
+            .whereType<String>()
+            .toSet()
+            .toList();
+        
+        final Map<String, bool> hasAcceptedInviteMap = {};
+        final Map<String, bool> isOpenChallengeMap = {};
+        
+        if (matchIds.isNotEmpty) {
+          try {
+            final allInvites = await supa
+                .from('instant_request_invites')
+                .select('request_id, status')
+                .inFilter('request_id', matchIds);
+            
+            if (allInvites is List) {
+              // Group invites by request_id
+              final invitesByRequest = <String, List<Map<String, dynamic>>>{};
+              for (final inv in allInvites) {
+                final reqId = inv['request_id'] as String?;
+                if (reqId != null) {
+                  invitesByRequest.putIfAbsent(reqId, () => []).add(inv);
+                }
+              }
+              
+              // Check each match for accepted invites
+              for (final matchId in matchIds) {
+                final invites = invitesByRequest[matchId] ?? [];
+                final hasAccepted = invites.any((inv) => 
+                  (inv['status'] as String?)?.toLowerCase() == 'accepted'
+                );
+                hasAcceptedInviteMap[matchId] = hasAccepted;
+                isOpenChallengeMap[matchId] = invites.isEmpty;
+              }
+            } else {
+              // No invites found - all are open challenges
+              for (final matchId in matchIds) {
+                hasAcceptedInviteMap[matchId] = false;
+                isOpenChallengeMap[matchId] = true;
+              }
+            }
+          } catch (e) {
+            if (kDebugMode) {
+              print('[DEBUG] Error batch checking invites: $e');
+            }
+            // Default to open challenge if error
+            for (final matchId in matchIds) {
+              hasAcceptedInviteMap[matchId] = false;
+              isOpenChallengeMap[matchId] = true;
+            }
+          }
+        }
+        
+        // Now enrich team games with batch-fetched data and filter out games with accepted invites
+        final List<Map<String, dynamic>> enrichedResult = [];
+        
+        for (final r in result) {
+          final mode = r['mode'] as String?;
+          final matchId = r['match_id'] as String?;
+          final requestId = r['request_id'] as String;
+          
+          // For team games, filter out if they have accepted invites
+          if (mode == 'team_vs_team' && matchId != null) {
+            if (hasAcceptedInviteMap[matchId] == true) {
+              if (kDebugMode) {
+                print('[DEBUG] Game $matchId has accepted invite - filtering out from Discover');
+              }
+              continue; // Skip this game - it's been joined
+            }
+            
+            // Add team name and open challenge status
+            final teamId = r['team_id'] as String?;
+            r['team_name'] = teamId != null ? teamNameMap[teamId] : null;
+            r['is_open_challenge'] = isOpenChallengeMap[matchId] ?? false;
+          }
+          
+          // Get invite statuses for user's teams (if any) - now supports multiple teams
+          final inviteStatuses = userTeamInvites[requestId] ?? [];
+          r['user_team_invite_statuses'] = inviteStatuses;
+          // For backward compatibility, also include single status (first one if exists)
+          r['user_team_invite_status'] = inviteStatuses.isNotEmpty ? inviteStatuses.first['status'] as String? : null;
+          r['user_team_invite_team_id'] = inviteStatuses.isNotEmpty ? inviteStatuses.first['target_team_id'] as String? : null;
+          
+          // Remove temporary fields
+          r.remove('team_id');
+          r.remove('match_id');
+          
+          enrichedResult.add(r);
+        }
+        
+        result = enrichedResult;
 
         if (kDebugMode) {
           print('🔍 Discovery: After filtering, ${result.length} matches will be shown');
+          final individualCount = result.where((r) => r['mode'] != 'team_vs_team').length;
+          final teamCount = result.where((r) => r['mode'] == 'team_vs_team').length;
+          print('   📊 Breakdown: $individualCount individual games, $teamCount team games');
           if (result.isEmpty && matches.isNotEmpty) {
             print('   ⚠️  WARNING: Found ${matches.length} matches in DB but none passed visibility check!');
             print('   Check if games have visibility="public" or is_public=true');
+            // Debug: Show first few matches that were filtered
+            for (final m in matches.take(3)) {
+              print('   🔍 Sample match: id=${m['id']?.toString().substring(0, 8)}, mode=${m['mode']}, visibility=${m['visibility']}, is_public=${m['is_public']}, status=${m['status']}');
+            }
           }
         }
 
@@ -1114,16 +1292,31 @@ class HomeTabsController extends ChangeNotifier {
         }
 
         discoveryPickupMatches = result;
+        
+        // Cache results for 30 seconds
+        _cachedDiscoveryMatches = result;
+        _discoveryCacheTime = DateTime.now();
       } else {
         discoveryPickupMatches = [];
+        _cachedDiscoveryMatches = [];
+        _discoveryCacheTime = DateTime.now();
       }
     } catch (e) {
       lastError = 'loadDiscoveryPickupMatches failed: $e';
       discoveryPickupMatches = [];
+      // Don't cache errors
+      _cachedDiscoveryMatches = null;
+      _discoveryCacheTime = null;
     } finally {
       loadingDiscoveryMatches = false;
       notifyListeners();
     }
+  }
+  
+  /// Clear discovery cache (useful when user location changes or filters applied)
+  void clearDiscoveryCache() {
+    _cachedDiscoveryMatches = null;
+    _discoveryCacheTime = null;
   }
 
   /// Load pending team matches where user is admin and can approve
@@ -1580,6 +1773,103 @@ class HomeTabsController extends ChangeNotifier {
       notifyListeners();
     } catch (e) {
       lastError = 'loadPublicPendingGames failed: $e';
+      notifyListeners();
+    }
+  }
+
+  Future<void> loadProfileNotifications() async {
+    final uid = currentUserId;
+    if (uid == null) {
+      profileNotifications = [];
+      notifyListeners();
+      return;
+    }
+
+    try {
+      final notifications = <Map<String, dynamic>>[];
+      
+      // Get recent team memberships (last 7 days)
+      final sevenDaysAgo = DateTime.now().subtract(const Duration(days: 7)).toUtc().toIso8601String();
+      
+      final teamMemberships = await supa
+          .from('team_members')
+          .select('team_id, joined_at, team:team_id(id, name, sport)')
+          .eq('user_id', uid)
+          .gte('joined_at', sevenDaysAgo)
+          .order('joined_at', ascending: false);
+
+      if (teamMemberships is List) {
+        for (final membership in teamMemberships) {
+          final team = membership['team'] as Map<String, dynamic>?;
+          if (team != null) {
+            notifications.add({
+              'type': 'team',
+              'id': team['id'] as String,
+              'name': team['name'] as String? ?? 'Team',
+              'sport': team['sport'] as String? ?? '',
+              'joined_at': membership['joined_at'] as String?,
+            });
+          }
+        }
+      }
+
+      // Get recent friends group memberships (last 7 days)
+      // First get the group IDs
+      final groupMemberships = await supa
+          .from('friends_group_members')
+          .select('group_id, added_at')
+          .eq('user_id', uid)
+          .gte('added_at', sevenDaysAgo)
+          .order('added_at', ascending: false);
+
+      if (groupMemberships is List && groupMemberships.isNotEmpty) {
+        final groupIds = groupMemberships.map<String>((m) => m['group_id'] as String).toList();
+        
+        // Get the groups details (including sport)
+        final groups = await supa
+            .from('friends_groups')
+            .select('id, name, sport')
+            .inFilter('id', groupIds);
+        
+        // Create a map of group_id -> group data
+        final groupMap = <String, Map<String, dynamic>>{};
+        if (groups is List) {
+          for (final group in groups) {
+            groupMap[group['id'] as String] = group;
+          }
+        }
+        
+        // Match memberships with groups and add notifications
+        // Note: Friends groups don't have sport info directly, so we'll use empty string
+        for (final membership in groupMemberships) {
+          final groupId = membership['group_id'] as String;
+          final group = groupMap[groupId];
+          if (group != null) {
+            notifications.add({
+              'type': 'friends_group',
+              'id': group['id'] as String,
+              'name': group['name'] as String? ?? 'Friends Group',
+              'sport': group['sport'] as String? ?? '',
+              'added_at': membership['added_at'] as String?,
+            });
+          }
+        }
+      }
+
+      // Sort by date (most recent first)
+      notifications.sort((a, b) {
+        final aDate = a['joined_at'] ?? a['added_at'] ?? '';
+        final bDate = b['joined_at'] ?? b['added_at'] ?? '';
+        return bDate.compareTo(aDate);
+      });
+
+      profileNotifications = notifications;
+      notifyListeners();
+    } catch (e) {
+      if (kDebugMode) {
+        print('[ERROR] loadProfileNotifications: $e');
+      }
+      profileNotifications = [];
       notifyListeners();
     }
   }

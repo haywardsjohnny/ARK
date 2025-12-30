@@ -30,8 +30,7 @@ class LocationService {
   }
 
   /// Get current location display string
-  /// Returns manual location if set, otherwise device location
-  /// Falls back to last known ZIP code from database if location fails
+  /// Priority: 1) Cache, 2) Manual location, 3) Home location from profile, 4) Last known ZIP, 5) Device location
   /// Uses user-specific cache for faster loading
   static Future<String> getCurrentLocationDisplay() async {
     try {
@@ -60,17 +59,47 @@ class LocationService {
         }
       }
       
-      // If logged in, check database for user's last known ZIP code
+      // If logged in, check database for user's home location (PRIORITY 1) or last known ZIP code (fallback)
       try {
         final supa = Supabase.instance.client;
         final user = supa.auth.currentUser;
         if (user != null) {
           final result = await supa
               .from('users')
-              .select('last_known_zip_code')
+              .select('home_zip_code, home_city, home_state, last_known_zip_code')
               .eq('id', user.id)
               .maybeSingle();
           
+          // Priority 1: Use home_zip_code (set during profile setup) for fastest loading
+          final homeZip = result?['home_zip_code'] as String?;
+          final homeCity = result?['home_city'] as String?;
+          final homeState = result?['home_state'] as String?;
+          
+          if (homeZip != null && homeZip.isNotEmpty) {
+            // If we have home city/state, use them directly (no API call needed)
+            if (homeCity != null && homeState != null && homeCity.isNotEmpty && homeState.isNotEmpty) {
+              final cityState = '$homeCity, $homeState';
+              await prefs.setString('${userPrefix}cached_location', cityState);
+              await prefs.setString('${userPrefix}cached_zip', homeZip);
+              if (kDebugMode) {
+                print('[LocationService] Using home location from profile: $cityState');
+              }
+              return cityState;
+            } else {
+              // Convert ZIP to city, state for display
+              final cityState = await getCityStateFromZip(homeZip);
+              if (cityState != null) {
+                await prefs.setString('${userPrefix}cached_location', cityState);
+                await prefs.setString('${userPrefix}cached_zip', homeZip);
+                if (kDebugMode) {
+                  print('[LocationService] Using home ZIP from profile (converted to city/state): $cityState');
+                }
+                return cityState;
+              }
+            }
+          }
+          
+          // Priority 2: Fallback to last_known_zip_code (legacy)
           final lastKnownZip = result?['last_known_zip_code'] as String?;
           if (lastKnownZip != null && lastKnownZip.isNotEmpty) {
             // Convert ZIP to city, state for display
@@ -79,7 +108,7 @@ class LocationService {
               // Cache it for faster future access
               await prefs.setString('${userPrefix}cached_location', cityState);
               if (kDebugMode) {
-                print('[LocationService] Using logged-in user\'s location from database: $cityState');
+                print('[LocationService] Using last known ZIP from database: $cityState');
               }
               return cityState;
             }
@@ -89,41 +118,7 @@ class LocationService {
         if (kDebugMode) {
           print('[LocationService] Error getting user location from database: $e');
         }
-        // Continue to fallback logic
-      }
-
-      // Use device location with 3-second timeout
-      try {
-        final position = await _getCurrentPosition().timeout(
-          const Duration(seconds: 3),
-          onTimeout: () {
-            if (kDebugMode) {
-              print('[LocationService] getCurrentLocationDisplay timed out after 3 seconds');
-            }
-            return null;
-          },
-        );
-        
-        if (position != null) {
-          final cityName = await _getCityFromPosition(position);
-          if (cityName != null) {
-            // Cache the location for future use (user-specific)
-            await prefs.setString('${userPrefix}cached_location', cityName);
-            await prefs.setDouble('${userPrefix}cached_lat', position.latitude);
-            await prefs.setDouble('${userPrefix}cached_lng', position.longitude);
-            // Also save ZIP code to database
-            final zip = await getZipFromPosition(position);
-            if (zip != null) {
-              await _saveLastKnownZipCode(zip);
-              await prefs.setString('${userPrefix}cached_zip', zip);
-            }
-            return cityName;
-          }
-        }
-      } on TimeoutException {
-        if (kDebugMode) {
-          print('[LocationService] Location request timed out, using fallback');
-        }
+        // Continue to fallback logic (no device location - only use cached/profile data)
       }
 
       // Try to use cached location (user-specific)
@@ -203,19 +198,8 @@ class LocationService {
         }
       }
 
-      // Use device location
-      final position = await _getCurrentPosition();
-      
-      if (position != null) {
-        // Cache coordinates (user-specific)
-        await prefs.setDouble('${userPrefix}cached_lat', position.latitude);
-        await prefs.setDouble('${userPrefix}cached_lng', position.longitude);
-        return {
-          'lat': position.latitude,
-          'lng': position.longitude,
-        };
-      }
-
+      // No device location fallback - only use cached/profile data
+      // Return null if no cached coordinates available
       return null;
     } catch (e) {
       if (kDebugMode) {
@@ -500,6 +484,7 @@ class LocationService {
   }
 
   /// Get last known ZIP code from database
+  /// Checks home_zip_code first (priority), then falls back to last_known_zip_code
   static Future<String?> _getLastKnownZipCodeFromDatabase() async {
     try {
       final supa = Supabase.instance.client;
@@ -511,12 +496,21 @@ class LocationService {
 
       final result = await supa
           .from('users')
-          .select('last_known_zip_code')
+          .select('home_zip_code, last_known_zip_code')
           .eq('id', user.id)
           .maybeSingle();
 
+      // Priority 1: Use home_zip_code (set during profile setup)
+      final homeZip = result?['home_zip_code'] as String?;
+      if (homeZip != null && homeZip.isNotEmpty) {
+        if (kDebugMode) {
+          print('[LocationService] Retrieved home ZIP code from database: $homeZip');
+        }
+        return homeZip;
+      }
+
+      // Priority 2: Fallback to last_known_zip_code (legacy)
       final zipCode = result?['last_known_zip_code'] as String?;
-      
       if (kDebugMode && zipCode != null) {
         print('[LocationService] Retrieved last known ZIP code from database: $zipCode');
       }
@@ -530,9 +524,9 @@ class LocationService {
     }
   }
 
-  /// Get current user's ZIP code (from device location or manual setting)
-  /// Falls back to last known ZIP code from database if current location fails
-  /// Has a 3-second timeout - if location doesn't load within 3 seconds, uses last known ZIP
+  /// Get current user's ZIP code
+  /// Priority: 1) Cache, 2) Manual location, 3) Home ZIP from profile, 4) Last known ZIP, 5) Device location
+  /// Has a 3-second timeout - if location doesn't load within 3 seconds, uses saved ZIP from profile
   static Future<String?> getCurrentZipCode({Duration timeout = const Duration(seconds: 3)}) async {
     try {
       final prefs = await SharedPreferences.getInstance();
@@ -564,23 +558,35 @@ class LocationService {
         }
       }
       
-      // If logged in, check database for user's last known ZIP code
+      // If logged in, check database for user's home ZIP code (PRIORITY 1) or last known ZIP code (fallback)
       try {
         final supa = Supabase.instance.client;
         final user = supa.auth.currentUser;
         if (user != null) {
           final result = await supa
               .from('users')
-              .select('last_known_zip_code')
+              .select('home_zip_code, last_known_zip_code')
               .eq('id', user.id)
               .maybeSingle();
           
+          // Priority 1: Use home_zip_code (set during profile setup) for fastest loading
+          final homeZip = result?['home_zip_code'] as String?;
+          if (homeZip != null && homeZip.isNotEmpty) {
+            // Cache it for faster future access
+            await prefs.setString('${userPrefix}cached_zip', homeZip);
+            if (kDebugMode) {
+              print('[LocationService] Using home ZIP from profile: $homeZip');
+            }
+            return homeZip;
+          }
+          
+          // Priority 2: Fallback to last_known_zip_code (legacy)
           final lastKnownZip = result?['last_known_zip_code'] as String?;
           if (lastKnownZip != null && lastKnownZip.isNotEmpty) {
             // Cache it for faster future access
             await prefs.setString('${userPrefix}cached_zip', lastKnownZip);
             if (kDebugMode) {
-              print('[LocationService] Using logged-in user\'s ZIP from database: $lastKnownZip');
+              print('[LocationService] Using last known ZIP from database: $lastKnownZip');
             }
             return lastKnownZip;
           }
@@ -589,41 +595,7 @@ class LocationService {
         if (kDebugMode) {
           print('[LocationService] Error getting user ZIP from database: $e');
         }
-        // Continue to fallback logic
-      }
-
-      // Use device location to get ZIP code with 3-second timeout
-      try {
-        final positionFuture = _getCurrentPosition();
-        final position = await positionFuture.timeout(
-          timeout,
-          onTimeout: () {
-            if (kDebugMode) {
-              print('[LocationService] Location request timed out after ${timeout.inSeconds} seconds');
-            }
-            return null;
-          },
-        );
-        
-        if (position != null) {
-          final zip = await getZipFromPosition(position);
-          if (zip != null) {
-            // Cache the ZIP code locally (user-specific)
-            await prefs.setString('${userPrefix}cached_zip', zip);
-            // Save to database as last known
-            await _saveLastKnownZipCode(zip);
-            return zip;
-          }
-        }
-      } on TimeoutException {
-        if (kDebugMode) {
-          print('[LocationService] Location request timed out after ${timeout.inSeconds} seconds, using fallback');
-        }
-      } catch (e) {
-        if (kDebugMode && e is! TimeoutException) {
-          print('[LocationService] Error getting position: $e');
-        }
-        // Continue to fallback
+        // Continue to fallback logic (no device location - only use cached/profile data)
       }
 
       // Try cached ZIP code from local storage (user-specific)

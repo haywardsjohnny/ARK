@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
 import '../services/location_service.dart';
 
 class LocationPickerDialog extends StatefulWidget {
@@ -59,9 +60,29 @@ class _LocationPickerDialogState extends State<LocationPickerDialog> {
 
   Future<void> _selectLocation(Map<String, String> location) async {
     try {
+      // Parse city and state from display string (format: "City, State")
+      final display = location['display']!;
+      final parts = display.split(', ');
+      final city = parts.length >= 1 ? parts[0].trim() : '';
+      final state = parts.length >= 2 ? parts[1].trim() : '';
+      final zip = location['zip']!;
+      
+      // Save to profile
+      final supa = Supabase.instance.client;
+      final user = supa.auth.currentUser;
+      if (user != null && city.isNotEmpty && state.isNotEmpty) {
+        await supa.from('users').update({
+          'home_city': city,
+          'home_state': state,
+          'home_zip_code': zip,
+          'updated_at': DateTime.now().toUtc().toIso8601String(),
+        }).eq('id', user.id);
+      }
+      
+      // Also set as manual location for immediate use
       await LocationService.setManualLocation(
-        displayName: location['display']!,
-        zipCode: location['zip']!,
+        displayName: display,
+        zipCode: zip,
       );
 
       if (mounted) {
@@ -78,7 +99,36 @@ class _LocationPickerDialogState extends State<LocationPickerDialog> {
 
   Future<void> _useDeviceLocation() async {
     try {
-      await LocationService.useAutoLocation();
+      // Get current device location and save to profile
+      final location = await LocationService.getCurrentLocationDisplay();
+      final zip = await LocationService.getCurrentZipCode();
+      
+      if (location != null && location.isNotEmpty && zip != null && zip.isNotEmpty) {
+        // Parse city and state from location string (format: "City, State")
+        final parts = location.split(', ');
+        if (parts.length >= 2) {
+          final city = parts[0].trim();
+          final state = parts[1].trim();
+          
+          // Save to profile
+          final supa = Supabase.instance.client;
+          final user = supa.auth.currentUser;
+          if (user != null) {
+            await supa.from('users').update({
+              'home_city': city,
+              'home_state': state,
+              'home_zip_code': zip,
+              'updated_at': DateTime.now().toUtc().toIso8601String(),
+            }).eq('id', user.id);
+            
+            // Also set as manual location for immediate use
+            await LocationService.setManualLocation(
+              displayName: location,
+              zipCode: zip,
+            );
+          }
+        }
+      }
 
       if (mounted) {
         Navigator.of(context).pop(true); // Return true to indicate location changed
@@ -86,7 +136,7 @@ class _LocationPickerDialogState extends State<LocationPickerDialog> {
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Error setting auto location: $e')),
+          SnackBar(content: Text('Error setting location: $e')),
         );
       }
     }
@@ -140,8 +190,8 @@ class _LocationPickerDialogState extends State<LocationPickerDialog> {
                     });
                   },
                 ),
-                title: const Text('Use Device Location'),
-                subtitle: const Text('Automatically detect your current location'),
+                title: const Text('Set to Current Location'),
+                subtitle: const Text('Get your current device location and save to profile'),
                 trailing: const Icon(Icons.gps_fixed),
                 onTap: () {
                   setState(() {
@@ -258,7 +308,7 @@ class _LocationPickerDialogState extends State<LocationPickerDialog> {
                   ElevatedButton.icon(
                     onPressed: _useDeviceLocation,
                     icon: const Icon(Icons.check, size: 18),
-                    label: const Text('Use Device Location'),
+                    label: const Text('Set to Current Location'),
                   ),
               ],
             ),

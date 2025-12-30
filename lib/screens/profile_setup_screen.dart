@@ -27,6 +27,9 @@ class _ProfileSetupScreenState extends State<ProfileSetupScreen> {
   bool _uploadingPhoto = false;
 
   String? _photoUrl; // stored in users.photo_url
+  String? _homeCity;
+  String? _homeState;
+  String? _homeZipCode;
 
   @override
   void initState() {
@@ -55,6 +58,9 @@ class _ProfileSetupScreenState extends State<ProfileSetupScreen> {
         _nameController.text = res['full_name'] ?? '';
         _bioController.text = res['bio'] ?? '';
         _photoUrl = res['photo_url'] as String?;
+        _homeCity = res['home_city'] as String?;
+        _homeState = res['home_state'] as String?;
+        _homeZipCode = res['home_zip_code'] as String?;
       });
     }
 
@@ -76,6 +82,9 @@ class _ProfileSetupScreenState extends State<ProfileSetupScreen> {
       'full_name': _nameController.text.trim(),
       'bio': _bioController.text.trim(),
       'photo_url': _photoUrl,
+      'home_city': _homeCity,
+      'home_state': _homeState,
+      'home_zip_code': _homeZipCode,
       'updated_at': DateTime.now().toIso8601String(),
     };
 
@@ -97,6 +106,26 @@ Navigator.of(context).pushReplacement(
     builder: (_) => const UserProfileScreen(),
   ),
 );
+  }
+
+  Future<void> _showHomeLocationPicker() async {
+    // Show a simplified location picker dialog for home location
+    final result = await showDialog<Map<String, String>>(
+      context: context,
+      builder: (context) => _HomeLocationPickerDialog(
+        currentCity: _homeCity,
+        currentState: _homeState,
+        currentZip: _homeZipCode,
+      ),
+    );
+
+    if (result != null) {
+      setState(() {
+        _homeCity = result['city'];
+        _homeState = result['state'];
+        _homeZipCode = result['zip'];
+      });
+    }
   }
 
   Future<void> _logout() async {
@@ -293,6 +322,51 @@ Navigator.of(context).pushReplacement(
               ),
               const SizedBox(height: 16),
 
+              // Home Location Section
+              const Text(
+                'Home Location',
+                style: TextStyle(
+                  fontSize: 16,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+              const SizedBox(height: 8),
+              const Text(
+                'Set your home city/state for faster app loading and game discovery',
+                style: TextStyle(fontSize: 12, color: Colors.grey),
+              ),
+              const SizedBox(height: 8),
+              InkWell(
+                onTap: _showHomeLocationPicker,
+                child: Container(
+                  padding: const EdgeInsets.all(12),
+                  decoration: BoxDecoration(
+                    border: Border.all(color: Colors.grey.shade300),
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: Row(
+                    children: [
+                      const Icon(Icons.location_on, color: Colors.grey),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: Text(
+                          _homeCity != null && _homeState != null
+                              ? '$_homeCity, $_homeState'
+                              : 'Tap to set home location',
+                          style: TextStyle(
+                            color: _homeCity != null && _homeState != null
+                                ? Colors.black87
+                                : Colors.grey,
+                          ),
+                        ),
+                      ),
+                      const Icon(Icons.chevron_right, color: Colors.grey),
+                    ],
+                  ),
+                ),
+              ),
+              const SizedBox(height: 16),
+
               ElevatedButton(
                 onPressed: _savingProfile ? null : _saveProfile,
                 child: Text(_savingProfile ? 'Saving...' : 'Save Profile'),
@@ -347,6 +421,194 @@ Navigator.of(context).pushReplacement(
               ),
             ],
           ),
+        ),
+      ),
+    );
+  }
+}
+
+// Simplified location picker dialog for home location selection
+class _HomeLocationPickerDialog extends StatefulWidget {
+  final String? currentCity;
+  final String? currentState;
+  final String? currentZip;
+
+  const _HomeLocationPickerDialog({
+    this.currentCity,
+    this.currentState,
+    this.currentZip,
+  });
+
+  @override
+  State<_HomeLocationPickerDialog> createState() => _HomeLocationPickerDialogState();
+}
+
+class _HomeLocationPickerDialogState extends State<_HomeLocationPickerDialog> {
+  final TextEditingController _searchController = TextEditingController();
+  List<Map<String, String>> _searchResults = [];
+  bool _isSearching = false;
+
+  @override
+  void initState() {
+    super.initState();
+    if (widget.currentCity != null && widget.currentState != null) {
+      _searchController.text = '${widget.currentCity}, ${widget.currentState}';
+    }
+  }
+
+  Future<void> _searchLocations(String query) async {
+    if (query.trim().isEmpty) {
+      setState(() {
+        _searchResults = [];
+      });
+      return;
+    }
+
+    setState(() {
+      _isSearching = true;
+    });
+
+    try {
+      final results = await LocationService.searchLocations(query);
+      setState(() {
+        _searchResults = results;
+        _isSearching = false;
+      });
+    } catch (e) {
+      setState(() {
+        _isSearching = false;
+      });
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Error searching: $e')),
+        );
+      }
+    }
+  }
+
+  void _selectLocation(Map<String, String> location) {
+    Navigator.of(context).pop({
+      'city': location['city'] ?? '',
+      'state': location['state'] ?? '',
+      'zip': location['zip'] ?? '',
+      'display': location['display'] ?? '',
+    });
+  }
+
+  @override
+  void dispose() {
+    _searchController.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Dialog(
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+      child: Container(
+        constraints: const BoxConstraints(maxWidth: 500, maxHeight: 600),
+        padding: const EdgeInsets.all(20),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            // Header
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                const Text(
+                  'Set Home Location',
+                  style: TextStyle(
+                    fontSize: 20,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+                IconButton(
+                  icon: const Icon(Icons.close),
+                  onPressed: () => Navigator.of(context).pop(),
+                ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            const Text(
+              'Search for your home city or enter a ZIP code',
+              style: TextStyle(fontSize: 14, color: Colors.grey),
+            ),
+            const SizedBox(height: 16),
+
+            // Search Field
+            TextField(
+              controller: _searchController,
+              decoration: InputDecoration(
+                hintText: 'Enter city name or ZIP code',
+                prefixIcon: const Icon(Icons.search),
+                border: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                contentPadding: const EdgeInsets.symmetric(
+                  horizontal: 12,
+                  vertical: 8,
+                ),
+              ),
+              onChanged: (value) {
+                if (value.length >= 3) {
+                  _searchLocations(value);
+                } else {
+                  setState(() {
+                    _searchResults = [];
+                  });
+                }
+              },
+            ),
+
+            // Search Results
+            if (_searchController.text.length >= 3) ...[
+              const SizedBox(height: 16),
+              const Text(
+                'Search Results:',
+                style: TextStyle(
+                  fontSize: 14,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+              const SizedBox(height: 8),
+              Expanded(
+                child: _isSearching
+                    ? const Center(child: CircularProgressIndicator())
+                    : _searchResults.isEmpty
+                        ? const Center(
+                            child: Text(
+                              'No results found',
+                              style: TextStyle(color: Colors.grey),
+                            ),
+                          )
+                        : ListView.builder(
+                            itemCount: _searchResults.length,
+                            itemBuilder: (context, index) {
+                              final location = _searchResults[index];
+                              return ListTile(
+                                leading: const Icon(Icons.location_on),
+                                title: Text(location['display']!),
+                                subtitle: Text('ZIP: ${location['zip']}'),
+                                onTap: () => _selectLocation(location),
+                              );
+                            },
+                          ),
+              ),
+            ],
+
+            // Action Buttons
+            const SizedBox(height: 16),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.end,
+              children: [
+                TextButton(
+                  onPressed: () => Navigator.of(context).pop(),
+                  child: const Text('Cancel'),
+                ),
+              ],
+            ),
+          ],
         ),
       ),
     );

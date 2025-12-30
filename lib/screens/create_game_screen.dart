@@ -19,7 +19,7 @@ class CreateGameScreen extends StatefulWidget {
 
 class _CreateGameScreenState extends State<CreateGameScreen> {
   int _currentStep = 0; // 0 = Game Type Selector, 1 = Form
-  String? _selectedGameType; // 'team' or 'individual'
+  String? _selectedGameType; // 'ind_friends', 'ind_public', 'team_invited', 'team_open'
   bool _isAdmin = false;
 
   @override
@@ -33,7 +33,7 @@ class _CreateGameScreenState extends State<CreateGameScreen> {
     if (_currentStep == 0) {
       return _buildGameTypeSelector();
     } else {
-      if (_selectedGameType == 'team') {
+      if (_selectedGameType == 'team_invited' || _selectedGameType == 'team_open') {
         return _isAdmin 
             ? _buildTeamVsTeamAdminForm()
             : _buildTeamVsTeamRequestForm();
@@ -64,18 +64,48 @@ class _CreateGameScreenState extends State<CreateGameScreen> {
             ),
             const SizedBox(height: 24),
             
-            // Team vs Team Card
+            // In-House game (IND - Friends Group)
+            _buildGameTypeCard(
+              icon: '👥',
+              title: 'In-House game',
+              subtitle: 'Create a game for your friends group',
+              onTap: () {
+                setState(() {
+                  _selectedGameType = 'ind_friends';
+                  _currentStep = 1;
+                });
+              },
+            ),
+            
+            const SizedBox(height: 16),
+            
+            // Pick-up Game (IND - Public)
+            _buildGameTypeCard(
+              icon: '🌍',
+              title: 'Pick-up Game',
+              subtitle: 'Open game visible to all players',
+              onTap: () {
+                setState(() {
+                  _selectedGameType = 'ind_public';
+                  _currentStep = 1;
+                });
+              },
+            ),
+            
+            const SizedBox(height: 16),
+            
+            // Team vs Team - Invites Specific Team
             _buildGameTypeCard(
               icon: '🏆',
-              title: 'Team vs Team',
-              subtitle: 'Organized match between teams',
-              note: 'Admin required',
+              title: 'Team vs Team - Invites Specific Team',
+              subtitle: 'Invite specific teams to play',
+              note: _isAdmin ? null : 'Admin required',
               onTap: () {
                 if (!_isAdmin) {
-                  _showNonAdminDialog();
+                  _showNonAdminDialog('team_invited');
                 } else {
                   setState(() {
-                    _selectedGameType = 'team';
+                    _selectedGameType = 'team_invited';
                     _currentStep = 1;
                   });
                 }
@@ -84,16 +114,21 @@ class _CreateGameScreenState extends State<CreateGameScreen> {
             
             const SizedBox(height: 16),
             
-            // Individuals Card
+            // Team vs Team - Open Challenge
             _buildGameTypeCard(
-              icon: '👤',
-              title: 'Individuals',
-              subtitle: 'Open match for players',
+              icon: '🎯',
+              title: 'Team vs Team - Open Challenge',
+              subtitle: 'Public challenge for any team to join',
+              note: _isAdmin ? null : 'Admin required',
               onTap: () {
-                setState(() {
-                  _selectedGameType = 'individual';
-                  _currentStep = 1;
-                });
+                if (!_isAdmin) {
+                  _showNonAdminDialog('team_open');
+                } else {
+                  setState(() {
+                    _selectedGameType = 'team_open';
+                    _currentStep = 1;
+                  });
+                }
               },
             ),
             
@@ -173,7 +208,7 @@ class _CreateGameScreenState extends State<CreateGameScreen> {
     );
   }
 
-  Future<void> _showNonAdminDialog() async {
+  Future<void> _showNonAdminDialog(String gameType) async {
     final result = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
@@ -196,7 +231,7 @@ class _CreateGameScreenState extends State<CreateGameScreen> {
 
     if (result == true) {
       setState(() {
-        _selectedGameType = 'team';
+        _selectedGameType = gameType;
         _currentStep = 1;
       });
     }
@@ -207,6 +242,7 @@ class _CreateGameScreenState extends State<CreateGameScreen> {
     return _TeamVsTeamForm(
       controller: widget.controller,
       isAdmin: true,
+      gameType: _selectedGameType ?? 'team_invited', // Pass the selected game type
       onBack: () => setState(() => _currentStep = 0),
     );
   }
@@ -216,6 +252,7 @@ class _CreateGameScreenState extends State<CreateGameScreen> {
     return _TeamVsTeamForm(
       controller: widget.controller,
       isAdmin: false,
+      gameType: _selectedGameType ?? 'team_invited', // Pass the selected game type
       onBack: () => setState(() => _currentStep = 0),
     );
   }
@@ -224,6 +261,7 @@ class _CreateGameScreenState extends State<CreateGameScreen> {
   Widget _buildIndividualsForm() {
     return _IndividualsForm(
       controller: widget.controller,
+      gameType: _selectedGameType ?? 'ind_public', // Pass the selected game type
       onBack: () => setState(() => _currentStep = 0),
     );
   }
@@ -233,11 +271,13 @@ class _CreateGameScreenState extends State<CreateGameScreen> {
 class _TeamVsTeamForm extends StatefulWidget {
   final HomeTabsController controller;
   final bool isAdmin;
+  final String gameType; // 'team_invited' or 'team_open'
   final VoidCallback onBack;
 
   const _TeamVsTeamForm({
     required this.controller,
     required this.isAdmin,
+    required this.gameType,
     required this.onBack,
   });
 
@@ -278,7 +318,7 @@ class _TeamVsTeamFormState extends State<_TeamVsTeamForm> {
 
   String? _selectedSport;
   String? _selectedTeamId;
-  String _opponentType = 'specific'; // 'specific' or 'open'
+  String _opponentType = 'specific'; // 'specific' or 'open' - determined by gameType
   // Allow selecting multiple specific opponent teams
   final Set<String> _selectedOpponentTeamIds = {};
   DateTime? _selectedDate;
@@ -286,11 +326,24 @@ class _TeamVsTeamFormState extends State<_TeamVsTeamForm> {
   TimeOfDay? _endTime;
   String? _venueText;
   String? _gameDetails;
-  String _visibility = 'invited'; // 'invited', 'nearby', 'public'
+  late String _visibility; // Set based on gameType: 'invited' for team_invited, 'public' for team_open
   bool _notifyAdmins = true;
   String? _errorText;
   bool _saving = false;
   int? _expectedPlayersPerTeam;
+
+  @override
+  void initState() {
+    super.initState();
+    // Set opponent type and visibility based on gameType
+    if (widget.gameType == 'team_open') {
+      _opponentType = 'open';
+      _visibility = 'public';
+    } else {
+      _opponentType = 'specific';
+      _visibility = 'invited';
+    }
+  }
 
   String _displaySport(String key) {
     final withSpaces = key.replaceAll('_', ' ');
@@ -405,9 +458,9 @@ class _TeamVsTeamFormState extends State<_TeamVsTeamForm> {
         throw Exception('Failed to create request');
       }
 
-      // If admin and specific team(s) selected, create invite(s)
+      // If admin and specific team(s) selected (team_invited), create invite(s)
       if (widget.isAdmin &&
-          _opponentType == 'specific' &&
+          widget.gameType == 'team_invited' &&
           _selectedOpponentTeamIds.isNotEmpty) {
         final inviteRows = _selectedOpponentTeamIds.map((teamId) {
           return {
@@ -497,7 +550,7 @@ class _TeamVsTeamFormState extends State<_TeamVsTeamForm> {
             // Continue for other teams even if one fails
           }
         }
-      } else if (widget.isAdmin && _opponentType == 'open') {
+      } else if (widget.isAdmin && widget.gameType == 'team_open') {
         // Open challenge: no per-team invites created.
         // Other teams discover this match via visibility + radius filters.
         // Still create attendance records for all members of the creating team
@@ -642,38 +695,39 @@ class _TeamVsTeamFormState extends State<_TeamVsTeamForm> {
             const SizedBox(height: 24),
 
             // Opponent
-            const Row(
-              children: [
-                Text('🆚', style: TextStyle(fontSize: 20)),
-                SizedBox(width: 8),
-                Text('Opponent', style: TextStyle(fontWeight: FontWeight.bold)),
-              ],
-            ),
-            const SizedBox(height: 8),
-            if (widget.isAdmin) ...[
-              RadioListTile<String>(
-                title: const Text('Invite specific team'),
-                value: 'specific',
-                groupValue: _opponentType,
-                onChanged: (v) => setState(() {
-                  _opponentType = v ?? 'specific';
-                  // Default visibility when inviting specific teams
-                  _visibility = 'invited';
-                  _selectedOpponentTeamIds.clear();
-                }),
+            if (widget.isAdmin && widget.gameType == 'team_invited') ...[
+              const Row(
+                children: [
+                  Text('🆚', style: TextStyle(fontSize: 20)),
+                  SizedBox(width: 8),
+                  Text('Opponent', style: TextStyle(fontWeight: FontWeight.bold)),
+                ],
               ),
-              RadioListTile<String>(
-                title: const Text('Open challenge'),
-                value: 'open',
-                groupValue: _opponentType,
-                onChanged: (v) => setState(() {
-                  _opponentType = v ?? 'open';
-                  // Default visibility when open challenge
-                  _visibility = 'public';
-                  _selectedOpponentTeamIds.clear();
-                }),
+              const SizedBox(height: 8),
+              Container(
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: Colors.blue.shade50,
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(color: Colors.blue.shade200),
+                ),
+                child: const Row(
+                  children: [
+                    Icon(Icons.group, color: Colors.blue, size: 20),
+                    SizedBox(width: 8),
+                    Text(
+                      'Invite specific team(s)',
+                      style: TextStyle(
+                        fontSize: 14,
+                        fontWeight: FontWeight.w500,
+                        color: Colors.blue,
+                      ),
+                    ),
+                  ],
+                ),
               ),
-              if (_opponentType == 'specific' && _selectedSport != null) ...[
+              if (_selectedSport != null) ...[
+                const SizedBox(height: 16),
                 const SizedBox(height: 8),
                 FutureBuilder(
                   future: _loadOpponentTeams(),
@@ -724,6 +778,39 @@ class _TeamVsTeamFormState extends State<_TeamVsTeamForm> {
                   },
                 ),
               ],
+            ] else if (widget.isAdmin && widget.gameType == 'team_open') ...[
+              const Row(
+                children: [
+                  Text('🆚', style: TextStyle(fontSize: 20)),
+                  SizedBox(width: 8),
+                  Text('Opponent', style: TextStyle(fontWeight: FontWeight.bold)),
+                ],
+              ),
+              const SizedBox(height: 8),
+              Container(
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: Colors.green.shade50,
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(color: Colors.green.shade200),
+                ),
+                child: const Row(
+                  children: [
+                    Icon(Icons.public, color: Colors.green, size: 20),
+                    SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        'Open challenge - Any team can join',
+                        style: TextStyle(
+                          fontSize: 14,
+                          fontWeight: FontWeight.w500,
+                          color: Colors.green,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
             ] else
               const Text(
                 'Opponent will be selected after admin approval',
@@ -914,7 +1001,7 @@ class _TeamVsTeamFormState extends State<_TeamVsTeamForm> {
             const Divider(),
             const SizedBox(height: 16),
 
-            // Visibility (Admin only) - Auto-set based on opponent type, non-editable
+            // Visibility (Admin only) - Pre-set based on game type, non-editable
             if (widget.isAdmin) ...[
               const Text('Visibility', style: TextStyle(fontWeight: FontWeight.bold)),
               const SizedBox(height: 8),
@@ -928,16 +1015,16 @@ class _TeamVsTeamFormState extends State<_TeamVsTeamForm> {
                 child: Row(
                   children: [
                     Icon(
-                      _opponentType == 'specific' ? Icons.lock : Icons.public,
+                      widget.gameType == 'team_invited' ? Icons.lock : Icons.public,
                       color: Colors.grey.shade600,
                       size: 20,
                     ),
                     const SizedBox(width: 8),
                     Expanded(
                       child: Text(
-                        _opponentType == 'specific' 
-                            ? 'Only invited teams (auto-set)'
-                            : 'Public (auto-set)',
+                        widget.gameType == 'team_invited'
+                            ? 'Only invited teams'
+                            : 'Public',
                         style: TextStyle(
                           fontSize: 14,
                           fontWeight: FontWeight.w500,
@@ -946,17 +1033,6 @@ class _TeamVsTeamFormState extends State<_TeamVsTeamForm> {
                       ),
                     ),
                   ],
-                ),
-              ),
-              const SizedBox(height: 8),
-              Text(
-                _opponentType == 'specific'
-                    ? 'Visibility is automatically set to "Only invited teams" when inviting specific teams.'
-                    : 'Visibility is automatically set to "Public" for open challenges.',
-                style: TextStyle(
-                  fontSize: 12,
-                  color: Colors.grey.shade600,
-                  fontStyle: FontStyle.italic,
                 ),
               ),
               const SizedBox(height: 16),
@@ -1047,10 +1123,12 @@ class _TeamVsTeamFormState extends State<_TeamVsTeamForm> {
 // Individuals Match Form
 class _IndividualsForm extends StatefulWidget {
   final HomeTabsController controller;
+  final String gameType; // 'ind_friends' or 'ind_public'
   final VoidCallback onBack;
 
   const _IndividualsForm({
     required this.controller,
+    required this.gameType,
     required this.onBack,
   });
 
@@ -1095,7 +1173,7 @@ class _IndividualsFormState extends State<_IndividualsForm> {
   TimeOfDay? _selectedTime;
   String? _venueText;
   String? _gameDetails;
-  String _visibility = 'public'; // 'friends_group', 'public'
+  late String _visibility; // Set based on gameType: 'friends_group' for ind_friends, 'public' for ind_public
   String? _selectedFriendsGroupId;
   List<Map<String, dynamic>> _friendsGroups = [];
   bool _loadingGroups = false;
@@ -1105,7 +1183,11 @@ class _IndividualsFormState extends State<_IndividualsForm> {
   @override
   void initState() {
     super.initState();
-    _loadFriendsGroups();
+    // Set visibility based on gameType
+    _visibility = widget.gameType == 'ind_friends' ? 'friends_group' : 'public';
+    if (widget.gameType == 'ind_friends') {
+      _loadFriendsGroups();
+    }
   }
 
   String _displaySport(String key) {
@@ -1439,7 +1521,11 @@ class _IndividualsFormState extends State<_IndividualsForm> {
       Navigator.of(context).pop();
 
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Open match created successfully!')),
+        SnackBar(
+          content: Text(widget.gameType == 'ind_friends' 
+              ? 'In-House game created successfully!'
+              : 'Pick-up Game created successfully!'),
+        ),
       );
 
       await widget.controller.loadDiscoveryPickupMatches();
@@ -1455,7 +1541,9 @@ class _IndividualsFormState extends State<_IndividualsForm> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Create Open Match'),
+        title: Text(widget.gameType == 'ind_friends' 
+            ? 'Create In-House game' 
+            : 'Create Pick-up Game'),
         leading: IconButton(
           icon: const Icon(Icons.arrow_back),
           onPressed: widget.onBack,
@@ -1617,7 +1705,7 @@ class _IndividualsFormState extends State<_IndividualsForm> {
             ),
             const SizedBox(height: 24),
 
-            // Visibility
+            // Visibility - Pre-set based on game type
             const Row(
               children: [
                 Text('👀', style: TextStyle(fontSize: 20)),
@@ -1626,22 +1714,39 @@ class _IndividualsFormState extends State<_IndividualsForm> {
               ],
             ),
             const SizedBox(height: 8),
-            RadioListTile<String>(
-              title: const Text('Friends Group'),
-              subtitle: const Text('Send to a specific friends group'),
-              value: 'friends_group',
-              groupValue: _visibility,
-              onChanged: (v) {
-                setState(() {
-                  _visibility = v ?? 'friends_group';
-                  _selectedFriendsGroupId = null; // Reset selection
-                });
-                _loadFriendsGroups(); // Reload groups when selecting this option
-              },
+            Container(
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: Colors.grey.shade100,
+                borderRadius: BorderRadius.circular(8),
+                border: Border.all(color: Colors.grey.shade300),
+              ),
+              child: Row(
+                children: [
+                  Icon(
+                    widget.gameType == 'ind_friends' ? Icons.group : Icons.public,
+                    color: Colors.grey.shade600,
+                    size: 20,
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      widget.gameType == 'ind_friends'
+                          ? 'Friends Group'
+                          : 'Public',
+                      style: TextStyle(
+                        fontSize: 14,
+                        fontWeight: FontWeight.w500,
+                        color: Colors.grey.shade700,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
             ),
-            // Friends Group Dropdown
-            if (_visibility == 'friends_group') ...[
-              const SizedBox(height: 8),
+            // Friends Group Dropdown (only for ind_friends)
+            if (widget.gameType == 'ind_friends') ...[
+              const SizedBox(height: 16),
               if (_loadingGroups)
                 const Padding(
                   padding: EdgeInsets.all(16),
@@ -1714,18 +1819,6 @@ class _IndividualsFormState extends State<_IndividualsForm> {
                   },
                 ),
             ],
-            RadioListTile<String>(
-              title: const Text('Public'),
-              subtitle: const Text('Visible to all players within 100 miles'),
-              value: 'public',
-              groupValue: _visibility,
-              onChanged: (v) {
-                setState(() {
-                  _visibility = v ?? 'public';
-                  _selectedFriendsGroupId = null;
-                });
-              },
-            ),
             const SizedBox(height: 24),
 
             // Venue

@@ -135,12 +135,12 @@ class _TeamProfileScreenState extends State<TeamProfileScreen> {
         final fetchedUserIds = userById.keys.toList();
         if (fetchedUserIds.isNotEmpty) {
           try {
-            final usersRows = await supa
-                .from('users')
-                .select('id, full_name, photo_url, base_zip_code')
+        final usersRows = await supa
+            .from('users')
+            .select('id, full_name, photo_url, base_zip_code')
                 .inFilter('id', fetchedUserIds);
 
-            for (final u in usersRows as List) {
+        for (final u in usersRows as List) {
               final uid = u['id'] as String;
               if (userById.containsKey(uid)) {
                 // Update with photo_url and base_zip_code
@@ -167,10 +167,10 @@ class _TeamProfileScreenState extends State<TeamProfileScreen> {
             for (final u in usersRows as List) {
               final uid = u['id'] as String;
               userById[uid] = {
-                'full_name': u['full_name'],
-                'photo_url': u['photo_url'],
-                'base_zip_code': u['base_zip_code'],
-              };
+            'full_name': u['full_name'],
+            'photo_url': u['photo_url'],
+            'base_zip_code': u['base_zip_code'],
+          };
             }
           } catch (e) {
             if (kDebugMode) {

@@ -1,7 +1,6 @@
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
-import 'package:geolocator/geolocator.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../user_profile_screen.dart';
@@ -26,13 +25,16 @@ class HomeTabsScreen extends StatefulWidget {
 class _HomeTabsScreenState extends State<HomeTabsScreen> {
   late final HomeTabsController _controller;
   bool _initDone = false;
-  bool _pendingAdminExpanded = false;
-  bool _pendingConfirmationExpanded = false;
   String _myGamesFilter = 'Current'; // 'Current', 'Past', 'Cancelled', 'Hidden'
-  String _myGamesType = 'Team'; // 'Team' or 'Individual'
   final Set<String> _expandedMatchIds = {}; // Track which matches are expanded
-  String? _currentLocation; // Device/manual location display
+  String? _currentLocation; // Profile home location or manual location display
   bool _loadingLocation = false;
+  
+  // Discover section filters (matching DiscoverScreen)
+  String? _selectedSportFilter; // null = all sports
+  DateTime? _selectedDateFilter; // DateTime for date filter, null = any date
+  int _maxDistance = 100; // miles, default 100 (100 = any distance)
+  bool _nearbyFilterActive = false; // Toggle for nearby filter (when true, uses _maxDistance)
 
   final List<String> _allSportsOptions = const [
     'badminton',
@@ -72,143 +74,44 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
 
     try {
       if (kDebugMode) {
-        print('[HomeTabsScreen] Starting location load - using device GPS with 3s timeout');
+        print('[HomeTabsScreen] Loading location from profile only');
       }
       
-      // Try to get device location with 3-second timeout
-      // If it fails, getCurrentLocationDisplay will use last known ZIP from database
-      final deviceLocation = await LocationService.getCurrentLocationDisplay()
-          .timeout(
-            const Duration(seconds: 3),
-            onTimeout: () {
-              if (kDebugMode) {
-                print('[HomeTabsScreen] Location load timed out after 3 seconds, using fallback');
-              }
-              // Return a placeholder - the service will use last known location
-              return 'Loading...';
-            },
-          );
-      
-      if (kDebugMode) {
-        print('[HomeTabsScreen] Got location: $deviceLocation');
-      }
-      
-      // If still loading, try to get from last known ZIP directly from database
-      // Skip device location attempt since it already timed out
-      if (deviceLocation == 'Loading...' || deviceLocation == 'Location') {
-        if (kDebugMode) {
-          print('[HomeTabsScreen] Device location failed, trying last known ZIP from database');
-        }
+      // Only use profile home location - no device location, no API calls
+      final supa = Supabase.instance.client;
+      final user = supa.auth.currentUser;
+      if (user != null) {
+        final result = await supa
+            .from('users')
+            .select('home_city, home_state, home_zip_code')
+            .eq('id', user.id)
+            .maybeSingle();
         
-        // Try to get last known ZIP directly from database (skip device location)
-        try {
-          final supa = Supabase.instance.client;
-          final user = supa.auth.currentUser;
-          if (user != null) {
-            final result = await supa
-                .from('users')
-                .select('last_known_zip_code')
-                .eq('id', user.id)
-                .maybeSingle();
-            
-            final lastKnownZip = result?['last_known_zip_code'] as String?;
-            if (lastKnownZip != null && lastKnownZip.isNotEmpty) {
-              if (kDebugMode) {
-                print('[HomeTabsScreen] Found last known ZIP in database: $lastKnownZip');
-              }
-              final cityState = await LocationService.getCityStateFromZip(lastKnownZip);
-              if (cityState != null && mounted) {
-                setState(() {
-                  _currentLocation = cityState;
-                  _loadingLocation = false;
-                });
-                return;
-              }
-            } else {
-              if (kDebugMode) {
-                print('[HomeTabsScreen] No last known ZIP in database');
-              }
-            }
-          }
-        } catch (e) {
+        // Use home_city and home_state directly (fastest, no API call)
+        final homeCity = result?['home_city'] as String?;
+        final homeState = result?['home_state'] as String?;
+        if (homeCity != null && homeState != null && 
+            homeCity.isNotEmpty && homeState.isNotEmpty) {
+          final cityState = '$homeCity, $homeState';
           if (kDebugMode) {
-            print('[HomeTabsScreen] Error getting last known ZIP from database: $e');
+            print('[HomeTabsScreen] Using home location from profile: $cityState');
           }
-        }
-        
-        // If database lookup also failed, try cached location
-        try {
-          final prefs = await SharedPreferences.getInstance();
-          final cachedLocation = prefs.getString('cached_location');
-          if (cachedLocation != null && cachedLocation.isNotEmpty && mounted) {
-            if (kDebugMode) {
-              print('[HomeTabsScreen] Using cached location: $cachedLocation');
-            }
+          if (mounted) {
             setState(() {
-              _currentLocation = cachedLocation;
+              _currentLocation = cityState;
               _loadingLocation = false;
             });
-            return;
           }
-          
-          // Also try cached ZIP code
-          final cachedZip = prefs.getString('cached_zip');
-          if (cachedZip != null && cachedZip.isNotEmpty) {
-            if (kDebugMode) {
-              print('[HomeTabsScreen] Found cached ZIP, converting to city/state: $cachedZip');
-            }
-            // Save it to database for future use
-            try {
-              final supa = Supabase.instance.client;
-              final user = supa.auth.currentUser;
-              if (user != null) {
-                await supa.from('users').update({
-                  'last_known_zip_code': cachedZip,
-                  'updated_at': DateTime.now().toUtc().toIso8601String(),
-                }).eq('id', user.id);
-                if (kDebugMode) {
-                  print('[HomeTabsScreen] Saved cached ZIP to database: $cachedZip');
-                }
-              }
-            } catch (e) {
-              if (kDebugMode) {
-                print('[HomeTabsScreen] Error saving cached ZIP to database: $e');
-              }
-            }
-            
-            final cityState = await LocationService.getCityStateFromZip(cachedZip);
-            if (cityState != null && mounted) {
-              setState(() {
-                _currentLocation = cityState;
-                _loadingLocation = false;
-              });
-              return;
-            }
-          }
-        } catch (e) {
-          if (kDebugMode) {
-            print('[HomeTabsScreen] Error getting cached location: $e');
-          }
+          return;
         }
-      }
-      
-      if (mounted) {
-        setState(() {
-          _currentLocation = deviceLocation;
-          _loadingLocation = false;
-        });
-      }
-      
-    } catch (e) {
-      if (kDebugMode) {
-        print('[HomeTabsScreen] Location loading error: $e');
-      }
-      
-      // Fallback: Try to get from last known ZIP
-      try {
-        final lastKnownZip = await LocationService.getCurrentZipCode();
-        if (lastKnownZip != null) {
-          final cityState = await LocationService.getCityStateFromZip(lastKnownZip);
+        
+        // If no city/state, try to convert home_zip_code (only if available)
+        final homeZip = result?['home_zip_code'] as String?;
+        if (homeZip != null && homeZip.isNotEmpty) {
+          if (kDebugMode) {
+            print('[HomeTabsScreen] Converting home ZIP to city/state: $homeZip');
+          }
+          final cityState = await LocationService.getCityStateFromZip(homeZip);
           if (cityState != null && mounted) {
             setState(() {
               _currentLocation = cityState;
@@ -217,21 +120,24 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
             return;
           }
         }
-      } catch (_) {
-        // Ignore fallback errors
       }
       
-      // Wait a bit for profile location to load as fallback
-      int retries = 0;
-      while (_controller.userLocation == null && retries < 10 && mounted) {
-        await Future.delayed(const Duration(milliseconds: 100));
-        retries++;
+      // If no profile location found, show placeholder
+      if (mounted) {
+        setState(() {
+          _currentLocation = 'Set Location';
+          _loadingLocation = false;
+        });
+      }
+      
+    } catch (e) {
+      if (kDebugMode) {
+        print('[HomeTabsScreen] Error loading location from profile: $e');
       }
       
       if (mounted) {
         setState(() {
-          // Fallback to profile location if available
-          _currentLocation = _controller.userLocation ?? 'Location';
+          _currentLocation = 'Set Location';
           _loadingLocation = false;
         });
       }
@@ -249,8 +155,10 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
       await _loadCurrentLocation();
       
       // Reload discovery matches with new location for accurate distance calculation
+      // Force refresh to clear cache since location changed
       if (mounted) {
-        await _controller.loadDiscoveryPickupMatches();
+        _controller.clearDiscoveryCache(); // Clear cache before reloading
+        await _controller.loadDiscoveryPickupMatches(forceRefresh: true);
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(content: Text('Location updated')),
         );
@@ -698,22 +606,37 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
     }
   }
 
-  /// Get ZIP code from current device location
+  /// Get ZIP code from user profile only
   Future<String?> _getDeviceLocationZipForQuickCreate() async {
-    // Use LocationService.getCurrentZipCode() which handles:
-    // 1. Current device location
-    // 2. Manual location setting
-    // 3. Cached ZIP code
-    // 4. Last known ZIP code from database (fallback)
-    final zip = await LocationService.getCurrentZipCode();
-    if (kDebugMode) {
-      if (zip != null) {
-        print('[DEBUG] Using ZIP code for quick game creation: $zip');
-      } else {
-        print('[DEBUG] ⚠️  No ZIP code available for quick game creation');
+    // Only use profile home_zip_code - no device location
+    try {
+      final supa = Supabase.instance.client;
+      final user = supa.auth.currentUser;
+      if (user != null) {
+        final result = await supa
+            .from('users')
+            .select('home_zip_code')
+            .eq('id', user.id)
+            .maybeSingle();
+        
+        final homeZip = result?['home_zip_code'] as String?;
+        if (homeZip != null && homeZip.isNotEmpty) {
+          if (kDebugMode) {
+            print('[DEBUG] Using home ZIP from profile for quick game creation: $homeZip');
+          }
+          return homeZip;
+        }
+      }
+    } catch (e) {
+      if (kDebugMode) {
+        print('[DEBUG] Error getting ZIP from profile: $e');
       }
     }
-    return zip;
+    
+    if (kDebugMode) {
+      print('[DEBUG] ⚠️  No ZIP code available from profile');
+    }
+    return null;
   }
 
   // ---------- CREATE INSTANT MATCH ----------
@@ -857,7 +780,7 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
                   'mode': matchType == 'team' ? 'team_vs_team' : 'pickup',
                   'match_type': matchType == 'team' ? 'team_vs_team' : 'pickup',
                   'sport': selectedSport,
-                  'zip_code': await _getDeviceLocationZipForQuickCreate(), // Use device location
+                  'zip_code': await _getDeviceLocationZipForQuickCreate(), // Use profile home location or fallback
                   'radius_miles': radiusMiles.toInt(),
                   'proficiency_level': proficiencyLevel,
                   'is_public': isPublic,
@@ -928,7 +851,10 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
                   const SnackBar(content: Text('Instant match request created')),
                 );
 
+                // Clear discovery cache and reload to show new game (for other users)
+                _controller.clearDiscoveryCache();
                 await _controller.loadAdminTeamsAndInvites();
+                await _controller.loadDiscoveryPickupMatches(forceRefresh: true);
               } catch (e) {
                 setSheetState(() {
                   saving = false;
@@ -1896,6 +1822,16 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
 
   Widget _buildHomeTab() {
     return Scaffold(
+      floatingActionButton: FloatingActionButton.extended(
+        onPressed: _showCreateInstantMatchSheet,
+        backgroundColor: const Color(0xFF14919B), // Teal color matching app theme
+        icon: const Icon(Icons.add_circle_outline, color: Colors.white),
+        label: const Text(
+          'Create Game',
+          style: TextStyle(color: Colors.white, fontWeight: FontWeight.w600),
+        ),
+      ),
+      floatingActionButtonLocation: FloatingActionButtonLocation.endFloat,
       body: RefreshIndicator(
         onRefresh: () async {
           await _controller.loadUserBasics();
@@ -1907,58 +1843,38 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
           await _controller.loadMyPendingAvailabilityMatches();
           await _controller.loadPendingIndividualGames();
         },
-        child: ListView(
-          physics: const AlwaysScrollableScrollPhysics(),
-          padding: const EdgeInsets.all(16),
-          children: [
-            // Dark top section with greeting and quick actions
-            Container(
-              color: const Color(0xFF0D7377), // Dark teal background (logo color)
-              padding: const EdgeInsets.all(16),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  _errorBanner(),
-                  if (_controller.lastError != null) const SizedBox(height: 12),
-                  
-                  // Greeting Section
-                  _buildGreetingSection(),
-                  const SizedBox(height: 20),
-                  
-                  // My Active Plans (Join/Create Game)
-                  _buildMyActivePlansSection(),
-                ],
+        child: Container(
+          color: const Color(0xFF0D7377), // Dark teal background for entire screen
+          child: Column(
+            children: [
+              // Dark top section with greeting and smart cards
+              Container(
+                color: const Color(0xFF0D7377), // Dark teal background (logo color)
+                padding: const EdgeInsets.all(16),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    _errorBanner(),
+                    if (_controller.lastError != null) const SizedBox(height: 12),
+                    
+                    // Add top padding for better visibility on phone
+                    const SizedBox(height: 16),
+                    
+                    // Greeting Section
+                    _buildGreetingSection(),
+                    const SizedBox(height: 20),
+                    
+                    // Smart Cards (replaces Join/Create Game section)
+                    _buildSmartCardsInDarkSection(),
+                  ],
+                ),
               ),
-            ),
-            const SizedBox(height: 24),
-            
-            // [ Smart Cards ] Section
-            _buildSmartCardsSection(),
-            const SizedBox(height: 24),
-            
-            // [ Sponsored / Monetization ] Section
-            _buildSponsoredSection(),
-            const SizedBox(height: 24),
-            
-            // [ My Games Preview ] Section
-            _buildMyGamesPreviewSection(),
-            const SizedBox(height: 24),
-            
-            // [ Pending Admin Approval ] Section (expanded)
-            if (_pendingAdminExpanded) ...[
-              _buildPendingAdminApprovalSection(),
-              const SizedBox(height: 24),
+              // [ Trending Games ] Section - Chip/card extending to bottom with teal side borders
+              Expanded(
+                child: _buildDiscoverSectionContent(),
+              ),
             ],
-            
-            // [ Pending Approval ] Section (expanded)
-            if (_pendingConfirmationExpanded) ...[
-              _buildPendingConfirmationSection(),
-              const SizedBox(height: 24),
-            ],
-            
-            // Public games should only appear in Discover tab, not in pending sections
-            // Removed Public Pending Approval section
-          ],
+          ),
         ),
       ),
     );
@@ -1982,6 +1898,7 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
     }
     
     return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         // Profile Picture
         GestureDetector(
@@ -2019,65 +1936,50 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
                   fontWeight: FontWeight.w400,
                 ),
               ),
-              const SizedBox(height: 2),
+              const SizedBox(height: 4),
               
-              // User Name
-              Text(
-                name,
-                style: const TextStyle(
-                  fontSize: 20,
-                  fontWeight: FontWeight.w700,
-                  color: Colors.white,
-                ),
-              ),
-              const SizedBox(height: 2),
-              
-              // Location (tappable)
-              InkWell(
-                onTap: _showLocationPicker,
-                borderRadius: BorderRadius.circular(4),
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    const Icon(
-                      Icons.location_on,
-                      size: 14,
-                      color: Colors.white70,
-                    ),
-                    const SizedBox(width: 4),
-                    Text(
-                      location,
+              // User Name and Location in a Row
+              Row(
+                children: [
+                  Expanded(
+                    child: Text(
+                      name,
                       style: const TextStyle(
-                        fontSize: 13,
-                        color: Colors.white70,
-                        fontWeight: FontWeight.w400,
+                        fontSize: 20,
+                        fontWeight: FontWeight.w700,
+                        color: Colors.white,
                       ),
                     ),
-                  ],
-                ),
+                  ),
+                  const SizedBox(width: 8),
+                  // Location (tappable) - moved to right side
+                  InkWell(
+                    onTap: _showLocationPicker,
+                    borderRadius: BorderRadius.circular(4),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        const Icon(
+                          Icons.location_on,
+                          size: 14,
+                          color: Colors.white70,
+                        ),
+                        const SizedBox(width: 4),
+                        Text(
+                          location,
+                          style: const TextStyle(
+                            fontSize: 13,
+                            color: Colors.white70,
+                            fontWeight: FontWeight.w400,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
               ),
             ],
           ),
-        ),
-        
-        // Action Icons on the right
-        IconButton(
-          icon: const Icon(Icons.search, size: 24),
-          color: Colors.white,
-          onPressed: () {
-            _showSearchDialog();
-          },
-        ),
-        IconButton(
-          icon: const Icon(Icons.notifications_outlined, size: 24),
-          color: Colors.white,
-          onPressed: () {
-            ScaffoldMessenger.of(context).showSnackBar(
-              const SnackBar(
-                content: Text('Notifications coming soon!'),
-              ),
-            );
-          },
         ),
       ],
     );
@@ -2120,180 +2022,398 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
     );
   }
   
-  // [ My Active Plans ] Section - Combined Join/Create Game card
-  Widget _buildMyActivePlansSection() {
+  // [ Smart Cards ] Section - Replaces Join/Create Game section in dark area
+  Widget _buildSmartCardsInDarkSection() {
+    final cards = _buildNewSmartCards();
+    
+    if (cards.isEmpty) {
+      return const SizedBox.shrink();
+    }
+    
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        const Text(
-          'My Quick Actions',
-          style: TextStyle(
-            fontSize: 22,
-            fontWeight: FontWeight.w700,
-            color: Colors.white,
-          ),
-        ),
-        const SizedBox(height: 16),
-        
-        // Combined card with dark background
-        Container(
-          decoration: BoxDecoration(
-            color: const Color(0xFF14919B), // Medium teal card (logo inspired)
-            borderRadius: BorderRadius.circular(16),
-          ),
-          padding: const EdgeInsets.all(16),
-          child: Column(
-            children: [
-              // Join Game row
-              InkWell(
+        // Show up to 3 cards with reduced spacing
+        ...cards.take(3).map((card) => Padding(
+          padding: const EdgeInsets.only(bottom: 8),
+          child: card,
+        )),
+      ],
+    );
+  }
+
+  List<Widget> _buildNewSmartCards() {
+    final cards = <Widget>[];
+    
+    // Priority 1: Profile notifications (team/friends group additions) - highest priority
+    final profileNotifications = _controller.profileNotifications;
+    if (profileNotifications.isNotEmpty) {
+      cards.add(_buildProfileNotificationsCard(profileNotifications));
+    }
+    
+    // Priority 2: Team/Group invitations (action required)
+    // Note: Team/group invitations might be checked separately if there's a pending status
+    // For now, this is a placeholder - you may need to query for pending team/group memberships
+    // Uncomment and implement if you have a way to detect pending team/group invites:
+    /*
+    final pendingTeamInvites = 0; // TODO: Query for pending team invitations
+    final pendingGroupInvites = 0; // TODO: Query for pending friends group invitations
+    if (pendingTeamInvites > 0 || pendingGroupInvites > 0) {
+      cards.add(_buildSmartCard(
+        message: 'You have been added to ${pendingTeamInvites + pendingGroupInvites > 1 ? 'groups/teams' : 'a group/team'}, please accept.',
                 onTap: () {
-                  _controller.selectedIndex = 1;
-                  setState(() {});
-                },
-                borderRadius: BorderRadius.circular(12),
-                child: Container(
-                  padding: const EdgeInsets.all(16),
+          Navigator.of(context).push(
+            MaterialPageRoute(builder: (_) => const TeamsScreen()),
+          );
+        },
+        icon: Icons.group_add,
+        color: Colors.red,
+      ));
+    }
+    */
+    
+    // Priority 3: Games awaiting action (pending admin approval, pending invites)
+    final pendingAdminCount = _controller.pendingTeamMatchesForAdmin.length;
+    final pendingAvailabilityCount = _controller.pendingAvailabilityTeamMatches.length;
+    final pendingIndividualCount = _controller.pendingIndividualGames.length;
+    final totalPendingAction = pendingAdminCount + pendingAvailabilityCount + pendingIndividualCount;
+    
+    if (totalPendingAction > 0) {
+      cards.add(_buildSmartCard(
+        message: 'You have $totalPendingAction ${totalPendingAction == 1 ? 'game' : 'games'} awaiting your action.',
+        onTap: () {
+          _showPendingActionDialog();
+        },
+        icon: Icons.notifications_active,
+        color: Colors.orange,
+      ));
+    }
+    
+    // Priority 4: Confirmed games
+    final confirmedCount = _controller.confirmedTeamMatches.length;
+    if (confirmedCount > 0) {
+      cards.add(_buildSmartCard(
+        message: confirmedCount == 1
+            ? 'You have 1 confirmed game scheduled and ready to play.'
+            : 'You have $confirmedCount confirmed games scheduled and ready to play.',
+        onTap: () {
+          setState(() => _controller.selectedIndex = 1); // My Games tab (index 1 after Discover was removed)
+        },
+        icon: Icons.event,
+        color: Colors.green,
+      ));
+    }
+    
+    // Priority 5: Nearby games (discovery)
+    final nearbyGames = _controller.discoveryPickupMatches.length;
+    if (nearbyGames > 0 && _currentLocation != null) {
+      final locationName = _currentLocation!.split(',').first; // Get city name
+      cards.add(_buildSmartCard(
+        message: '$nearbyGames ${nearbyGames == 1 ? 'game' : 'games'} near $locationName this week',
+        onTap: () {
+          setState(() => _controller.selectedIndex = 1); // Discover tab
+        },
+        icon: Icons.explore,
+        color: Colors.purple,
+      ));
+    }
+    
+    // Priority 6: Add sports (if user has few or no sports)
+    final userSportsCount = _controller.userSports.length;
+    if (userSportsCount < 2) {
+      cards.add(_buildSmartCard(
+        message: 'Add your favorite sports to get better matches',
+        onTap: () {
+          Navigator.of(context).push(
+            MaterialPageRoute(builder: (_) => const UserProfileScreen()),
+          );
+        },
+        icon: Icons.add_circle_outline,
+        color: Colors.blue,
+      ));
+    }
+    
+    // Priority 7: No games yet
+    if (confirmedCount == 0 && totalPendingAction == 0) {
+      cards.add(_buildSmartCard(
+        message: 'No games yet — create one in under 60 seconds',
+        onTap: _showCreateInstantMatchSheet,
+        icon: Icons.add_circle_outline,
+        color: Colors.teal,
+      ));
+    }
+    
+    return cards;
+  }
+
+  Widget _buildProfileNotificationsCard(List<Map<String, dynamic>> notifications) {
+    return Container(
+      height: 70,
                   decoration: BoxDecoration(
-                    color: const Color(0xFF1BA8B5), // Light teal for items (logo inspired)
+        color: const Color(0xFF1BA8B5), // Light teal matching the design
                     borderRadius: BorderRadius.circular(12),
                   ),
+      child: PageView.builder(
+        itemCount: notifications.length,
+        itemBuilder: (context, index) {
+          final notification = notifications[index];
+          final type = notification['type'] as String? ?? '';
+          final name = notification['name'] as String? ?? '';
+          
+          String message;
+          IconData icon;
+          Color iconColor;
+          
+          if (type == 'friends_group') {
+            final sport = notification['sport'] as String? ?? '';
+            if (sport.isNotEmpty) {
+              message = 'You have been added to $name, you can maintain and organize $sport games among your group. This is a private group, only people in the group can see.';
+            } else {
+              message = 'You have been added to $name, you can maintain and organize games among your group. This is a private group, only people in the group can see.';
+            }
+            icon = Icons.group;
+            iconColor = Colors.purple;
+          } else {
+            // team
+            message = 'You have been added to $name, you can participate in games team is playing.';
+            icon = Icons.group_work;
+            iconColor = Colors.blue;
+          }
+          
+          return InkWell(
+            onTap: () {
+              // Navigate to teams screen
+              Navigator.of(context).push(
+                MaterialPageRoute(builder: (_) => const TeamsScreen()),
+              );
+            },
+            child: Padding(
+              padding: const EdgeInsets.all(12),
                   child: Row(
                     children: [
                       // Icon
                       Container(
-                        width: 50,
-                        height: 50,
+                    width: 40,
+                    height: 40,
                         decoration: BoxDecoration(
-                          color: Colors.green.shade700,
-                          borderRadius: BorderRadius.circular(12),
-                        ),
-                        child: const Icon(
-                          Icons.sports,
+                      color: iconColor.withOpacity(0.2),
+                      borderRadius: BorderRadius.circular(10),
+                    ),
+                    child: Icon(icon, color: Colors.white, size: 20),
+                  ),
+                  const SizedBox(width: 12),
+                  
+                  // Message
+                  Expanded(
+                    child: Text(
+                      message,
+                      style: const TextStyle(
+                        fontSize: 13,
                           color: Colors.white,
-                          size: 28,
-                        ),
+                        fontWeight: FontWeight.w500,
                       ),
-                      const SizedBox(width: 16),
-                      
-                      // Text
-                      const Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
+                  
+                  // Page indicator
+                  if (notifications.length > 1) ...[
+                    const SizedBox(width: 6),
+                    Column(
+                      mainAxisAlignment: MainAxisAlignment.center,
                           children: [
                             Text(
-                              'JOIN GAME',
-                              style: TextStyle(
-                                fontSize: 12,
+                          '${index + 1}/${notifications.length}',
+                          style: const TextStyle(
+                            fontSize: 10,
                                 color: Colors.white70,
-                                fontWeight: FontWeight.w600,
-                                letterSpacing: 1.2,
+                          ),
+                        ),
+                        const SizedBox(height: 2),
+                        Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: List.generate(
+                            notifications.length,
+                            (i) => Container(
+                              width: 5,
+                              height: 5,
+                              margin: const EdgeInsets.symmetric(horizontal: 1.5),
+                              decoration: BoxDecoration(
+                                shape: BoxShape.circle,
+                                color: i == index
+                                    ? Colors.white
+                                    : Colors.white38,
                               ),
                             ),
-                            SizedBox(height: 4),
-                            Text(
-                              'Discover & Join Games',
-                              style: TextStyle(
-                                fontSize: 16,
-                                color: Colors.white,
-                                fontWeight: FontWeight.w700,
-                              ),
-                            ),
-                            SizedBox(height: 4),
-                            Text(
-                              'Find games near you',
-                              style: TextStyle(
-                                fontSize: 13,
-                                color: Colors.white60,
                               ),
                             ),
                           ],
                         ),
-                      ),
+                  ],
                       
                       // Arrow
+                  const SizedBox(width: 6),
                       const Icon(
-                        Icons.arrow_forward_ios,
-                        color: Colors.white54,
-                        size: 20,
+                    Icons.chevron_right,
+                    color: Colors.white70,
+                    size: 18,
                       ),
                     ],
                   ),
                 ),
-              ),
-              
-              const SizedBox(height: 12),
-              
-              // Create Game row
-              InkWell(
-                onTap: () {
-                  _showCreateInstantMatchSheet();
-                },
+          );
+        },
+      ),
+    );
+  }
+
+  Widget _buildSmartCard({
+    required String message,
+    required VoidCallback onTap,
+    required IconData icon,
+    required Color color,
+  }) {
+    return InkWell(
+      onTap: onTap,
                 borderRadius: BorderRadius.circular(12),
                 child: Container(
-                  padding: const EdgeInsets.all(16),
+        padding: const EdgeInsets.all(12),
                   decoration: BoxDecoration(
-                    color: const Color(0xFF1BA8B5), // Light teal for items (logo inspired)
+          color: const Color(0xFF1BA8B5), // Light teal matching the design
                     borderRadius: BorderRadius.circular(12),
                   ),
                   child: Row(
                     children: [
                       // Icon
                       Container(
-                        width: 50,
-                        height: 50,
+              width: 40,
+              height: 40,
                         decoration: BoxDecoration(
-                          color: Colors.blue.shade700,
-                          borderRadius: BorderRadius.circular(12),
-                        ),
-                        child: const Icon(
-                          Icons.add_circle_outline,
+                color: color.withOpacity(0.2),
+                borderRadius: BorderRadius.circular(10),
+              ),
+              child: Icon(icon, color: Colors.white, size: 20),
+            ),
+            const SizedBox(width: 12),
+            
+            // Message
+            Expanded(
+              child: Text(
+                message,
+                style: const TextStyle(
+                  fontSize: 13,
                           color: Colors.white,
-                          size: 28,
+                  fontWeight: FontWeight.w500,
+                ),
+              ),
+            ),
+            
+            // Arrow
+            const Icon(
+              Icons.chevron_right,
+              color: Colors.white70,
+              size: 18,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  // Show dialog with all pending admin/approval items
+  Future<void> _showPendingActionDialog() async {
+    // Reload all pending data to ensure it's fresh
+    await _controller.loadPendingGamesForAdmin();
+    await _controller.loadMyPendingAvailabilityMatches();
+    await _controller.loadPendingIndividualGames();
+    await _controller.loadAdminTeamsAndInvites();
+    await _controller.loadFriendsOnlyIndividualGames();
+    
+    final pendingAdminMatches = _controller.pendingTeamMatchesForAdmin;
+    final pendingAvailabilityGames = _controller.pendingAvailabilityTeamMatches;
+    final pendingIndividualGames = _controller.pendingIndividualGames;
+    final pendingInvites = _controller.teamVsTeamInvites
+        .where((inv) => inv['status'] == 'pending')
+        .toList();
+    final friendsOnlyGames = _controller.friendsOnlyIndividualGames;
+
+    final hasAnyPending = pendingAdminMatches.isNotEmpty ||
+        pendingAvailabilityGames.isNotEmpty ||
+        pendingIndividualGames.isNotEmpty ||
+        pendingInvites.isNotEmpty ||
+        friendsOnlyGames.isNotEmpty;
+
+    if (!hasAnyPending) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('No pending actions')),
+      );
+      return;
+    }
+
+    if (!mounted) return;
+    await showDialog(
+      context: context,
+      builder: (dialogContext) => StatefulBuilder(
+        builder: (context, setDialogState) => Dialog(
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+          child: Container(
+            constraints: const BoxConstraints(maxWidth: 500, maxHeight: 700),
+                        child: Column(
+              mainAxisSize: MainAxisSize.min,
+                          children: [
+                // Header
+                Container(
+                  padding: const EdgeInsets.all(16),
+                  decoration: BoxDecoration(
+                    color: Colors.orange.shade50,
+                    borderRadius: const BorderRadius.only(
+                      topLeft: Radius.circular(16),
+                      topRight: Radius.circular(16),
+                    ),
+                  ),
+                  child: Row(
+                    children: [
+                      Icon(Icons.notifications_active, color: Colors.orange.shade700),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: Text(
+                          'Games Awaiting Your Action',
+                              style: TextStyle(
+                            fontSize: 18,
+                            fontWeight: FontWeight.bold,
+                            color: Colors.orange.shade900,
+                          ),
                         ),
                       ),
-                      const SizedBox(width: 16),
-                      
-                      // Text
-                      const Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Text(
-                              'CREATE GAME',
-                              style: TextStyle(
-                                fontSize: 12,
-                                color: Colors.white70,
-                                fontWeight: FontWeight.w600,
-                                letterSpacing: 1.2,
-                              ),
-                            ),
-                            SizedBox(height: 4),
-                            Text(
-                              'Start a New Game',
-                              style: TextStyle(
-                                fontSize: 16,
-                                color: Colors.white,
-                                fontWeight: FontWeight.w700,
-                              ),
-                            ),
-                            SizedBox(height: 4),
-                            Text(
-                              'Organize your match',
-                              style: TextStyle(
-                                fontSize: 13,
-                                color: Colors.white60,
-                              ),
+                      IconButton(
+                        icon: const Icon(Icons.close),
+                        onPressed: () {
+                          Navigator.of(context).pop();
+                          // Refresh data after closing dialog
+                          _controller.loadPendingGamesForAdmin();
+                          _controller.loadMyPendingAvailabilityMatches();
+                          _controller.loadPendingIndividualGames();
+                          _controller.loadAdminTeamsAndInvites();
+                          setState(() {});
+                        },
                             ),
                           ],
                         ),
                       ),
-                      
-                      // Arrow
-                      const Icon(
-                        Icons.arrow_forward_ios,
-                        color: Colors.white54,
-                        size: 20,
-                      ),
+                // Content - Use exact same sections as My Games Preview
+                Flexible(
+                  child: SingleChildScrollView(
+                    padding: const EdgeInsets.all(16),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        // Use the exact same pending admin approval section
+                        _buildPendingAdminApprovalSection(),
+                        const SizedBox(height: 24),
+                        // Use the exact same pending confirmation section
+                        _buildPendingConfirmationSection(),
                     ],
                   ),
                 ),
@@ -2301,9 +2421,11 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
             ],
           ),
         ),
-      ],
+        ),
+      ),
     );
   }
+
   
   // [ Primary CTA ] Section (DEPRECATED - now using My Active Plans)
   Widget _buildPrimaryCTASection() {
@@ -2673,6 +2795,30 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
     return '🏃';
   }
   
+  // Calculate distance from match data (for Discover section)
+  String _calculateDistanceHome(Map<String, dynamic> match) {
+    final distance = match['distance_miles'] as double?;
+    if (distance == null) {
+      return 'Distance unknown';
+    }
+    if (distance < 1) {
+      return '${(distance * 5280).round()} ft';
+    } else if (distance < 10) {
+      return '${distance.toStringAsFixed(1)} mi';
+    } else {
+      return '${distance.round()} mi';
+    }
+  }
+  
+  // Format date for filter display
+  String _formatDateHome(DateTime date) {
+    final now = DateTime.now();
+    if (date.year == now.year && date.month == now.month && date.day == now.day) {
+      return 'Today';
+    }
+    return '${date.month}/${date.day}/${date.year}';
+  }
+  
   // [ Sponsored / Monetization ] Section
   Widget _buildSponsoredSection() {
     return Column(
@@ -2987,7 +3133,7 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
     );
   }
   
-  Widget _buildPendingIndividualGameCard(Map<String, dynamic> game) {
+  Widget _buildPendingIndividualGameCard(Map<String, dynamic> game, {VoidCallback? onActionComplete}) {
     final reqId = game['request_id'] as String;
     final sport = game['sport'] as String? ?? '';
     final startDt = game['start_time'] as DateTime?;
@@ -3108,7 +3254,9 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
                 const SizedBox(width: 12),
                 Expanded(
                   child: OutlinedButton.icon(
-                    onPressed: () => _declineIndividualGameAttendance(reqId),
+                    onPressed: () async {
+                      await _declineIndividualGameAttendance(reqId, closeDialog: true);
+                    },
                     icon: const Icon(Icons.cancel, color: Colors.red),
                     label: const Text('Not Available'),
                     style: OutlinedButton.styleFrom(
@@ -3235,7 +3383,15 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
                                 onPressed: () async {
                                   try {
                       await _controller.denyInvite(invite);
+                      // Reload all pending data
+                      await _controller.loadAdminTeamsAndInvites();
+                      await _controller.loadPendingGamesForAdmin();
                       if (mounted) {
+                        setState(() {}); // Refresh UI
+                        // Close dialog if open
+                        if (Navigator.canPop(context)) {
+                          Navigator.of(context).pop();
+                        }
                         ScaffoldMessenger.of(context).showSnackBar(
                           const SnackBar(content: Text('Invite denied')),
                         );
@@ -3255,7 +3411,16 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
                   onPressed: () async {
                     try {
                       await _controller.approveInvite(invite);
+                      // Reload all pending data
+                      await _controller.loadAdminTeamsAndInvites();
+                      await _controller.loadPendingGamesForAdmin();
+                      await _controller.loadConfirmedTeamMatches();
                       if (mounted) {
+                        setState(() {}); // Refresh UI
+                        // Close dialog if open
+                        if (Navigator.canPop(context)) {
+                          Navigator.of(context).pop();
+                        }
                         ScaffoldMessenger.of(context).showSnackBar(
                           const SnackBar(content: Text('Invite approved')),
                         );
@@ -3466,7 +3631,15 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
                         requestId: requestId,
                         myAdminTeamId: targetTeamIdForDeny,
                       );
+                      // Reload all pending data
+                      await _controller.loadPendingGamesForAdmin();
+                      await _controller.loadAdminTeamsAndInvites();
                       if (mounted) {
+                        setState(() {}); // Refresh UI
+                        // Close dialog if open
+                        if (Navigator.canPop(context)) {
+                          Navigator.of(context).pop();
+                        }
                         ScaffoldMessenger.of(context).showSnackBar(
                           const SnackBar(content: Text('Match declined')),
                         );
@@ -3517,8 +3690,15 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
                       );
                       // Reload pending games to refresh the list
                       await _controller.loadPendingGamesForAdmin();
+                      // Reload all pending data
+                      await _controller.loadAdminTeamsAndInvites();
+                      await _controller.loadMyPendingAvailabilityMatches();
                       if (mounted) {
                         setState(() {}); // Refresh UI
+                        // Close dialog if open
+                        if (Navigator.canPop(context)) {
+                          Navigator.of(context).pop();
+                        }
                                     ScaffoldMessenger.of(context).showSnackBar(
                           const SnackBar(content: Text('Match request accepted')),
                                     );
@@ -3824,6 +4004,7 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
                       requestId: requestId,
                       teamId: teamId,
                       status: 'declined',
+                      closeDialog: true,
                     );
                   },
                   child: const Text('Not available'),
@@ -3839,6 +4020,7 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
                       requestId: requestId,
                       teamId: teamId,
                       status: 'accepted',
+                      closeDialog: true,
                     );
                   },
                   child: const Text('Available'),
@@ -3855,6 +4037,7 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
     required String requestId,
     required String teamId,
     required String status,
+    bool closeDialog = false,
   }) async {
     try {
       await _controller.setMyAttendance(
@@ -3862,10 +4045,15 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
         teamId: teamId,
         status: status,
       );
-      // setMyAttendance already refreshes confirmed matches and pending availability
+      // Reload pending availability games
+      await _controller.loadMyPendingAvailabilityMatches();
       // Just refresh the UI
       setState(() {});
       if (mounted) {
+        // Close dialog if requested
+        if (closeDialog && Navigator.canPop(context)) {
+          Navigator.of(context).pop();
+        }
                                     ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Text(
@@ -3908,310 +4096,6 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
     }
   }
 
-  // [ My Games Preview ] Section
-  Widget _buildMyGamesPreviewSection() {
-    final confirmedCount = _controller.confirmedTeamMatches.length;
-    
-    // Calculate pending counts by type:
-    // 1. Pending Admin Approval: Games where user is admin and needs to approve/deny
-    final existingPendingInvites = _controller.teamVsTeamInvites
-        .where((inv) => inv['status'] == 'pending')
-        .length;
-    final pendingAdminMatches = _controller.pendingTeamMatchesForAdmin.length;
-    final friendsOnlyGames = _controller.friendsOnlyIndividualGames.length;
-    final pendingAdminApprovalCount = existingPendingInvites + pendingAdminMatches + friendsOnlyGames;
-    
-    // 2. Pending Approval: Games where user needs to give availability (team + individual)
-    final pendingConfirmationCount = _controller.pendingAvailabilityTeamMatches.length + 
-                                     _controller.pendingIndividualGames.length;
-    
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        const Text(
-          'My Games',
-          style: TextStyle(
-            fontSize: 22,
-            fontWeight: FontWeight.w700,
-            color: Colors.white,
-          ),
-        ),
-        const SizedBox(height: 16),
-        
-        // Combined card with dark background (like My Quick Actions)
-        Container(
-          decoration: BoxDecoration(
-            color: const Color(0xFF14919B), // Medium teal card (logo inspired)
-            borderRadius: BorderRadius.circular(16),
-          ),
-          padding: const EdgeInsets.all(16),
-          child: Column(
-            children: [
-              // Confirmed Games
-              InkWell(
-                onTap: () {
-                  _controller.selectedIndex = 2; // Navigate to My Games tab
-                  setState(() {});
-                },
-                borderRadius: BorderRadius.circular(12),
-                child: Container(
-                  padding: const EdgeInsets.all(16),
-                  decoration: BoxDecoration(
-                    color: const Color(0xFF1BA8B5), // Light teal for items (logo inspired)
-                    borderRadius: BorderRadius.circular(12),
-                  ),
-                  child: Row(
-                    children: [
-                      // Icon
-                      Container(
-                        width: 50,
-                        height: 50,
-                        decoration: BoxDecoration(
-                          color: Colors.green.shade700,
-                          borderRadius: BorderRadius.circular(12),
-                        ),
-                        child: const Icon(
-                          Icons.check_circle,
-                          color: Colors.white,
-                          size: 28,
-                        ),
-                      ),
-                      const SizedBox(width: 16),
-                      
-                      // Text
-                            Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            const Text(
-                              'CONFIRMED',
-                              style: TextStyle(
-                                fontSize: 12,
-                                color: Colors.white70,
-                                fontWeight: FontWeight.w600,
-                                letterSpacing: 1.2,
-                              ),
-                            ),
-                            const SizedBox(height: 4),
-                            Text(
-                              '$confirmedCount Games',
-                              style: const TextStyle(
-                                fontSize: 16,
-                                color: Colors.white,
-                                fontWeight: FontWeight.w700,
-                              ),
-                            ),
-                            const SizedBox(height: 4),
-                            const Text(
-                              'Tap to view all',
-                              style: TextStyle(
-                                fontSize: 13,
-                                color: Colors.white60,
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                      
-                      // Arrow
-                      const Icon(
-                        Icons.arrow_forward_ios,
-                        color: Colors.white54,
-                        size: 20,
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-              
-              const SizedBox(height: 12),
-              
-              // Pending Admin Approval
-              InkWell(
-                onTap: pendingAdminApprovalCount > 0
-                    ? () {
-                        setState(() {
-                          _pendingAdminExpanded = !_pendingAdminExpanded;
-                        });
-                      }
-                    : null,
-                borderRadius: BorderRadius.circular(12),
-                child: Container(
-                  padding: const EdgeInsets.all(16),
-                  decoration: BoxDecoration(
-                    color: const Color(0xFF1BA8B5), // Light teal for items (logo inspired)
-                    borderRadius: BorderRadius.circular(12),
-                  ),
-                  child: Row(
-                    children: [
-                      // Icon
-                      Container(
-                        width: 50,
-                        height: 50,
-                        decoration: BoxDecoration(
-                          color: Colors.blue.shade700,
-                          borderRadius: BorderRadius.circular(12),
-                        ),
-                        child: const Icon(
-                          Icons.admin_panel_settings,
-                          color: Colors.white,
-                          size: 28,
-                        ),
-                      ),
-                      const SizedBox(width: 16),
-                      
-                      // Text
-                      Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            const Text(
-                              'PENDING ADMIN APPROVAL',
-                              style: TextStyle(
-                                fontSize: 12,
-                                color: Colors.white70,
-                                fontWeight: FontWeight.w600,
-                                letterSpacing: 1.2,
-                              ),
-                            ),
-                            const SizedBox(height: 4),
-                            Text(
-                              '$pendingAdminApprovalCount Requests',
-                              style: const TextStyle(
-                                fontSize: 16,
-                                color: Colors.white,
-                                fontWeight: FontWeight.w700,
-                              ),
-                            ),
-                            const SizedBox(height: 4),
-                            Text(
-                              pendingAdminApprovalCount > 0
-                                  ? 'Tap to review'
-                                  : 'No pending approvals',
-                              style: const TextStyle(
-                                fontSize: 13,
-                                color: Colors.white60,
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                      
-                      // Arrow or badge
-                      if (pendingAdminApprovalCount > 0)
-                        const Icon(
-                          Icons.arrow_forward_ios,
-                          color: Colors.white54,
-                          size: 20,
-                        )
-                      else
-                        const Icon(
-                          Icons.check,
-                          color: Colors.white38,
-                          size: 20,
-                        ),
-                    ],
-                  ),
-                ),
-              ),
-              
-              const SizedBox(height: 12),
-              
-              // Pending Approval
-              InkWell(
-                onTap: pendingConfirmationCount > 0
-                    ? () {
-                        setState(() {
-                          _pendingConfirmationExpanded = !_pendingConfirmationExpanded;
-                        });
-                      }
-                    : null,
-                borderRadius: BorderRadius.circular(12),
-                child: Container(
-                  padding: const EdgeInsets.all(16),
-                  decoration: BoxDecoration(
-                    color: const Color(0xFF1BA8B5), // Light teal for items (logo inspired)
-                    borderRadius: BorderRadius.circular(12),
-                  ),
-                  child: Row(
-                    children: [
-                      // Icon
-                      Container(
-                        width: 50,
-                        height: 50,
-                        decoration: BoxDecoration(
-                          color: Colors.orange.shade700,
-                          borderRadius: BorderRadius.circular(12),
-                        ),
-                        child: const Icon(
-                          Icons.event_available,
-                          color: Colors.white,
-                          size: 28,
-                        ),
-                      ),
-                      const SizedBox(width: 16),
-                      
-                      // Text
-                      Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            const Text(
-                              'PENDING APPROVAL',
-                              style: TextStyle(
-                                fontSize: 12,
-                                color: Colors.white70,
-                                fontWeight: FontWeight.w600,
-                                letterSpacing: 1.2,
-                              ),
-                            ),
-                            const SizedBox(height: 4),
-                            Text(
-                              '$pendingConfirmationCount Games',
-                              style: const TextStyle(
-                                fontSize: 16,
-                                color: Colors.white,
-                                fontWeight: FontWeight.w700,
-                              ),
-                            ),
-                            const SizedBox(height: 4),
-                            Text(
-                              pendingConfirmationCount > 0
-                                  ? 'Tap to respond'
-                                  : 'All caught up',
-                              style: const TextStyle(
-                                fontSize: 13,
-                                color: Colors.white60,
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                      
-                      // Arrow or badge
-                      if (pendingConfirmationCount > 0)
-                        const Icon(
-                          Icons.arrow_forward_ios,
-                          color: Colors.white54,
-                          size: 20,
-                        )
-                      else
-                        const Icon(
-                          Icons.check,
-                          color: Colors.white38,
-                          size: 20,
-                        ),
-                    ],
-                  ),
-                ),
-              ),
-            ],
-          ),
-        ),
-      ],
-    );
-  }
-  
   // 1. Create Instant Match Section
   Widget _buildCreateInstantMatchSection() {
     return Padding(
@@ -4266,9 +4150,9 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 16),
       child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          const Text(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const Text(
             '2. Team vs Team Matches',
             style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
           ),
@@ -4301,57 +4185,1258 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
     );
   }
   
-  // 3. Matches (Discovery / Pickup) Section
-  Widget _buildDiscoveryPickupMatchesSection() {
-    if (!_initDone) {
-      return const Padding(
-        padding: EdgeInsets.symmetric(horizontal: 16),
-        child: Center(child: CircularProgressIndicator()),
+  // Discover Section Content - Chip/card extending to bottom with teal side borders
+  Widget _buildDiscoverSectionContent() {
+    if (!_initDone || _controller.loadingDiscoveryMatches) {
+      return Container(
+        margin: const EdgeInsets.only(top: 16), // Space from dark section above
+        decoration: BoxDecoration(
+          color: Colors.white, // White chip/card background
+          borderRadius: const BorderRadius.only(
+            topLeft: Radius.circular(24),
+            topRight: Radius.circular(24),
+          ),
+          border: Border(
+            left: BorderSide(color: const Color(0xFF14919B), width: 2), // Teal green side borders (little border)
+            right: BorderSide(color: const Color(0xFF14919B), width: 2),
+          ),
+        ),
+        child: const Center(child: CircularProgressIndicator()),
       );
     }
     
-    if (_controller.loadingDiscoveryMatches) {
-      return const Padding(
-        padding: EdgeInsets.symmetric(horizontal: 16),
-        child: Center(child: CircularProgressIndicator()),
-      );
-    }
+    final filteredMatches = _getFilteredMatchesHome();
     
-    return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 16),
+    return Container(
+      margin: const EdgeInsets.only(top: 16), // Space from dark section above
+      decoration: BoxDecoration(
+        color: Colors.white, // White chip/card background
+        borderRadius: const BorderRadius.only(
+          topLeft: Radius.circular(24), // Curved top corners
+          topRight: Radius.circular(24),
+        ),
+        border: Border(
+          left: BorderSide(color: const Color(0xFF14919B), width: 2), // Teal green side borders (little border)
+          right: BorderSide(color: const Color(0xFF14919B), width: 2),
+        ),
+      ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          const Text(
-            '3. Matches (Discovery / Pickup)',
-            style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
-          ),
-          const SizedBox(height: 12),
-          if (_controller.discoveryPickupMatches.isEmpty)
-            const Padding(
-              padding: EdgeInsets.all(16.0),
-              child: Text(
-                'No discovery or pickup matches available yet.',
-                style: TextStyle(fontSize: 14, color: Colors.grey),
-              ),
-            )
-          else
-            ..._controller.discoveryPickupMatches.take(5).map((m) {
-              return _buildPickupMatchCard(m);
-            }),
-          if (_controller.discoveryPickupMatches.length > 5)
-            Padding(
-              padding: const EdgeInsets.only(top: 8.0),
-              child: TextButton(
-                                onPressed: () async {
-                  await _controller.loadDiscoveryPickupMatches();
-                },
-                child: const Text('Load more matches'),
+          // Scrollable content area
+          Expanded(
+            child: SingleChildScrollView(
+              padding: const EdgeInsets.all(16),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  // Header with "Trending Games" and "View All" link
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      const Text(
+                        'Trending Games',
+                        style: TextStyle(
+                          fontSize: 14,
+                          fontWeight: FontWeight.w600,
+                          color: Colors.black87,
+                        ),
+                      ),
+                      TextButton(
+                        onPressed: () {
+                          // Switch to My Games tab to see all matches
+                          setState(() => _controller.selectedIndex = 1);
+                        },
+                        style: TextButton.styleFrom(
+                          foregroundColor: const Color(0xFFFF6B35), // Orange color
+                          padding: EdgeInsets.zero,
+                          minimumSize: Size.zero,
+                          tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                        ),
+                        child: const Text(
+                          'View All',
+                          style: TextStyle(
+                            fontSize: 14,
+                            fontWeight: FontWeight.w500,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 16),
+                  // Filter chips row - "All" first, then Sports, Date, Nearby
+                  _buildDiscoverFilters(),
+                  const SizedBox(height: 16),
+                  
+                  if (filteredMatches.isEmpty) ...[
+                    Center(
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: const [
+                          Icon(Icons.search_off, size: 64, color: Colors.grey),
+                          SizedBox(height: 16),
+                          Text(
+                            'No games available',
+                            style: TextStyle(fontSize: 18, color: Colors.black87),
+                          ),
+                          SizedBox(height: 8),
+                          Text(
+                            'Check back later for new matches',
+                            style: TextStyle(fontSize: 14, color: Colors.grey),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ] else ...[
+                    // Game cards list
+                    ...filteredMatches.take(10).map((match) => _buildResultCardHome(match)),
+                    if (filteredMatches.length > 10)
+                      Padding(
+                        padding: const EdgeInsets.only(top: 8.0),
+                        child: TextButton(
+                          onPressed: () {
+                            _controller.loadDiscoveryPickupMatches();
+                          },
+                          style: TextButton.styleFrom(
+                            foregroundColor: const Color(0xFFFF6B35), // Orange color
+                          ),
+                          child: Text('View More (${filteredMatches.length - 10} more)'),
+                        ),
+                      ),
+                  ],
+                ],
               ),
             ),
+          ),
         ],
       ),
     );
+  }
+  
+  // Filter matches based on current filter state
+  List<Map<String, dynamic>> _getFilteredMatchesHome() {
+    var matches = _controller.discoveryPickupMatches;
+    
+    // Apply sport filter
+    if (_selectedSportFilter != null) {
+      matches = matches.where((m) => 
+        (m['sport'] as String?)?.toLowerCase() == _selectedSportFilter?.toLowerCase()
+      ).toList();
+    }
+    
+    // Apply date filter
+    if (_selectedDateFilter != null) {
+      matches = matches.where((m) {
+        final startTime = m['start_time'] as DateTime?;
+        if (startTime == null) return false;
+        return startTime.year == _selectedDateFilter!.year &&
+               startTime.month == _selectedDateFilter!.month &&
+               startTime.day == _selectedDateFilter!.day;
+      }).toList();
+    }
+    
+    // Apply distance filter (when nearby is active)
+    if (_nearbyFilterActive && _maxDistance < 100) {
+      matches = matches.where((m) {
+        final distance = m['distance_miles'] as double?;
+        if (distance == null) return false;
+        return distance <= _maxDistance;
+      }).toList();
+    }
+    
+    return matches;
+  }
+  
+  // Build full result card matching DiscoverScreen format
+  Widget _buildResultCardHome(Map<String, dynamic> match) {
+    final sport = match['sport'] as String? ?? '';
+    final mode = match['mode'] as String? ?? '';
+    final numPlayers = match['num_players'] as int?;
+    final startDt = match['start_time'] as DateTime?;
+    final endDt = match['end_time'] as DateTime?;
+    final venue = match['venue'] as String?;
+    final canAccept = match['can_accept'] as bool? ?? true;
+    final spotsLeft = match['spots_left'] as int?;
+    final requestId = match['request_id'] as String?;
+    final sportEmoji = _getSportEmoji(sport);
+    final distance = _calculateDistanceHome(match);
+    final teamName = match['team_name'] as String?;
+    final creatorName = match['creator_name'] as String?;
+    final isOpenChallenge = match['is_open_challenge'] as bool? ?? false;
+    final userTeamInviteStatus = match['user_team_invite_status'] as String?;
+    final userTeamInviteStatuses = match['user_team_invite_statuses'] as List<dynamic>?;
+    
+    final isTeamGame = mode == 'team_vs_team';
+    
+    // Format date
+    final dateStr = startDt != null 
+        ? '${startDt.year}-${startDt.month.toString().padLeft(2, '0')}-${startDt.day.toString().padLeft(2, '0')}'
+        : '';
+    
+    return Container(
+      margin: const EdgeInsets.only(bottom: 10),
+                  decoration: BoxDecoration(
+        color: Colors.grey.shade100, // Dark white background
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+      child: InkWell(
+        onTap: () {
+          // TODO: Show match details
+        },
+                          borderRadius: BorderRadius.circular(12),
+        child: Padding(
+          padding: const EdgeInsets.all(12),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              // Sport name and Join button row
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                crossAxisAlignment: CrossAxisAlignment.center,
+                children: [
+                  // Sport name with distance (e.g., "🏏 Cricket || 2.5 mi")
+                  Expanded(
+                    child: Text(
+                      '$sportEmoji ${_displaySport(sport)} || ${distance != "Distance unknown" ? distance : "N/A"}',
+                      style: const TextStyle(
+                        fontWeight: FontWeight.w600,
+                        fontSize: 14,
+                      ),
+                    ),
+                  ),
+                  // Join button (only show if can join)
+                  if (isTeamGame && canAccept && userTeamInviteStatus != 'pending' && userTeamInviteStatus != 'denied' && (userTeamInviteStatuses == null || userTeamInviteStatuses.isEmpty))
+                    ElevatedButton(
+                      onPressed: () async {
+                        await _handleJoinTeamGameHome(requestId!, sport);
+                      },
+                      style: ElevatedButton.styleFrom(
+                        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                        minimumSize: Size.zero,
+                        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                      ),
+                      child: const Text(
+                        'Join',
+                        style: TextStyle(
+                          fontWeight: FontWeight.w600,
+                          fontSize: 14,
+                        ),
+                      ),
+                    )
+                  else if (!isTeamGame && canAccept)
+                    ElevatedButton(
+                      onPressed: () async {
+                        await _requestToJoinIndividualGameHome(requestId!);
+                      },
+                      style: ElevatedButton.styleFrom(
+                        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                        minimumSize: Size.zero,
+                        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                      ),
+                      child: const Text(
+                        'Join',
+                        style: TextStyle(
+                          fontWeight: FontWeight.w600,
+                          fontSize: 14,
+                        ),
+                      ),
+                    ),
+                ],
+              ),
+              
+              const SizedBox(height: 6),
+              
+              // Created by: Team Name (only for team games)
+              if (isTeamGame && teamName != null) ...[
+                Text(
+                  'Created by: $teamName',
+                  style: const TextStyle(
+                    fontSize: 13,
+                    color: Colors.grey,
+                  ),
+                ),
+                const SizedBox(height: 6),
+              ],
+              
+              // Looking for opponents/players
+              Text(
+                isTeamGame ? 'Looking for opponents' : 'Looking for players',
+                style: const TextStyle(
+                  fontSize: 13,
+                  color: Colors.black87,
+                ),
+              ),
+              
+              const SizedBox(height: 8),
+              
+              // Date | Location row (swapped positions)
+              Row(
+                children: [
+                  // Date (moved to first position)
+                  if (dateStr.isNotEmpty) ...[
+                    const Icon(Icons.calendar_today, size: 14, color: Colors.grey),
+                    const SizedBox(width: 4),
+                    Text(
+                      dateStr,
+                      style: const TextStyle(
+                        fontSize: 13,
+                        color: Colors.grey,
+                      ),
+                    ),
+                    const Text(' | ', style: TextStyle(color: Colors.grey)),
+                  ],
+                  // Location (moved to second position)
+                  if (venue != null && venue.isNotEmpty) ...[
+                    const Icon(Icons.location_on, size: 14, color: Colors.grey),
+                    const SizedBox(width: 4),
+                    Expanded(
+                      child: Text(
+                        venue,
+                        style: const TextStyle(
+                          fontSize: 13,
+                          color: Colors.grey,
+                        ),
+                      ),
+                    ),
+                  ] else if (distance.isNotEmpty) ...[
+                    const Icon(Icons.location_on, size: 14, color: Colors.grey),
+                    const SizedBox(width: 4),
+                    Text(
+                      distance,
+                      style: const TextStyle(
+                        fontSize: 13,
+                        color: Colors.grey,
+                      ),
+                    ),
+                  ],
+                ],
+              ),
+              
+              // Spots left for individual games (show below location/date)
+              if (!isTeamGame && spotsLeft != null) ...[
+                const SizedBox(height: 6),
+                Row(
+                  children: [
+                    Icon(Icons.people, size: 14, color: spotsLeft! > 0 ? Colors.green : Colors.red),
+                    const SizedBox(width: 4),
+                    Text(
+                      '$spotsLeft ${spotsLeft == 1 ? 'spot' : 'spots'} left',
+                      style: TextStyle(
+                        fontSize: 13,
+                        color: spotsLeft! > 0 ? Colors.green : Colors.red,
+                        fontWeight: FontWeight.w500,
+                      ),
+                        ),
+                    ],
+                  ),
+              ],
+              
+              const SizedBox(height: 10),
+              
+              // Status messages for team games (only show if cannot join or has status)
+              if (isTeamGame && !canAccept) ...[
+                Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.all(12),
+                  decoration: BoxDecoration(
+                    color: Colors.grey.shade100,
+                    borderRadius: BorderRadius.circular(8),
+                    border: Border.all(color: Colors.grey.shade300),
+                  ),
+                  child: Row(
+                    children: [
+                      Icon(Icons.info_outline, size: 16, color: Colors.grey[600]),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: Text(
+                          'You must be an admin of a ${_displaySport(sport)} team to accept this match',
+                          style: TextStyle(
+                            fontSize: 13,
+                            color: Colors.grey[700],
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ] else if (isTeamGame && userTeamInviteStatuses != null && userTeamInviteStatuses.isNotEmpty) ...[
+                _buildMultiTeamStatusDisplayHome(userTeamInviteStatuses, teamName ?? _displaySport(sport)),
+              ] else if (isTeamGame && userTeamInviteStatus == 'pending') ...[
+                Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.all(12),
+                  decoration: BoxDecoration(
+                    color: Colors.orange.shade50,
+                    borderRadius: BorderRadius.circular(8),
+                    border: Border.all(color: Colors.orange.shade300),
+                  ),
+                  child: Row(
+                    children: [
+                      Icon(Icons.hourglass_empty, size: 16, color: Colors.orange[700]),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: Text(
+                          'Request has been sent, wait for the ${teamName ?? _displaySport(sport)} team admin response',
+                          style: TextStyle(
+                            fontSize: 13,
+                            color: Colors.orange[900],
+                            fontWeight: FontWeight.w500,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ] else if (isTeamGame && userTeamInviteStatus == 'denied') ...[
+                Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.all(12),
+                  decoration: BoxDecoration(
+                    color: Colors.red.shade50,
+                    borderRadius: BorderRadius.circular(8),
+                    border: Border.all(color: Colors.red.shade300),
+                  ),
+                  child: Row(
+                    children: [
+                      Icon(Icons.cancel, size: 16, color: Colors.red[700]),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: Text(
+                          'This request has been denied',
+                          style: TextStyle(
+                            fontSize: 13,
+                            color: Colors.red[900],
+                            fontWeight: FontWeight.w500,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+              // Show organizer approval message for individual games (only if button not shown)
+              if (!isTeamGame && !canAccept) ...[
+                const SizedBox(height: 4),
+                Text(
+                  'Organizer must approve your request',
+                  style: TextStyle(
+                    fontSize: 11,
+                    color: Colors.grey.shade600,
+                    fontStyle: FontStyle.italic,
+                  ),
+                  textAlign: TextAlign.center,
+                ),
+              ],
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+  
+  // Format time for discover cards (matching DiscoverScreen)
+  String _formatTimeForDiscover(DateTime? start) {
+    if (start == null) return 'TBA';
+    final now = DateTime.now();
+    final isToday = start.year == now.year && 
+                    start.month == now.month && 
+                    start.day == now.day;
+    final isTomorrow = start.year == now.year && 
+                       start.month == now.month && 
+                       start.day == now.day + 1;
+    
+    String fmtTime(DateTime dt) {
+      final h24 = dt.hour;
+      final m = dt.minute.toString().padLeft(2, '0');
+      final isPM = h24 >= 12;
+      final h12 = h24 == 0 ? 12 : (h24 > 12 ? h24 - 12 : h24);
+      final ampm = isPM ? 'PM' : 'AM';
+      return '$h12:$m $ampm';
+    }
+    
+    if (isToday) return 'Today ${fmtTime(start)}';
+    if (isTomorrow) return 'Tomorrow ${fmtTime(start)}';
+    return '${start.month}/${start.day} ${fmtTime(start)}';
+  }
+  
+  // Build multi-team status display
+  Widget _buildMultiTeamStatusDisplayHome(List<dynamic> inviteStatuses, String creatingTeamName) {
+    final statusList = inviteStatuses.map((s) {
+      if (s is Map<String, dynamic>) {
+        return {
+          'status': s['status'] as String?,
+          'team_name': s['team_name'] as String? ?? 'Unknown Team',
+        };
+      }
+      return null;
+    }).whereType<Map<String, dynamic>>().toList();
+    
+    if (statusList.isEmpty) {
+      return const SizedBox.shrink();
+    }
+    
+    final pendingTeams = <String>[];
+    final deniedTeams = <String>[];
+    final acceptedTeams = <String>[];
+    
+    for (final statusInfo in statusList) {
+      final status = (statusInfo['status'] as String?)?.toLowerCase();
+      final teamName = statusInfo['team_name'] as String? ?? 'Unknown Team';
+      
+      if (status == 'pending') {
+        pendingTeams.add(teamName);
+      } else if (status == 'denied') {
+        deniedTeams.add(teamName);
+      } else if (status == 'accepted') {
+        acceptedTeams.add(teamName);
+      }
+    }
+    
+    // Determine which status to show (priority: denied > pending > accepted)
+    if (deniedTeams.isNotEmpty && pendingTeams.isEmpty && acceptedTeams.isEmpty) {
+      return Container(
+        width: double.infinity,
+        padding: const EdgeInsets.all(12),
+        decoration: BoxDecoration(
+          color: Colors.red.shade50,
+          borderRadius: BorderRadius.circular(8),
+          border: Border.all(color: Colors.red.shade300),
+        ),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+            Row(
+              children: [
+                Icon(Icons.cancel, size: 16, color: Colors.red[700]),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    'All requests denied',
+                              style: TextStyle(
+                      fontSize: 13,
+                      color: Colors.red[900],
+                      fontWeight: FontWeight.w500,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+            if (deniedTeams.length > 1) ...[
+                            const SizedBox(height: 4),
+                            Text(
+                'Teams: ${deniedTeams.join(', ')}',
+                style: TextStyle(
+                  fontSize: 12,
+                  color: Colors.red[800],
+                ),
+              ),
+            ],
+          ],
+        ),
+      );
+    } else if (pendingTeams.isNotEmpty) {
+      return Container(
+        width: double.infinity,
+        padding: const EdgeInsets.all(12),
+        decoration: BoxDecoration(
+          color: Colors.orange.shade50,
+          borderRadius: BorderRadius.circular(8),
+          border: Border.all(color: Colors.orange.shade300),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Icon(Icons.hourglass_empty, size: 16, color: Colors.orange[700]),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    pendingTeams.length == 1
+                        ? '${pendingTeams.first}: Request sent, waiting for $creatingTeamName admin response'
+                        : 'Requests sent for ${pendingTeams.join(', ')}. Waiting for $creatingTeamName admin response',
+                    style: TextStyle(
+                      fontSize: 13,
+                      color: Colors.orange[900],
+                      fontWeight: FontWeight.w500,
+                    ),
+                  ),
+                        ),
+                    ],
+                  ),
+            if (deniedTeams.isNotEmpty) ...[
+              const SizedBox(height: 4),
+              Text(
+                'Denied: ${deniedTeams.join(', ')}',
+                style: TextStyle(
+                  fontSize: 12,
+                  color: Colors.red[800],
+                ),
+              ),
+            ],
+          ],
+        ),
+      );
+    } else if (acceptedTeams.isNotEmpty) {
+      return Container(
+        width: double.infinity,
+        padding: const EdgeInsets.all(12),
+        decoration: BoxDecoration(
+          color: Colors.green.shade50,
+          borderRadius: BorderRadius.circular(8),
+          border: Border.all(color: Colors.green.shade300),
+        ),
+        child: Row(
+          children: [
+            Icon(Icons.check_circle, size: 16, color: Colors.green[700]),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text(
+                acceptedTeams.length == 1
+                    ? '${acceptedTeams.first}: Accepted!'
+                    : 'Accepted for: ${acceptedTeams.join(', ')}',
+                style: TextStyle(
+                  fontSize: 13,
+                  color: Colors.green[900],
+                  fontWeight: FontWeight.w500,
+                ),
+          ),
+        ),
+      ],
+        ),
+      );
+    }
+    
+    return const SizedBox.shrink();
+  }
+  
+  // Handle joining team game
+  Future<void> _handleJoinTeamGameHome(String requestId, String sport) async {
+    if (requestId.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Invalid game request')),
+      );
+      return;
+    }
+    
+    try {
+      final adminTeamsForSport = _controller.getAdminTeamsForSport(sport);
+      
+      List<String>? selectedTeamIds;
+      if (adminTeamsForSport.length > 1) {
+        selectedTeamIds = await _showTeamSelectionDialogHome(sport);
+        if (selectedTeamIds == null || selectedTeamIds.isEmpty) {
+          return;
+        }
+      } else if (adminTeamsForSport.length == 1) {
+        final teamId = adminTeamsForSport.first['id'] as String?;
+        if (teamId != null) {
+          selectedTeamIds = [teamId];
+        }
+      }
+      
+      if (selectedTeamIds == null || selectedTeamIds.isEmpty) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('No team selected')),
+          );
+        }
+        return;
+      }
+      
+      int successCount = 0;
+      int failCount = 0;
+      final errors = <String>[];
+      
+      for (final teamId in selectedTeamIds) {
+        try {
+          await _controller.requestToJoinOpenChallengeTeamGame(
+            requestId: requestId,
+            sport: sport,
+            joiningTeamId: teamId,
+          );
+          successCount++;
+        } catch (e) {
+          failCount++;
+          errors.add(e.toString());
+        }
+      }
+      
+      await _controller.loadDiscoveryPickupMatches();
+      
+      if (mounted) {
+        if (failCount == 0) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text(successCount > 1
+                  ? 'Join requests sent for $successCount teams! Admin will review your requests.'
+                  : 'Join request sent! ${_displaySport(sport)} team admin will review your request.'),
+              duration: const Duration(seconds: 3),
+            ),
+          );
+        } else if (successCount > 0) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('$successCount team(s) joined successfully. $failCount team(s) failed: ${errors.first}'),
+              duration: const Duration(seconds: 5),
+            ),
+          );
+        } else {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('Failed to join: ${errors.first}'),
+              duration: const Duration(seconds: 5),
+            ),
+          );
+        }
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Failed to join: $e')),
+        );
+      }
+    }
+  }
+  
+  // Show team selection dialog
+  Future<List<String>?> _showTeamSelectionDialogHome(String sport) async {
+    final adminTeamsForSport = _controller.getAdminTeamsForSport(sport);
+    
+    if (adminTeamsForSport.isEmpty) {
+      return null;
+    }
+    
+    if (adminTeamsForSport.length == 1) {
+      final teamId = adminTeamsForSport.first['id'] as String?;
+      return teamId != null ? [teamId] : null;
+    }
+    
+    final selectedTeamIds = <String>{};
+    
+    return showDialog<List<String>>(
+      context: context,
+      builder: (context) {
+        return StatefulBuilder(
+          builder: (context, setDialogState) {
+            return AlertDialog(
+              title: Text('Select Team(s) to Join'),
+              content: SizedBox(
+                width: double.maxFinite,
+      child: Column(
+                  mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+                    Text(
+                      'You are an admin of multiple ${_displaySport(sport)} teams. Select which team(s) to join with:',
+                      style: const TextStyle(fontSize: 14),
+                    ),
+                    const SizedBox(height: 16),
+                    if (adminTeamsForSport.length > 1)
+                      CheckboxListTile(
+                        title: const Text('Select All', style: TextStyle(fontWeight: FontWeight.bold)),
+                        value: selectedTeamIds.length == adminTeamsForSport.length,
+                        onChanged: (checked) {
+                          setDialogState(() {
+                            if (checked == true) {
+                              for (final team in adminTeamsForSport) {
+                                final teamId = team['id'] as String?;
+                                if (teamId != null) {
+                                  selectedTeamIds.add(teamId);
+                                }
+                              }
+                            } else {
+                              selectedTeamIds.clear();
+                            }
+                          });
+                        },
+                        controlAffinity: ListTileControlAffinity.leading,
+                      ),
+                    const Divider(),
+                    ...adminTeamsForSport.map((team) {
+                      final teamId = team['id'] as String?;
+                      final teamName = team['name'] as String? ?? 'Unknown Team';
+                      final isSelected = teamId != null && selectedTeamIds.contains(teamId);
+                      
+                      return CheckboxListTile(
+                        title: Text(teamName),
+                        value: isSelected,
+                        onChanged: (checked) {
+                          setDialogState(() {
+                            if (checked == true && teamId != null) {
+                              selectedTeamIds.add(teamId);
+                            } else if (teamId != null) {
+                              selectedTeamIds.remove(teamId);
+                            }
+                          });
+                        },
+                        controlAffinity: ListTileControlAffinity.leading,
+                      );
+                    }).toList(),
+                  ],
+                ),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.of(context).pop(null),
+                  child: const Text('Cancel'),
+                ),
+                ElevatedButton(
+                  onPressed: selectedTeamIds.isEmpty
+                      ? null
+                      : () => Navigator.of(context).pop(selectedTeamIds.toList()),
+                  child: Text('Join (${selectedTeamIds.length})'),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
+  }
+  
+  // Request to join individual game
+  Future<void> _requestToJoinIndividualGameHome(String requestId) async {
+    final supa = Supabase.instance.client;
+    final userId = supa.auth.currentUser?.id;
+    if (userId == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Please login to join games')),
+      );
+      return;
+    }
+
+    try {
+      final existing = await supa
+          .from('individual_game_attendance')
+          .select('id, status')
+          .eq('request_id', requestId)
+          .eq('user_id', userId)
+          .maybeSingle();
+
+      if (existing != null) {
+        final status = (existing['status'] as String?)?.toLowerCase() ?? 'pending';
+        if (status == 'accepted') {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('You are already part of this game!')),
+          );
+        } else if (status == 'pending') {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Request already sent. Waiting for organizer approval.')),
+          );
+        } else {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('You previously declined this game.')),
+          );
+        }
+        return;
+      }
+
+      await supa.from('individual_game_attendance').insert({
+        'request_id': requestId,
+        'user_id': userId,
+        'status': 'pending',
+      });
+
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Join request sent! Organizer will review your request.'),
+          duration: Duration(seconds: 3),
+        ),
+      );
+      
+      await _controller.loadDiscoveryPickupMatches();
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Failed to join game: $e')),
+      );
+    }
+  }
+  
+  // Show distance picker
+  void _showDistancePickerHome() {
+    int tempDistance = _maxDistance;
+    
+    showModalBottomSheet(
+      context: context,
+      builder: (context) {
+        return StatefulBuilder(
+          builder: (context, setModalState) {
+            return Container(
+              padding: const EdgeInsets.all(16),
+      child: Column(
+                mainAxisSize: MainAxisSize.min,
+        children: [
+          const Text(
+                    'Maximum Distance',
+            style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+          ),
+                  const SizedBox(height: 16),
+                  Text(
+                    tempDistance == 100 ? 'Any Distance' : '$tempDistance miles',
+                    style: TextStyle(
+                      fontSize: 20,
+                      fontWeight: FontWeight.bold,
+                      color: Colors.orange,
+                    ),
+                  ),
+                  const SizedBox(height: 16),
+                  Slider(
+                    value: tempDistance.toDouble(),
+                    min: 5,
+                    max: 100,
+                    divisions: 19,
+                    label: tempDistance == 100 ? 'Any' : '$tempDistance miles',
+                    onChanged: (value) {
+                      setModalState(() {
+                        tempDistance = value.round();
+                      });
+                    },
+                  ),
+                  const SizedBox(height: 16),
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                    children: [
+                      TextButton(
+                onPressed: () {
+                          setModalState(() {
+                            tempDistance = 100;
+                          });
+                        },
+                        child: const Text('Any Distance'),
+                      ),
+                      ElevatedButton(
+                        onPressed: () {
+                          setState(() {
+                            _maxDistance = tempDistance;
+                            _nearbyFilterActive = tempDistance < 100;
+                          });
+                          Navigator.pop(context);
+                        },
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: Colors.orange,
+                        ),
+                        child: const Text('Done'),
+                      ),
+                    ],
+            ),
+        ],
+      ),
+            );
+          },
+        );
+      },
+    );
+  }
+  
+  Widget _buildSimpleDiscoveryCard(Map<String, dynamic> match) {
+    final sport = match['sport'] as String? ?? '';
+    final mode = match['mode'] as String? ?? '';
+    final startDt = match['start_time'] as DateTime?;
+    final venue = match['venue'] as String?;
+    final distance = match['distance_miles'] as double?;
+    
+    String distanceStr = '';
+    if (distance != null) {
+      if (distance < 1) {
+        distanceStr = '${(distance * 5280).round()} ft';
+      } else if (distance < 10) {
+        distanceStr = '${distance.toStringAsFixed(1)} mi';
+      } else {
+        distanceStr = '${distance.round()} mi';
+      }
+    }
+    
+    return Card(
+      margin: const EdgeInsets.only(bottom: 12),
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Text(
+                  _displaySport(sport),
+                  style: const TextStyle(
+                    fontWeight: FontWeight.bold,
+                    fontSize: 16,
+                  ),
+                ),
+                if (mode == 'team_vs_team') ...[
+                  const Text(' • '),
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFF0D7377).withOpacity(0.1),
+                      borderRadius: BorderRadius.circular(4),
+                      border: Border.all(color: const Color(0xFF0D7377)),
+                    ),
+                    child: const Text(
+                      'TEAM GAME',
+                      style: TextStyle(
+                        color: Color(0xFF0D7377),
+                        fontSize: 12,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ),
+                ],
+                if (distanceStr.isNotEmpty) ...[
+                  const Text(' • '),
+                  Text(distanceStr),
+                ],
+              ],
+            ),
+            if (startDt != null) ...[
+              const SizedBox(height: 8),
+              Row(
+                children: [
+                  const Icon(Icons.access_time, size: 16, color: Colors.orange),
+                  const SizedBox(width: 4),
+                  Text(
+                    _formatDateTime(startDt),
+                    style: const TextStyle(color: Colors.orange, fontWeight: FontWeight.w600),
+                  ),
+                ],
+              ),
+            ],
+            if (venue != null && venue.isNotEmpty) ...[
+              const SizedBox(height: 4),
+              Row(
+                children: [
+                  const Icon(Icons.location_on, size: 16, color: Colors.grey),
+                  const SizedBox(width: 4),
+                  Expanded(
+                    child: Text(
+                      venue,
+                      style: const TextStyle(color: Colors.grey, fontSize: 14),
+                    ),
+                  ),
+                ],
+              ),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+  
+  String _formatDateTime(DateTime dt) {
+    final now = DateTime.now();
+    final isToday = dt.year == now.year && dt.month == now.month && dt.day == now.day;
+    final isTomorrow = dt.year == now.year && 
+                       dt.month == now.month && 
+                       dt.day == now.day + 1;
+    
+    String fmtTime(DateTime d) {
+      final h24 = d.hour;
+      final m = d.minute.toString().padLeft(2, '0');
+      final isPM = h24 >= 12;
+      final h12 = h24 == 0 ? 12 : (h24 > 12 ? h24 - 12 : h24);
+      final ampm = isPM ? 'PM' : 'AM';
+      return '$h12:$m $ampm';
+    }
+    
+    if (isToday) return 'Today ${fmtTime(dt)}';
+    if (isTomorrow) return 'Tomorrow ${fmtTime(dt)}';
+    return '${dt.month}/${dt.day} ${fmtTime(dt)}';
+  }
+  
+  // Build filter buttons for Discover section - "All" first, then Sports, Date, Nearby
+  Widget _buildDiscoverFilters() {
+    const orangeAccent = Color(0xFFFF6B35);
+    
+    // Check if any filter is active (if none are active, "All" is selected)
+    final bool allSelected = _selectedSportFilter == null && 
+                            _selectedDateFilter == null && 
+                            !_nearbyFilterActive;
+    
+    return SingleChildScrollView(
+      scrollDirection: Axis.horizontal,
+      child: Row(
+        children: [
+          // "All" filter chip (selected by default when no filters are active)
+          _buildFilterChip(
+            label: 'All',
+            isSelected: allSelected,
+            onTap: () {
+              setState(() {
+                _selectedSportFilter = null;
+                _selectedDateFilter = null;
+                _nearbyFilterActive = false;
+                _maxDistance = 100;
+              });
+            },
+            accentColor: orangeAccent,
+          ),
+          const SizedBox(width: 8),
+          
+          // Sports filter
+          _buildFilterChip(
+            label: _selectedSportFilter != null ? _displaySport(_selectedSportFilter!) : 'Sports',
+            isSelected: _selectedSportFilter != null,
+            onTap: () => _showSportFilterDialog(),
+            accentColor: orangeAccent,
+          ),
+          const SizedBox(width: 8),
+          
+          // Date filter
+          _buildFilterChip(
+            label: _selectedDateFilter != null ? _formatDateHome(_selectedDateFilter!) : 'Date',
+            isSelected: _selectedDateFilter != null,
+            onTap: () => _showDateFilterDialog(),
+            accentColor: orangeAccent,
+          ),
+          const SizedBox(width: 8),
+          
+          // Nearby filter
+          _buildFilterChip(
+            label: _maxDistance < 100 ? '$_maxDistance mi' : 'Nearby',
+            isSelected: _nearbyFilterActive || _maxDistance < 100,
+            onTap: () => _showDistancePickerHome(),
+            accentColor: orangeAccent,
+          ),
+        ],
+      ),
+    );
+  }
+  
+  Widget _buildFilterChip({
+    required String label,
+    required bool isSelected,
+    required VoidCallback onTap,
+    required Color accentColor,
+  }) {
+    return GestureDetector(
+      onTap: onTap,
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 200),
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+        decoration: BoxDecoration(
+          color: isSelected ? accentColor : Colors.grey.shade200,
+          borderRadius: BorderRadius.circular(20),
+          border: Border.all(
+            color: isSelected ? accentColor : Colors.transparent,
+            width: 1.5,
+          ),
+        ),
+        child: Center(
+          child: Text(
+            label,
+            style: TextStyle(
+              color: isSelected ? Colors.white : Colors.black87,
+              fontWeight: FontWeight.w600,
+              fontSize: 14,
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+  
+  Future<void> _showSportFilterDialog() async {
+    final allSports = [
+      'badminton',
+      'basketball',
+      'cricket',
+      'football',
+      'pickleball',
+      'soccer',
+      'table_tennis',
+      'tennis',
+      'volleyball',
+    ];
+    
+    showModalBottomSheet(
+      context: context,
+      builder: (context) {
+        return Container(
+          padding: const EdgeInsets.all(16),
+      child: Column(
+            mainAxisSize: MainAxisSize.min,
+        children: [
+          const Text(
+                'Select Sport',
+            style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+          ),
+              const SizedBox(height: 16),
+              ListTile(
+                title: const Text('All Sports'),
+                leading: Radio<String?>(
+                  value: null,
+                  groupValue: _selectedSportFilter,
+                  onChanged: (value) {
+                    setState(() => _selectedSportFilter = value);
+                    Navigator.pop(context);
+                  },
+                ),
+                onTap: () {
+                  setState(() => _selectedSportFilter = null);
+                  Navigator.pop(context);
+                },
+              ),
+              ...allSports.map((sport) => ListTile(
+                title: Text(_displaySport(sport)),
+                leading: Radio<String?>(
+                  value: sport,
+                  groupValue: _selectedSportFilter,
+                  onChanged: (value) {
+                    setState(() => _selectedSportFilter = value);
+                    Navigator.pop(context);
+                  },
+                ),
+                onTap: () {
+                  setState(() => _selectedSportFilter = sport);
+                  Navigator.pop(context);
+                },
+              )),
+            ],
+          ),
+        );
+      },
+    );
+  }
+  
+  Future<void> _showDateFilterDialog() async {
+    final date = await showDatePicker(
+      context: context,
+      initialDate: _selectedDateFilter ?? DateTime.now(),
+      firstDate: DateTime.now(),
+      lastDate: DateTime.now().add(const Duration(days: 365)),
+    );
+    if (date != null) {
+      setState(() {
+        _selectedDateFilter = date;
+      });
+    } else if (_selectedDateFilter != null) {
+      // User cancelled - clear filter if they want
+      final clear = await showDialog<bool>(
+        context: context,
+        builder: (context) => AlertDialog(
+          title: const Text('Clear Date Filter?'),
+          content: const Text('Do you want to clear the date filter?'),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(false),
+              child: const Text('Keep Filter'),
+            ),
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(true),
+              child: const Text('Clear'),
+            ),
+          ],
+        ),
+      );
+      if (clear == true) {
+        setState(() {
+          _selectedDateFilter = null;
+        });
+      }
+    }
   }
   
   // Helper to build pickup/discovery match card
@@ -4462,22 +5547,6 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
       appBar: AppBar(
         title: const Text(''), // Empty title since tab already says "My Games"
         automaticallyImplyLeading: false,
-        bottom: PreferredSize(
-          preferredSize: const Size.fromHeight(48),
-          child: Container(
-            color: Colors.white,
-            child: Row(
-              children: [
-                Expanded(
-                  child: _buildGameTypeTab('Team', _myGamesType == 'Team'),
-                ),
-                Expanded(
-                  child: _buildGameTypeTab('Individual', _myGamesType == 'Individual'),
-                ),
-              ],
-            ),
-          ),
-        ),
       ),
       body: RefreshIndicator(
         onRefresh: () async {
@@ -4514,36 +5583,6 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
     );
   }
   
-  Widget _buildGameTypeTab(String label, bool isSelected) {
-    return InkWell(
-      onTap: () {
-        setState(() {
-          _myGamesType = label;
-        });
-      },
-      child: Container(
-        padding: const EdgeInsets.symmetric(vertical: 12),
-        decoration: BoxDecoration(
-          color: isSelected ? Colors.orange.shade700 : Colors.transparent,
-          border: Border(
-            bottom: BorderSide(
-              color: isSelected ? Colors.orange.shade700 : Colors.grey.shade300,
-              width: 2,
-            ),
-          ),
-        ),
-        child: Text(
-          label,
-          textAlign: TextAlign.center,
-          style: TextStyle(
-            color: isSelected ? Colors.white : Colors.grey.shade700,
-            fontWeight: isSelected ? FontWeight.w600 : FontWeight.normal,
-            fontSize: 14,
-          ),
-        ),
-      ),
-    );
-  }
 
   Widget _buildMyGamesFilterBanner() {
     return Container(
@@ -4605,9 +5644,7 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
   }
 
   Widget _buildFilteredMatchesSection() {
-    final isLoading = _myGamesType == 'Team' 
-        ? _controller.loadingAllMatches 
-        : _controller.loadingIndividualMatches;
+    final isLoading = _controller.loadingAllMatches || _controller.loadingIndividualMatches;
         
     if (isLoading) {
       return const Padding(
@@ -4616,21 +5653,7 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
       );
     }
 
-    // For Team games, show "Awaiting Opponent Confirmation" section first
-    if (_myGamesType == 'Team') {
-      return Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          // Awaiting Opponent Confirmation Section
-          _buildAwaitingOpponentConfirmationSection(),
-          const SizedBox(height: 24),
-          // Regular confirmed games
-          _buildRegularTeamGamesSection(),
-        ],
-      );
-    }
-
-    // For Individual games, show regular list
+    // Combine team and individual games
     final filteredMatches = _getFilteredMatches();
 
     if (filteredMatches.isEmpty) {
@@ -4644,7 +5667,23 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
       );
     }
 
-    return _buildIndividualMatchesList(filteredMatches);
+    // Show "Awaiting Opponent Confirmation" section first (only for Current filter)
+    // Then show regular games grouped by sport
+    if (_myGamesFilter == 'Current') {
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          // Awaiting Opponent Confirmation Section (team games only)
+          _buildAwaitingOpponentConfirmationSection(),
+          const SizedBox(height: 24),
+          // Regular games grouped by sport
+          _buildUnifiedMatchesList(filteredMatches),
+        ],
+      );
+    }
+
+    // For other filters (Past, Cancelled, Hidden), just show the unified list
+    return _buildUnifiedMatchesList(filteredMatches);
   }
 
   Widget _buildAwaitingOpponentConfirmationSection() {
@@ -4943,22 +5982,6 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
     }
   }
 
-  Widget _buildRegularTeamGamesSection() {
-    final filteredMatches = _getFilteredMatches();
-
-    if (filteredMatches.isEmpty) {
-      return Padding(
-        padding: const EdgeInsets.all(16),
-        child: Text(
-          _getEmptyMessage(),
-          style: const TextStyle(fontSize: 14, color: Colors.grey),
-          textAlign: TextAlign.center,
-        ),
-      );
-    }
-
-    return _buildMatchesList(filteredMatches);
-  }
 
   List<Map<String, dynamic>> _getFilteredMatches() {
     final now = DateTime.now();
@@ -4966,18 +5989,17 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
     final today = DateTime(now.year, now.month, now.day);
     final hiddenIds = _controller.hiddenRequestIds;
 
-    // Filter by game type
-    final matchesToFilter = _myGamesType == 'Team'
-        ? (_controller.allMyMatches.isNotEmpty
-            ? _controller.allMyMatches
-            : _controller.confirmedTeamMatches)
-        : _controller.allMyIndividualMatches;
+    // Combine team and individual matches
+    final teamMatches = _controller.allMyMatches.isNotEmpty
+        ? _controller.allMyMatches
+        : _controller.confirmedTeamMatches;
+    final allMatchesToFilter = [...teamMatches, ..._controller.allMyIndividualMatches];
 
     if (kDebugMode) {
-      print('[DEBUG] _getFilteredMatches: Filter=$_myGamesFilter, allMyMatches=${_controller.allMyMatches.length}, confirmedTeamMatches=${_controller.confirmedTeamMatches.length}, using=${matchesToFilter.length}');
+      print('[DEBUG] _getFilteredMatches: Filter=$_myGamesFilter, teamMatches=${teamMatches.length}, individualMatches=${_controller.allMyIndividualMatches.length}, total=${allMatchesToFilter.length}');
     }
 
-    return matchesToFilter.where((match) {
+    return allMatchesToFilter.where((match) {
       final status = (match['status'] as String?)?.toLowerCase() ?? '';
       final startTime = match['start_time'] as DateTime?;
       final requestId = match['request_id'] as String;
@@ -5050,7 +6072,7 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
     }
   }
 
-  Widget _buildMatchesList(List<Map<String, dynamic>> matches) {
+  Widget _buildUnifiedMatchesList(List<Map<String, dynamic>> matches) {
     // Group matches by sport and sort by date
     final groupedMatches = <String, List<Map<String, dynamic>>>{};
     
@@ -5082,12 +6104,6 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text(
-            'Your games (${matches.length})',
-            style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
-          ),
-          const SizedBox(height: 16),
-          
           // Display matches grouped by sport
           ...sortedSports.expand((sport) {
             final sportMatches = groupedMatches[sport]!;
@@ -5100,8 +6116,8 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
                     Text(
                       _getSportEmoji(sport),
                       style: const TextStyle(fontSize: 20),
-                            ),
-                            const SizedBox(width: 8),
+                    ),
+                    const SizedBox(width: 8),
                     Text(
                       _displaySport(sport),
                       style: const TextStyle(
@@ -5121,14 +6137,31 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
                   ],
                 ),
               ),
-              // Matches for this sport
-              ...sportMatches.map((m) => _buildMatchCardForFilter(m)),
+              // Matches for this sport - use appropriate card builder based on match type
+              ...sportMatches.map((m) => _buildUnifiedMatchCard(m)),
               const SizedBox(height: 12),
             ];
           }),
         ],
       ),
     );
+  }
+
+  Widget _buildUnifiedMatchCard(Map<String, dynamic> match) {
+    // Determine if this is a team match (has team_a_id) or individual match
+    final hasTeamFields = match.containsKey('team_a_id') && match['team_a_id'] != null;
+    
+    if (hasTeamFields) {
+      // Team match - use team match card builder
+      final reqId = match['request_id'] as String;
+      final isExpanded = _expandedMatchIds.contains(reqId);
+      return _buildCollapsibleMatchCard(match, isExpanded);
+    } else {
+      // Individual match - use individual match card builder
+      final reqId = match['request_id'] as String;
+      final isExpanded = _expandedMatchIds.contains(reqId);
+      return _buildCollapsibleIndividualMatchCard(match, isExpanded);
+    }
   }
 
   Widget _buildMatchCardForFilter(Map<String, dynamic> match) {
@@ -5877,7 +6910,7 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
     }
   }
   
-  Future<void> _acceptIndividualGameAttendance(String requestId) async {
+  Future<void> _acceptIndividualGameAttendance(String requestId, {bool closeDialog = false}) async {
     try {
       final supa = Supabase.instance.client;
       final userId = supa.auth.currentUser?.id;
@@ -5893,7 +6926,15 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
           .eq('request_id', requestId)
           .eq('user_id', userId);
 
+      // Reload pending individual games
+      await _controller.loadPendingIndividualGames();
+
       if (!mounted) return;
+      setState(() {}); // Refresh UI
+      // Close dialog if requested
+      if (closeDialog && Navigator.canPop(context)) {
+        Navigator.of(context).pop();
+      }
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('You marked yourself as available!')),
       );
@@ -5910,7 +6951,7 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
     }
   }
 
-  Future<void> _declineIndividualGameAttendance(String requestId) async {
+  Future<void> _declineIndividualGameAttendance(String requestId, {bool closeDialog = false}) async {
     try {
       final supa = Supabase.instance.client;
       final userId = supa.auth.currentUser?.id;
@@ -5926,7 +6967,15 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
           .eq('request_id', requestId)
           .eq('user_id', userId);
 
+      // Reload pending individual games
+      await _controller.loadPendingIndividualGames();
+
       if (!mounted) return;
+      setState(() {}); // Refresh UI
+      // Close dialog if requested
+      if (closeDialog && Navigator.canPop(context)) {
+        Navigator.of(context).pop();
+      }
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('You marked yourself as not available')),
       );
@@ -7419,16 +8468,11 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
       case 0:
         return _buildHomeTab();
       case 1:
-        return DiscoverScreen(
-          controller: _controller,
-          onCreateGame: _showCreateInstantMatchSheet,
-        );
+        return _buildMyGamesTab(); // Discover tab removed, My Games is now index 1
       case 2:
-        return _buildMyGamesTab();
+        return ChatScreen(controller: _controller); // Chat is now index 2
       case 3:
-        return ChatScreen(controller: _controller);
-      case 4:
-        return const UserProfileScreen();
+        return const UserProfileScreen(); // Profile is now index 3
       default:
         return _buildHomeTab();
     }
@@ -7437,11 +8481,8 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
   void _onItemTapped(int index) {
     setState(() => _controller.selectedIndex = index);
     
-    // Reload discovery matches when Discover tab is selected
-    // This ensures distances are recalculated with current location
-    if (index == 1) {
-      _controller.loadDiscoveryPickupMatches();
-    }
+    // Reload discovery matches when needed (now embedded in Home tab)
+    // Removed Discover tab-specific reload since it's now in Home tab
   }
 
   @override
@@ -7486,31 +8527,24 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
             accentColor: orangeAccent,
           ),
           _buildNavItem(
-            icon: Icons.explore,
-            label: 'Discover',
+            icon: Icons.sports_esports,
+                label: 'My Games',
             index: 1,
             isSelected: _controller.selectedIndex == 1,
             accentColor: orangeAccent,
           ),
           _buildNavItem(
-            icon: Icons.sports_esports,
-                label: 'My Games',
+            icon: Icons.chat_bubble_outline,
+            label: 'Chat',
             index: 2,
             isSelected: _controller.selectedIndex == 2,
             accentColor: orangeAccent,
           ),
           _buildNavItem(
-            icon: Icons.chat_bubble_outline,
-            label: 'Chat',
-            index: 3,
-            isSelected: _controller.selectedIndex == 3,
-            accentColor: orangeAccent,
-          ),
-          _buildNavItem(
             icon: Icons.person,
             label: 'Profile',
-            index: 4,
-            isSelected: _controller.selectedIndex == 4,
+            index: 3,
+            isSelected: _controller.selectedIndex == 3,
             accentColor: orangeAccent,
               ),
             ],
@@ -7562,3 +8596,4 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
     );
   }
 }
+
