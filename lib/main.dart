@@ -2,7 +2,8 @@ import 'package:flutter/material.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:sentry_flutter/sentry_flutter.dart';
-import 'package:google_fonts/google_fonts.dart';
+// Inter font is now configured via pubspec.yaml and ThemeData
+// Do NOT use google_fonts package for Inter
 
 import 'core/app_config.dart';
 import 'core/error_handler.dart';
@@ -89,8 +90,10 @@ class SportsDugApp extends StatelessWidget {
       title: AppConfig.appName,
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
-        useMaterial3: true,
+        useMaterial3: false, // DISABLED - Material 3 changes spacing and styling
         brightness: Brightness.light,
+        // Inter font family (MANDATORY - do not use Roboto or default Material font)
+        fontFamily: 'Inter',
         // SPORTSDUG logo colors - dark teal and orange
         colorScheme: ColorScheme.light(
           primary: Color(0xFFFF6B35),           // Orange (from logo)
@@ -108,7 +111,8 @@ class SportsDugApp extends StatelessWidget {
           foregroundColor: Color(0xFF0D7377),   // Dark teal text
           elevation: 0.5,
           centerTitle: true,
-          titleTextStyle: GoogleFonts.inter(
+          titleTextStyle: TextStyle(
+            fontFamily: 'Inter',
             fontSize: 20,
             fontWeight: FontWeight.w600,
             color: Color(0xFF0D7377),
@@ -124,15 +128,39 @@ class SportsDugApp extends StatelessWidget {
           margin: EdgeInsets.symmetric(horizontal: 8, vertical: 4),
         ),
         // Apply Inter font with dark teal text for light theme
-        textTheme: GoogleFonts.interTextTheme(
-          ThemeData.light().textTheme,
-        ).apply(
-          bodyColor: Color(0xFF0D7377),         // Dark teal text for body
-          displayColor: Color(0xFF0D7377),      // Dark teal text for headers
+        textTheme: TextTheme(
+          bodyMedium: TextStyle(
+            fontFamily: 'Inter',
+            fontSize: 14,
+            fontWeight: FontWeight.w400,
+            color: Color(0xFF0D7377),           // Dark teal text for body
+          ),
+          bodyLarge: TextStyle(
+            fontFamily: 'Inter',
+            fontSize: 16,
+            fontWeight: FontWeight.w400,
+            color: Color(0xFF0D7377),
+          ),
+          titleMedium: TextStyle(
+            fontFamily: 'Inter',
+            fontSize: 16,
+            fontWeight: FontWeight.w600,
+            color: Color(0xFF0D7377),
+          ),
+          titleLarge: TextStyle(
+            fontFamily: 'Inter',
+            fontSize: 20,
+            fontWeight: FontWeight.w600,
+            color: Color(0xFF0D7377),
+          ),
         ),
         // Keep primary text theme clean
-        primaryTextTheme: GoogleFonts.interTextTheme(
-          ThemeData.light().primaryTextTheme,
+        primaryTextTheme: TextTheme(
+          bodyMedium: TextStyle(
+            fontFamily: 'Inter',
+            fontSize: 14,
+            fontWeight: FontWeight.w400,
+          ),
         ),
         // Button theme
         elevatedButtonTheme: ElevatedButtonThemeData(
@@ -161,13 +189,15 @@ class SportsDugApp extends StatelessWidget {
           labelColor: Color(0xFFFF6B35),         // Orange for active tab (logo color)
           unselectedLabelColor: Color(0xFF757575), // Grey for inactive
           indicatorColor: Color(0xFFFF6B35),     // Orange indicator
-          labelStyle: GoogleFonts.inter(
+          labelStyle: TextStyle(
+            fontFamily: 'Inter',
             fontSize: 14,
             fontWeight: FontWeight.w600,
           ),
-          unselectedLabelStyle: GoogleFonts.inter(
+          unselectedLabelStyle: TextStyle(
+            fontFamily: 'Inter',
             fontSize: 14,
-            fontWeight: FontWeight.normal,
+            fontWeight: FontWeight.w400,
           ),
         ),
         // Input decoration theme for text fields
@@ -192,13 +222,16 @@ class SportsDugApp extends StatelessWidget {
         // Dialog theme
         dialogTheme: DialogThemeData(
           backgroundColor: Colors.white,         // White dialogs
-          titleTextStyle: GoogleFonts.inter(
+          titleTextStyle: TextStyle(
+            fontFamily: 'Inter',
             fontSize: 20,
             fontWeight: FontWeight.w600,
             color: Color(0xFF0D7377),            // Dark teal title
           ),
-          contentTextStyle: GoogleFonts.inter(
+          contentTextStyle: TextStyle(
+            fontFamily: 'Inter',
             fontSize: 14,
+            fontWeight: FontWeight.w400,
             color: Color(0xFF757575),
           ),
           shape: RoundedRectangleBorder(

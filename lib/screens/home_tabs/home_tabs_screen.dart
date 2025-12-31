@@ -52,6 +52,8 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
   void initState() {
     super.initState();
     _controller = HomeTabsController(Supabase.instance.client);
+    // Load location immediately, don't wait for controller init
+    _loadCurrentLocation();
     _init();
   }
 
@@ -60,9 +62,6 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
     if (!mounted) return;
 
     setState(() => _initDone = true);
-
-    // Load location after init
-    _loadCurrentLocation();
   }
 
   Future<void> _loadCurrentLocation() async {
@@ -5615,6 +5614,7 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
   }
 
   Widget _buildFilterSegment(String label, bool isSelected) {
+    const orangeAccent = Color(0xFFFF6B35); // Orange accent color matching Trending games filters
     return GestureDetector(
       onTap: () {
         setState(() {
@@ -5624,19 +5624,22 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
       child: AnimatedContainer(
         duration: const Duration(milliseconds: 200),
         curve: Curves.easeInOut,
-        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
         decoration: BoxDecoration(
-          color: isSelected ? const Color(0xFF6C5CE7) : Colors.transparent,
-          borderRadius: BorderRadius.circular(8),
+          color: isSelected ? orangeAccent : Colors.grey.shade200,
+          borderRadius: BorderRadius.circular(20),
+          border: Border.all(
+            color: isSelected ? orangeAccent : Colors.transparent,
+            width: 1.5,
+          ),
         ),
         child: Text(
           label,
           textAlign: TextAlign.center,
           style: TextStyle(
             color: isSelected ? Colors.white : Colors.black87,
-            fontWeight: isSelected ? FontWeight.w600 : FontWeight.normal,
-            fontSize: 11,
-            letterSpacing: 0.1,
+            fontWeight: FontWeight.w600,
+            fontSize: 14,
           ),
         ),
       ),
@@ -8498,19 +8501,21 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
     );
   }
   
-  // Modern Bottom Navigation Bar (fitness app style)
+  // Modern Bottom Navigation Bar - Floating pill, fixed height, active tab orange, others white
   Widget _buildModernBottomNav() {
-    const orangeAccent = Color(0xFFFF6B35); // Orange accent color
+    const orange = Color(0xFFFF8A30); // Orange for active tab
+    const white = Color(0xFFFFFFFF); // White for inactive tabs
     
     return Container(
-      margin: const EdgeInsets.all(16),
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 12),
+      height: 72, // Fixed height
+      margin: const EdgeInsets.fromLTRB(16, 0, 16, 16), // Floating pill with margin
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
       decoration: BoxDecoration(
-        color: const Color(0xFF0D7377), // Dark teal pill (logo color)
-        borderRadius: BorderRadius.circular(30),
+        color: white, // White background for floating pill
+        borderRadius: BorderRadius.circular(36), // Pill shape
         boxShadow: [
           BoxShadow(
-            color: Colors.black.withOpacity(0.3),
+            color: Colors.black.withOpacity(0.1),
             blurRadius: 10,
             offset: const Offset(0, 5),
           ),
@@ -8521,35 +8526,39 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
         children: [
           _buildNavItem(
             icon: Icons.home_filled,
-                label: 'Home',
+            label: 'Home',
             index: 0,
             isSelected: _controller.selectedIndex == 0,
-            accentColor: orangeAccent,
+            activeColor: orange,
+            inactiveColor: Colors.grey.shade600,
           ),
           _buildNavItem(
             icon: Icons.sports_esports,
-                label: 'My Games',
+            label: 'My Games',
             index: 1,
             isSelected: _controller.selectedIndex == 1,
-            accentColor: orangeAccent,
+            activeColor: orange,
+            inactiveColor: Colors.grey.shade600,
           ),
           _buildNavItem(
             icon: Icons.chat_bubble_outline,
             label: 'Chat',
             index: 2,
             isSelected: _controller.selectedIndex == 2,
-            accentColor: orangeAccent,
+            activeColor: orange,
+            inactiveColor: Colors.grey.shade600,
           ),
           _buildNavItem(
             icon: Icons.person,
             label: 'Profile',
             index: 3,
             isSelected: _controller.selectedIndex == 3,
-            accentColor: orangeAccent,
-              ),
-            ],
+            activeColor: orange,
+            inactiveColor: Colors.grey.shade600,
           ),
-        );
+        ],
+      ),
+    );
   }
   
   Widget _buildNavItem({
@@ -8557,7 +8566,8 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
     required String label,
     required int index,
     required bool isSelected,
-    required Color accentColor,
+    required Color activeColor,
+    required Color inactiveColor,
   }) {
     return GestureDetector(
       onTap: () => _onItemTapped(index),
@@ -8568,7 +8578,7 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
           vertical: 8,
         ),
         decoration: BoxDecoration(
-          color: isSelected ? accentColor : Colors.transparent,
+          color: isSelected ? activeColor : Colors.transparent, // Orange = active, transparent = inactive
           borderRadius: BorderRadius.circular(20),
         ),
         child: Row(
@@ -8576,7 +8586,7 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
           children: [
             Icon(
               icon,
-              color: Colors.white,
+              color: isSelected ? Colors.white : inactiveColor, // White icon on orange, grey on white
               size: 24,
             ),
             if (isSelected) ...[
@@ -8584,7 +8594,8 @@ class _HomeTabsScreenState extends State<HomeTabsScreen> {
               Text(
                 label,
                 style: const TextStyle(
-                  color: Colors.white,
+                  fontFamily: 'Inter',
+                  color: Colors.white, // White text on orange background
                   fontWeight: FontWeight.w600,
                   fontSize: 14,
                 ),

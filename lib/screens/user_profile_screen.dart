@@ -1,10 +1,14 @@
+import 'dart:typed_data';
 import 'package:flutter/material.dart';
+import 'package:image_picker/image_picker.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import '../services/location_service.dart';
 import '../widgets/global_search_sheet.dart';
 
 import 'team_profile_screen.dart';
 import 'teams_screen.dart';
+import 'friends_group_profile_screen.dart';
+import 'select_sports_screen.dart';
 
 class UserProfileScreen extends StatefulWidget {
   /// If null → shows the currently logged-in user's profile.
@@ -21,11 +25,12 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
   bool _loading = false;
   Map<String, dynamic>? _userRow;
   List<String> _sports = [];
-  int _teamsCount = 0;
   List<Map<String, dynamic>> _teams = [];
   List<Map<String, dynamic>> _friends = [];
   List<Map<String, dynamic>> _incomingRequests = [];
   List<Map<String, dynamic>> _friendsGroups = [];
+  int _gamesCount = 0; // Games participated
+  int _winsCount = 0; // Wins count
 
   String? _effectiveUserId; // profile being viewed
   String? _currentUserId; // logged-in user
@@ -107,7 +112,9 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
       // 1) Load main user row (including bio and home location)
       final userRow = await supa
           .from('users')
-          .select('id, full_name, photo_url, bio, home_city, home_state, home_zip_code')
+          .select(
+            'id, full_name, photo_url, bio, home_city, home_state, home_zip_code',
+          )
           .eq('id', userId)
           .maybeSingle();
 
@@ -127,13 +134,12 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
           .select('team_id, role')
           .eq('user_id', userId);
 
-      final teamsCount = (membershipRows as List).length;
-
       // 4) Load team details
       List<Map<String, dynamic>> teams = [];
       if (membershipRows.isNotEmpty) {
-        final teamIds =
-            membershipRows.map<String>((m) => m['team_id'] as String).toList();
+        final teamIds = membershipRows
+            .map<String>((m) => m['team_id'] as String)
+            .toList();
 
         if (teamIds.isNotEmpty) {
           final teamsRows = await supa
@@ -214,12 +220,14 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
             .inFilter('id', friendIds.toList());
 
         friends = (friendUsers as List)
-            .map<Map<String, dynamic>>((u) => {
-                  'id': u['id'] as String,
-                  'full_name': u['full_name'] as String? ?? 'Unknown',
-                  'photo_url': u['photo_url'] as String?,
-                  'base_zip_code': u['base_zip_code'] as String?,
-                })
+            .map<Map<String, dynamic>>(
+              (u) => {
+                'id': u['id'] as String,
+                'full_name': u['full_name'] as String? ?? 'Unknown',
+                'photo_url': u['photo_url'] as String?,
+                'base_zip_code': u['base_zip_code'] as String?,
+              },
+            )
             .toList();
 
         friends.sort((a, b) {
@@ -239,8 +247,9 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
 
       List<Map<String, dynamic>> incomingRequests = [];
       if (pendingRows is List && pendingRows.isNotEmpty) {
-        final requesterIds =
-            pendingRows.map<String>((r) => r['user_id'] as String).toList();
+        final requesterIds = pendingRows
+            .map<String>((r) => r['user_id'] as String)
+            .toList();
 
         final requesterUsers = await supa
             .from('users')
@@ -313,13 +322,13 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
           .select('id, name, created_by, sport')
           .eq('created_by', userId)
           .order('sport, name');
-      
+
       // Then, get group IDs where profile user is a member
       final memberGroupsRows = await supa
           .from('friends_group_members')
           .select('group_id')
           .eq('user_id', userId);
-      
+
       // Collect all group IDs (created + member)
       Set<String> allGroupIds = {};
       if (createdGroupsRows is List) {
@@ -334,7 +343,7 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
           if (groupId != null) allGroupIds.add(groupId);
         }
       }
-      
+
       // Fetch all groups (if we have member groups that aren't in created groups)
       if (allGroupIds.isNotEmpty) {
         final allGroupsRows = await supa
@@ -342,7 +351,7 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
             .select('id, name, created_by, sport')
             .inFilter('id', allGroupIds.toList())
             .order('sport, name');
-        
+
         if (allGroupsRows is List) {
           for (final g in allGroupsRows) {
             // Get member count for each group
@@ -350,7 +359,7 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
                 .from('friends_group_members')
                 .select('id')
                 .eq('group_id', g['id']);
-            
+
             groups.add({
               'id': g['id'],
               'name': g['name'],
@@ -362,18 +371,50 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
         }
       }
 
+      // 9) Load games count and wins count
+      int gamesCount = 0;
+      int winsCount = 0;
+
+      if (teams.isNotEmpty) {
+        final teamIds = teams.map<String>((t) => t['id'] as String).toList();
+
+        // Count games where user participated (team_match_attendance with status 'confirmed')
+        final attendanceRows = await supa
+            .from('team_match_attendance')
+            .select('request_id, team_id, status')
+            .inFilter('team_id', teamIds)
+            .eq('status', 'confirmed');
+
+        // Get unique request_ids to count distinct games
+        final gameIds = <String>{};
+        if (attendanceRows is List) {
+          for (final row in attendanceRows) {
+            final requestId = row['request_id'] as String?;
+            if (requestId != null) {
+              gameIds.add(requestId);
+            }
+          }
+        }
+        gamesCount = gameIds.length;
+
+        // TODO: Count wins - this requires a winner field in confirmed_matches or team_match_request
+        // For now, set wins to 0 until winner tracking is implemented
+        winsCount = 0;
+      }
+
       setState(() {
         _userRow = userRow != null ? Map<String, dynamic>.from(userRow) : null;
         _sports = sports;
-        _teamsCount = teamsCount;
         _teams = teams;
         _friends = friends;
         _incomingRequests = incomingRequests;
         _friendRelationship = relationship;
         _friendRequestIdForProfile = relReqId;
         _friendsGroups = groups;
+        _gamesCount = gamesCount;
+        _winsCount = winsCount;
         _loading = false;
-        
+
         // Update edit controllers if not in edit mode
         if (!_isEditing && _userRow != null) {
           _nameEditController.text = _userRow!['full_name'] as String? ?? '';
@@ -386,9 +427,9 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
     } catch (e) {
       setState(() => _loading = false);
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Failed to load profile: $e')),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Failed to load profile: $e')));
     }
   }
 
@@ -422,14 +463,17 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
 
     final supa = Supabase.instance.client;
     try {
-      await supa.from('users').update({
-        'full_name': _nameEditController.text.trim(),
-        'bio': _bioEditController.text.trim(),
-        'home_city': _editHomeCity,
-        'home_state': _editHomeState,
-        'home_zip_code': _editHomeZipCode,
-        'updated_at': DateTime.now().toIso8601String(),
-      }).eq('id', _effectiveUserId!);
+      await supa
+          .from('users')
+          .update({
+            'full_name': _nameEditController.text.trim(),
+            'bio': _bioEditController.text.trim(),
+            'home_city': _editHomeCity,
+            'home_state': _editHomeState,
+            'home_zip_code': _editHomeZipCode,
+            'updated_at': DateTime.now().toIso8601String(),
+          })
+          .eq('id', _effectiveUserId!);
 
       setState(() {
         _isEditing = false;
@@ -445,9 +489,9 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
     } catch (e) {
       setState(() => _savingProfile = false);
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Failed to save profile: $e')),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Failed to save profile: $e')));
     }
   }
 
@@ -470,6 +514,65 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
     }
   }
 
+  Future<void> _changeProfilePhoto() async {
+    if (!_isSelf || _effectiveUserId == null) return;
+
+    final picker = ImagePicker();
+    try {
+      final picked = await picker.pickImage(
+        source: ImageSource.gallery,
+        imageQuality: 70,
+      );
+
+      if (picked == null) return;
+
+      final supa = Supabase.instance.client;
+      final user = supa.auth.currentUser;
+      if (user == null) return;
+
+      // Upload to storage
+      Uint8List bytes = await picked.readAsBytes();
+      final fileExt = picked.name.split('.').last;
+      final filePath =
+          'avatar_${user.id}_${DateTime.now().millisecondsSinceEpoch}.$fileExt';
+
+      await supa.storage
+          .from('avatars')
+          .uploadBinary(
+            filePath,
+            bytes,
+            fileOptions: FileOptions(
+              contentType: picked.mimeType ?? 'image/$fileExt',
+              upsert: true,
+            ),
+          );
+
+      // Get public URL
+      final publicUrl = supa.storage.from('avatars').getPublicUrl(filePath);
+
+      // Update users table
+      await supa
+          .from('users')
+          .update({
+            'photo_url': publicUrl,
+            'updated_at': DateTime.now().toIso8601String(),
+          })
+          .eq('id', _effectiveUserId!);
+
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('Photo updated')));
+
+      await _loadProfile();
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Failed to upload photo: $e')));
+    }
+  }
+
   String _toDisplaySport(String storageSport) {
     final withSpaces = storageSport.replaceAll('_', ' ');
     return withSpaces
@@ -478,7 +581,7 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
           (w) => w.isEmpty
               ? w
               : w[0].toUpperCase() +
-                  (w.length > 1 ? w.substring(1).toLowerCase() : ''),
+                    (w.length > 1 ? w.substring(1).toLowerCase() : ''),
         )
         .join(' ');
   }
@@ -505,25 +608,22 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
       // Note: We don't clear location cache on logout anymore
       // Cache is now user-specific, so each user has their own cached location
       // This allows faster loading while keeping locations separate per user
-      
+
       await supa.auth.signOut();
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Logged out')),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('Logged out')));
     } catch (e) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Failed to logout: $e')),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Failed to logout: $e')));
     }
   }
 
   /// Remove friend when you are viewing your own profile (used in Friends list).
-  Future<void> _removeFriend(
-    String friendUserId,
-    String friendName,
-  ) async {
+  Future<void> _removeFriend(String friendUserId, String friendName) async {
     final supa = Supabase.instance.client;
     final currentUserId = _effectiveUserId;
     if (currentUserId == null) return;
@@ -549,14 +649,14 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
     if (confirmed != true) return;
 
     try {
-      await supa
-          .from('friends')
-          .delete()
-          .match({'user_id': currentUserId, 'friend_id': friendUserId});
-      await supa
-          .from('friends')
-          .delete()
-          .match({'user_id': friendUserId, 'friend_id': currentUserId});
+      await supa.from('friends').delete().match({
+        'user_id': currentUserId,
+        'friend_id': friendUserId,
+      });
+      await supa.from('friends').delete().match({
+        'user_id': friendUserId,
+        'friend_id': currentUserId,
+      });
 
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
@@ -565,9 +665,9 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
       await _loadProfile();
     } catch (e) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Failed to remove friend: $e')),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Failed to remove friend: $e')));
     }
   }
 
@@ -583,7 +683,8 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
       if (accept) {
         await supa
             .from('friends')
-            .update({'status': 'accepted'}).eq('id', requestId);
+            .update({'status': 'accepted'})
+            .eq('id', requestId);
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(content: Text('You are now friends with $requesterName')),
@@ -601,9 +702,9 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
       await _loadProfile();
     } catch (e) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Failed to update request: $e')),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Failed to update request: $e')));
     }
   }
 
@@ -636,25 +737,25 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
 
     final supa = Supabase.instance.client;
     try {
-      await supa
-          .from('friends')
-          .delete()
-          .match({'user_id': myId, 'friend_id': otherId});
-      await supa
-          .from('friends')
-          .delete()
-          .match({'user_id': otherId, 'friend_id': myId});
+      await supa.from('friends').delete().match({
+        'user_id': myId,
+        'friend_id': otherId,
+      });
+      await supa.from('friends').delete().match({
+        'user_id': otherId,
+        'friend_id': myId,
+      });
 
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Removed $name from friends')),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Removed $name from friends')));
       await _loadProfile();
     } catch (e) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Failed to remove friend: $e')),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Failed to remove friend: $e')));
     }
   }
 
@@ -674,15 +775,15 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
       });
 
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Friend request sent to $name')),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Friend request sent to $name')));
       await _loadProfile();
     } catch (e) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Failed to send request: $e')),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Failed to send request: $e')));
     }
   }
 
@@ -702,9 +803,9 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
       await _loadProfile();
     } catch (e) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Failed to cancel request: $e')),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Failed to cancel request: $e')));
     }
   }
 
@@ -771,8 +872,7 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
               try {
                 var query = supa
                     .from('users')
-                    .select(
-                        'id, full_name, photo_url, email, phone')
+                    .select('id, full_name, photo_url, email, phone')
                     .neq('id', currentUserId);
 
                 if (name.isNotEmpty) {
@@ -787,21 +887,22 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
 
                 final rows = await query;
                 results = (rows as List)
-                    .map<Map<String, dynamic>>((u) => {
-                          'id': u['id'] as String,
-                          'full_name':
-                              u['full_name'] as String? ?? 'Unknown',
-                          'photo_url': u['photo_url'] as String?,
-                          'base_zip_code': u['base_zip_code'] as String?,
-                          'email': u['email'] as String?,
-                          'phone': u['phone'] as String?,
-                        })
+                    .map<Map<String, dynamic>>(
+                      (u) => {
+                        'id': u['id'] as String,
+                        'full_name': u['full_name'] as String? ?? 'Unknown',
+                        'photo_url': u['photo_url'] as String?,
+                        'base_zip_code': u['base_zip_code'] as String?,
+                        'email': u['email'] as String?,
+                        'phone': u['phone'] as String?,
+                      },
+                    )
                     .toList();
               } catch (e) {
                 if (mounted) {
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    SnackBar(content: Text('Search failed: $e')),
-                  );
+                  ScaffoldMessenger.of(
+                    context,
+                  ).showSnackBar(SnackBar(content: Text('Search failed: $e')));
                 }
               } finally {
                 setSheetState(() => searching = false);
@@ -818,9 +919,7 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
 
                 if (mounted) {
                   ScaffoldMessenger.of(context).showSnackBar(
-                    SnackBar(
-                      content: Text('Friend request sent to $name'),
-                    ),
+                    SnackBar(content: Text('Friend request sent to $name')),
                   );
                   await _loadProfile();
                 }
@@ -851,10 +950,7 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
                 children: [
                   const Text(
                     'Add new friends',
-                    style: TextStyle(
-                      fontSize: 18,
-                      fontWeight: FontWeight.bold,
-                    ),
+                    style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
                   ),
                   const SizedBox(height: 12),
                   TextField(
@@ -888,8 +984,7 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
                     child: ElevatedButton.icon(
                       onPressed: searching ? null : doSearch,
                       icon: const Icon(Icons.search),
-                      label:
-                          Text(searching ? 'Searching...' : 'Search'),
+                      label: Text(searching ? 'Searching...' : 'Search'),
                     ),
                   ),
                   const SizedBox(height: 8),
@@ -898,19 +993,14 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
                       alignment: Alignment.centerLeft,
                       child: Text(
                         'Search players by name, email, or phone to add as friends.',
-                        style: TextStyle(
-                          fontSize: 12,
-                          color: Colors.grey,
-                        ),
+                        style: TextStyle(fontSize: 12, color: Colors.grey),
                       ),
                     )
                   else
                     SizedBox(
                       height: 260,
                       child: searching
-                          ? const Center(
-                              child: CircularProgressIndicator(),
-                            )
+                          ? const Center(child: CircularProgressIndicator())
                           : ListView.builder(
                               itemCount: results.length,
                               itemBuilder: (ctx, idx) {
@@ -918,14 +1008,10 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
                                 final id = r['id'] as String;
                                 final name =
                                     r['full_name'] as String? ?? 'Unknown';
-                                final photoUrl =
-                                    r['photo_url'] as String?;
-                                final email =
-                                    r['email'] as String?;
-                                final phone =
-                                    r['phone'] as String?;
-                                final rel =
-                                    relationshipByUserId[id];
+                                final photoUrl = r['photo_url'] as String?;
+                                final email = r['email'] as String?;
+                                final phone = r['phone'] as String?;
+                                final rel = relationshipByUserId[id];
 
                                 Widget trailing;
                                 if (rel == 'accepted') {
@@ -954,20 +1040,16 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
                                   );
                                 } else {
                                   trailing = IconButton(
-                                    icon: const Icon(
-                                        Icons.person_add_alt_1),
-                                    onPressed: () =>
-                                        addFriend(id, name),
+                                    icon: const Icon(Icons.person_add_alt_1),
+                                    onPressed: () => addFriend(id, name),
                                   );
                                 }
 
                                 final subtitleParts = <String>[];
-                                if (email != null &&
-                                    email.isNotEmpty) {
+                                if (email != null && email.isNotEmpty) {
                                   subtitleParts.add(email);
                                 }
-                                if (phone != null &&
-                                    phone.isNotEmpty) {
+                                if (phone != null && phone.isNotEmpty) {
                                   subtitleParts.add(phone);
                                 }
 
@@ -976,15 +1058,14 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
                                     leading: CircleAvatar(
                                       backgroundImage:
                                           (photoUrl != null &&
-                                                  photoUrl.isNotEmpty)
-                                              ? NetworkImage(photoUrl)
-                                              : null,
-                                      child: (photoUrl == null ||
-                                              photoUrl.isEmpty)
+                                              photoUrl.isNotEmpty)
+                                          ? NetworkImage(photoUrl)
+                                          : null,
+                                      child:
+                                          (photoUrl == null || photoUrl.isEmpty)
                                           ? Text(
                                               name.isNotEmpty
-                                                  ? name[0]
-                                                      .toUpperCase()
+                                                  ? name[0].toUpperCase()
                                                   : '?',
                                             )
                                           : null,
@@ -992,9 +1073,7 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
                                     title: Text(name),
                                     subtitle: subtitleParts.isEmpty
                                         ? null
-                                        : Text(
-                                            subtitleParts.join(' • '),
-                                          ),
+                                        : Text(subtitleParts.join(' • ')),
                                     trailing: trailing,
                                   ),
                                 );
@@ -1040,11 +1119,9 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
               final teamName = nameCtrl.text.trim();
               final desc = descCtrl.text.trim();
 
-              if (selectedSport == null ||
-                  teamName.isEmpty) {
+              if (selectedSport == null || teamName.isEmpty) {
                 setSheetState(() {
-                  errorText =
-                      'Sport and Team name are required.';
+                  errorText = 'Sport and Team name are required.';
                 });
                 return;
               }
@@ -1086,9 +1163,7 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
                 await _loadProfile();
 
                 ScaffoldMessenger.of(rootContext).showSnackBar(
-                  SnackBar(
-                    content: Text('Team "$teamName" created'),
-                  ),
+                  SnackBar(content: Text('Team "$teamName" created')),
                 );
               } catch (e) {
                 setSheetState(() {
@@ -1150,7 +1225,6 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
                       ),
                     ),
                     const SizedBox(height: 8),
-
 
                     // Proficiency level
                     DropdownButtonFormField<String>(
@@ -1267,18 +1341,12 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
 
               try {
                 // 1) delete existing rows
-                await supa
-                    .from('user_sports')
-                    .delete()
-                    .eq('user_id', userId);
+                await supa.from('user_sports').delete().eq('user_id', userId);
 
                 // 2) insert selected sports
                 if (selectedSports.isNotEmpty) {
                   final rows = selectedSports
-                      .map((s) => {
-                            'user_id': userId,
-                            'sport': s,
-                          })
+                      .map((s) => {'user_id': userId, 'sport': s})
                       .toList();
                   await supa.from('user_sports').insert(rows);
                 }
@@ -1288,9 +1356,7 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
                 await _loadProfile();
 
                 ScaffoldMessenger.of(context).showSnackBar(
-                  const SnackBar(
-                    content: Text('Sports interests updated'),
-                  ),
+                  const SnackBar(content: Text('Sports interests updated')),
                 );
               } catch (e) {
                 setSheetState(() {
@@ -1323,10 +1389,7 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
                       alignment: Alignment.centerLeft,
                       child: Text(
                         'Choose all sports you play or are interested in.',
-                        style: TextStyle(
-                          fontSize: 13,
-                          color: Colors.grey[700],
-                        ),
+                        style: TextStyle(fontSize: 13, color: Colors.grey[700]),
                       ),
                     ),
                     const SizedBox(height: 12),
@@ -1397,7 +1460,7 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
   }
 
   // ========== FRIENDS GROUPS MANAGEMENT ==========
-  
+
   Future<void> _showCreateFriendsGroupDialog() async {
     final nameController = TextEditingController();
     final selectedFriendIds = <String>{};
@@ -1409,8 +1472,15 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
         return StatefulBuilder(
           builder: (context, setDialogState) {
             String _displaySport(String key) {
-              return key.replaceAll('_', ' ').split(' ').map((w) =>
-                  w.isEmpty ? w : w[0].toUpperCase() + w.substring(1).toLowerCase()).join(' ');
+              return key
+                  .replaceAll('_', ' ')
+                  .split(' ')
+                  .map(
+                    (w) => w.isEmpty
+                        ? w
+                        : w[0].toUpperCase() + w.substring(1).toLowerCase(),
+                  )
+                  .join(' ');
             }
 
             return AlertDialog(
@@ -1472,8 +1542,12 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
                                 itemBuilder: (context, index) {
                                   final friend = _friends[index];
                                   final friendId = friend['id'] as String;
-                                  final friendName = friend['full_name'] as String? ?? 'Unknown';
-                                  final isSelected = selectedFriendIds.contains(friendId);
+                                  final friendName =
+                                      friend['full_name'] as String? ??
+                                      'Unknown';
+                                  final isSelected = selectedFriendIds.contains(
+                                    friendId,
+                                  );
 
                                   return CheckboxListTile(
                                     title: Text(friendName),
@@ -1504,7 +1578,9 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
                   onPressed: () async {
                     if (nameController.text.trim().isEmpty) {
                       ScaffoldMessenger.of(context).showSnackBar(
-                        const SnackBar(content: Text('Please enter a group name')),
+                        const SnackBar(
+                          content: Text('Please enter a group name'),
+                        ),
                       );
                       return;
                     }
@@ -1518,7 +1594,9 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
 
                     if (selectedFriendIds.isEmpty) {
                       ScaffoldMessenger.of(context).showSnackBar(
-                        const SnackBar(content: Text('Please select at least one friend')),
+                        const SnackBar(
+                          content: Text('Please select at least one friend'),
+                        ),
                       );
                       return;
                     }
@@ -1612,18 +1690,31 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
                     : Builder(
                         builder: (context) {
                           // Group by sport
-                          final Map<String, List<Map<String, dynamic>>> groupsBySport = {};
+                          final Map<String, List<Map<String, dynamic>>>
+                          groupsBySport = {};
                           for (final group in _friendsGroups) {
-                            final sport = (group['sport'] as String?) ?? 'Other';
-                            groupsBySport.putIfAbsent(sport, () => []).add(group);
+                            final sport =
+                                (group['sport'] as String?) ?? 'Other';
+                            groupsBySport
+                                .putIfAbsent(sport, () => [])
+                                .add(group);
                           }
 
                           // Sort sports
-                          final sortedSports = groupsBySport.keys.toList()..sort();
+                          final sortedSports = groupsBySport.keys.toList()
+                            ..sort();
 
                           String _displaySport(String key) {
-                            return key.replaceAll('_', ' ').split(' ').map((w) =>
-                                w.isEmpty ? w : w[0].toUpperCase() + w.substring(1).toLowerCase()).join(' ');
+                            return key
+                                .replaceAll('_', ' ')
+                                .split(' ')
+                                .map(
+                                  (w) => w.isEmpty
+                                      ? w
+                                      : w[0].toUpperCase() +
+                                            w.substring(1).toLowerCase(),
+                                )
+                                .join(' ');
                           }
 
                           return ListView(
@@ -1634,7 +1725,10 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
                               return [
                                 // Sport header
                                 Padding(
-                                  padding: const EdgeInsets.only(top: 8, bottom: 8),
+                                  padding: const EdgeInsets.only(
+                                    top: 8,
+                                    bottom: 8,
+                                  ),
                                   child: Row(
                                     children: [
                                       const Icon(
@@ -1656,10 +1750,15 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
                                 // Groups for this sport
                                 ...sportGroups.map<Widget>((group) {
                                   final groupId = group['id'] as String;
-                                  final groupName = group['name'] as String? ?? 'Unnamed Group';
+                                  final groupName =
+                                      group['name'] as String? ??
+                                      'Unnamed Group';
                                   final groupSport = group['sport'] as String?;
-                                  final memberCount = group['member_count'] as int? ?? 0;
-                                  final isCreator = (group['created_by'] as String?) == _currentUserId;
+                                  final memberCount =
+                                      group['member_count'] as int? ?? 0;
+                                  final isCreator =
+                                      (group['created_by'] as String?) ==
+                                      _currentUserId;
 
                                   return Card(
                                     margin: const EdgeInsets.only(bottom: 12),
@@ -1685,34 +1784,68 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
                                       trailing: PopupMenuButton<String>(
                                         icon: const Icon(Icons.more_vert),
                                         onSelected: (value) async {
-                                          Navigator.pop(context); // Close popup menu
+                                          Navigator.pop(
+                                            context,
+                                          ); // Close popup menu
                                           switch (value) {
                                             case 'view':
-                                              Navigator.pop(context); // Close bottom sheet
-                                              _showFriendsGroupDetails(group);
+                                              Navigator.pop(
+                                                context,
+                                              ); // Close bottom sheet
+                                              Navigator.of(context).push(
+                                                MaterialPageRoute(
+                                                  builder: (_) =>
+                                                      FriendsGroupProfileScreen(
+                                                        groupId:
+                                                            group['id']
+                                                                as String,
+                                                        groupName:
+                                                            group['name']
+                                                                as String? ??
+                                                            'Unnamed Group',
+                                                      ),
+                                                ),
+                                              );
                                               break;
                                             case 'edit':
                                               if (isCreator) {
-                                                Navigator.pop(context); // Close bottom sheet
-                                                _showEditFriendsGroupDialog(group);
+                                                Navigator.pop(
+                                                  context,
+                                                ); // Close bottom sheet
+                                                _showEditFriendsGroupDialog(
+                                                  group,
+                                                );
                                               }
                                               break;
                                             case 'add_members':
                                               if (isCreator) {
-                                                Navigator.pop(context); // Close bottom sheet
-                                                await _showAddMembersToGroup(group);
+                                                Navigator.pop(
+                                                  context,
+                                                ); // Close bottom sheet
+                                                await _showAddMembersToGroup(
+                                                  group,
+                                                );
                                               }
                                               break;
                                             case 'delete':
                                               if (isCreator) {
-                                                Navigator.pop(context); // Close bottom sheet
-                                                _showDeleteFriendsGroupDialog(group);
+                                                Navigator.pop(
+                                                  context,
+                                                ); // Close bottom sheet
+                                                _showDeleteFriendsGroupDialog(
+                                                  group,
+                                                );
                                               }
                                               break;
                                             case 'leave':
                                               if (!isCreator) {
-                                                Navigator.pop(context); // Close bottom sheet
-                                                _leaveFriendsGroup(groupId, groupName);
+                                                Navigator.pop(
+                                                  context,
+                                                ); // Close bottom sheet
+                                                _leaveFriendsGroup(
+                                                  groupId,
+                                                  groupName,
+                                                );
                                               }
                                               break;
                                           }
@@ -1722,7 +1855,10 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
                                             value: 'view',
                                             child: Row(
                                               children: [
-                                                Icon(Icons.visibility, size: 20),
+                                                Icon(
+                                                  Icons.visibility,
+                                                  size: 20,
+                                                ),
                                                 SizedBox(width: 8),
                                                 Text('View Details'),
                                               ],
@@ -1743,7 +1879,10 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
                                               value: 'add_members',
                                               child: Row(
                                                 children: [
-                                                  Icon(Icons.person_add, size: 20),
+                                                  Icon(
+                                                    Icons.person_add,
+                                                    size: 20,
+                                                  ),
                                                   SizedBox(width: 8),
                                                   Text('Add Members'),
                                                 ],
@@ -1753,9 +1892,18 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
                                               value: 'delete',
                                               child: Row(
                                                 children: [
-                                                  Icon(Icons.delete, size: 20, color: Colors.red),
+                                                  Icon(
+                                                    Icons.delete,
+                                                    size: 20,
+                                                    color: Colors.red,
+                                                  ),
                                                   SizedBox(width: 8),
-                                                  Text('Delete Group', style: TextStyle(color: Colors.red)),
+                                                  Text(
+                                                    'Delete Group',
+                                                    style: TextStyle(
+                                                      color: Colors.red,
+                                                    ),
+                                                  ),
                                                 ],
                                               ),
                                             ),
@@ -1764,7 +1912,10 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
                                               value: 'leave',
                                               child: Row(
                                                 children: [
-                                                  Icon(Icons.exit_to_app, size: 20),
+                                                  Icon(
+                                                    Icons.exit_to_app,
+                                                    size: 20,
+                                                  ),
                                                   SizedBox(width: 8),
                                                   Text('Leave Group'),
                                                 ],
@@ -1773,8 +1924,22 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
                                         ],
                                       ),
                                       onTap: () {
-                                        Navigator.pop(context); // Close bottom sheet
-                                        _showFriendsGroupDetails(group);
+                                        Navigator.pop(
+                                          context,
+                                        ); // Close bottom sheet
+                                        Navigator.of(context).push(
+                                          MaterialPageRoute(
+                                            builder: (_) =>
+                                                FriendsGroupProfileScreen(
+                                                  groupId:
+                                                      group['id'] as String,
+                                                  groupName:
+                                                      group['name']
+                                                          as String? ??
+                                                      'Unnamed Group',
+                                                ),
+                                          ),
+                                        );
                                       },
                                     ),
                                   );
@@ -1792,7 +1957,11 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
     );
   }
 
-  Future<void> _createFriendsGroup(String name, String sport, List<String> friendIds) async {
+  Future<void> _createFriendsGroup(
+    String name,
+    String sport,
+    List<String> friendIds,
+  ) async {
     final supa = Supabase.instance.client;
     final userId = _currentUserId;
     if (userId == null) return;
@@ -1813,41 +1982,41 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
       // Add members (including creator)
       // Filter out creator from friendIds if they were somehow selected
       final membersToAdd = friendIds.where((id) => id != userId).toList();
-      
+
       // Create member records: creator + selected friends
       final memberRecords = <Map<String, dynamic>>[
         // Add creator as first member
-        {
-          'group_id': groupId,
-          'user_id': userId,
-          'added_by': userId,
-        },
+        {'group_id': groupId, 'user_id': userId, 'added_by': userId},
         // Add selected friends
-        ...membersToAdd.map((friendId) => {
-          'group_id': groupId,
-          'user_id': friendId,
-          'added_by': userId,
-        }),
+        ...membersToAdd.map(
+          (friendId) => {
+            'group_id': groupId,
+            'user_id': friendId,
+            'added_by': userId,
+          },
+        ),
       ];
 
       await supa.from('friends_group_members').insert(memberRecords);
 
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Friends group created!')),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('Friends group created!')));
       await _loadProfile();
     } catch (e) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Failed to create group: $e')),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Failed to create group: $e')));
     }
   }
 
   Future<void> _showEditFriendsGroupDialog(Map<String, dynamic> group) async {
     final groupId = group['id'] as String;
-    final nameController = TextEditingController(text: group['name'] as String? ?? '');
+    final nameController = TextEditingController(
+      text: group['name'] as String? ?? '',
+    );
 
     await showDialog(
       context: context,
@@ -1893,15 +2062,15 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
           .eq('id', groupId);
 
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Group updated!')),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('Group updated!')));
       await _loadProfile();
     } catch (e) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Failed to update group: $e')),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Failed to update group: $e')));
     }
   }
 
@@ -1931,21 +2100,21 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
     if (userId == null) return;
 
     try {
-      await supa
-          .from('friends_group_members')
-          .delete()
-          .match({'group_id': groupId, 'user_id': userId});
+      await supa.from('friends_group_members').delete().match({
+        'group_id': groupId,
+        'user_id': userId,
+      });
 
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Left "$groupName"')),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Left "$groupName"')));
       await _loadProfile();
     } catch (e) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Failed to leave group: $e')),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Failed to leave group: $e')));
     }
   }
 
@@ -1958,7 +2127,7 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
     if (currentUserId == null) return;
 
     final supa = Supabase.instance.client;
-    
+
     // Load members
     final membersRows = await supa
         .from('friends_group_members')
@@ -1977,14 +2146,15 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
     final users = memberIds.isEmpty
         ? <dynamic>[]
         : await supa
-            .from('users')
-            .select('id, full_name, photo_url')
-            .inFilter('id', memberIds);
+              .from('users')
+              .select('id, full_name, photo_url')
+              .inFilter('id', memberIds);
 
     // Check friendship status for each member
-    final Map<String, String> friendshipStatus = {}; // 'accepted', 'pending', 'none'
+    final Map<String, String> friendshipStatus =
+        {}; // 'accepted', 'pending', 'none'
     final Map<String, String?> friendRequestIds = {};
-    
+
     if (memberIds.isNotEmpty) {
       // Check if current user is friends with each member
       final friendsRows = await supa
@@ -2031,7 +2201,10 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
       context: context,
       builder: (context) => StatefulBuilder(
         builder: (context, setDialogState) {
-          Future<void> sendFriendRequest(String friendId, String friendName) async {
+          Future<void> sendFriendRequest(
+            String friendId,
+            String friendName,
+          ) async {
             try {
               await supa.from('friends').insert({
                 'user_id': currentUserId,
@@ -2081,30 +2254,38 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
                   if (users is List && users.isNotEmpty)
                     ...users.map((user) {
                       final userId = user['id'] as String;
-                      final userName = user['full_name'] as String? ?? 'Unknown';
+                      final userName =
+                          user['full_name'] as String? ?? 'Unknown';
                       final photoUrl = user['photo_url'] as String?;
                       final isFriend = friendshipStatus[userId] == 'accepted';
-                      final hasPendingRequest = friendshipStatus[userId] == 'pending';
+                      final hasPendingRequest =
+                          friendshipStatus[userId] == 'pending';
                       final isSelf = userId == currentUserId;
                       final isGroupCreator = userId == group['created_by'];
 
                       return ListTile(
                         leading: CircleAvatar(
-                          backgroundImage: photoUrl != null && photoUrl.isNotEmpty
+                          backgroundImage:
+                              photoUrl != null && photoUrl.isNotEmpty
                               ? NetworkImage(photoUrl)
                               : null,
                           child: photoUrl == null || photoUrl.isEmpty
-                              ? Text(userName.isNotEmpty ? userName[0].toUpperCase() : '?')
+                              ? Text(
+                                  userName.isNotEmpty
+                                      ? userName[0].toUpperCase()
+                                      : '?',
+                                )
                               : null,
                         ),
                         title: Row(
                           children: [
-                            Expanded(
-                              child: Text(userName),
-                            ),
+                            Expanded(child: Text(userName)),
                             if (isGroupCreator)
                               Container(
-                                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 8,
+                                  vertical: 4,
+                                ),
                                 decoration: BoxDecoration(
                                   color: Colors.blue.shade100,
                                   borderRadius: BorderRadius.circular(12),
@@ -2133,9 +2314,13 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
                                 children: [
                                   if (!isFriend && !hasPendingRequest)
                                     TextButton.icon(
-                                      icon: const Icon(Icons.person_add, size: 18),
+                                      icon: const Icon(
+                                        Icons.person_add,
+                                        size: 18,
+                                      ),
                                       label: const Text('Add Friend'),
-                                      onPressed: () => sendFriendRequest(userId, userName),
+                                      onPressed: () =>
+                                          sendFriendRequest(userId, userName),
                                     ),
                                   if (hasPendingRequest)
                                     const Text(
@@ -2153,13 +2338,18 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
                                     ),
                                   if (isCreator && !isSelf)
                                     IconButton(
-                                      icon: const Icon(Icons.remove_circle_outline),
+                                      icon: const Icon(
+                                        Icons.remove_circle_outline,
+                                      ),
                                       tooltip: 'Remove from group',
                                       onPressed: () async {
                                         await supa
                                             .from('friends_group_members')
                                             .delete()
-                                            .match({'group_id': groupId, 'user_id': userId});
+                                            .match({
+                                              'group_id': groupId,
+                                              'user_id': userId,
+                                            });
                                         if (context.mounted) {
                                           Navigator.pop(context);
                                           await _showFriendsGroupDetails(group);
@@ -2255,8 +2445,11 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
                           itemBuilder: (context, index) {
                             final friend = availableFriends[index];
                             final friendId = friend['id'] as String;
-                            final friendName = friend['full_name'] as String? ?? 'Unknown';
-                            final isSelected = selectedFriendIds.contains(friendId);
+                            final friendName =
+                                friend['full_name'] as String? ?? 'Unknown';
+                            final isSelected = selectedFriendIds.contains(
+                              friendId,
+                            );
 
                             return CheckboxListTile(
                               title: Text(friendName),
@@ -2286,7 +2479,10 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
                   onPressed: selectedFriendIds.isEmpty
                       ? null
                       : () async {
-                          await _addMembersToGroup(groupId, selectedFriendIds.toList());
+                          await _addMembersToGroup(
+                            groupId,
+                            selectedFriendIds.toList(),
+                          );
                           if (context.mounted) Navigator.pop(context);
                         },
                   child: const Text('Add'),
@@ -2299,17 +2495,24 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
     );
   }
 
-  Future<void> _addMembersToGroup(String groupId, List<String> friendIds) async {
+  Future<void> _addMembersToGroup(
+    String groupId,
+    List<String> friendIds,
+  ) async {
     final supa = Supabase.instance.client;
     final userId = _currentUserId;
     if (userId == null) return;
 
     try {
-      final memberRecords = friendIds.map((friendId) => {
-        'group_id': groupId,
-        'user_id': friendId,
-        'added_by': userId,
-      }).toList();
+      final memberRecords = friendIds
+          .map(
+            (friendId) => {
+              'group_id': groupId,
+              'user_id': friendId,
+              'added_by': userId,
+            },
+          )
+          .toList();
 
       await supa.from('friends_group_members').insert(memberRecords);
 
@@ -2320,9 +2523,9 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
       await _loadProfile();
     } catch (e) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Failed to add members: $e')),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Failed to add members: $e')));
     }
   }
 
@@ -2334,7 +2537,9 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
       context: context,
       builder: (context) => AlertDialog(
         title: const Text('Delete Group?'),
-        content: Text('Are you sure you want to delete "$groupName"? This action cannot be undone.'),
+        content: Text(
+          'Are you sure you want to delete "$groupName"? This action cannot be undone.',
+        ),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(context, false),
@@ -2356,21 +2561,66 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
 
     final supa = Supabase.instance.client;
     try {
-      await supa
-          .from('friends_groups')
-          .delete()
-          .eq('id', groupId);
+      await supa.from('friends_groups').delete().eq('id', groupId);
 
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Deleted "$groupName"')),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Deleted "$groupName"')));
       await _loadProfile();
     } catch (e) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Failed to delete group: $e')),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Failed to delete group: $e')));
+    }
+  }
+
+  Future<void> _showDeleteTeamDialog(String teamId, String teamName) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Delete Team?'),
+        content: Text(
+          'Are you sure you want to delete "$teamName"? This action cannot be undone.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancel'),
+          ),
+          ElevatedButton(
+            onPressed: () => Navigator.pop(context, true),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: Colors.red,
+              foregroundColor: Colors.white,
+            ),
+            child: const Text('Delete'),
+          ),
+        ],
+      ),
+    );
+
+    if (confirmed != true) return;
+
+    final supa = Supabase.instance.client;
+    try {
+      // Delete team members first (cascade should handle this, but being explicit)
+      await supa.from('team_members').delete().eq('team_id', teamId);
+
+      // Delete the team
+      await supa.from('teams').delete().eq('id', teamId);
+
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Deleted "$teamName"')));
+      await _loadProfile();
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Failed to delete team: $e')));
     }
   }
 
@@ -2422,10 +2672,10 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
               onPressed: _friendRequestIdForProfile == null
                   ? null
                   : () => _respondToFriendRequest(
-                        _friendRequestIdForProfile!,
-                        displayName,
-                        true,
-                      ),
+                      _friendRequestIdForProfile!,
+                      displayName,
+                      true,
+                    ),
               child: const Text('Accept'),
             ),
             const SizedBox(width: 8),
@@ -2433,10 +2683,10 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
               onPressed: _friendRequestIdForProfile == null
                   ? null
                   : () => _respondToFriendRequest(
-                        _friendRequestIdForProfile!,
-                        displayName,
-                        false,
-                      ),
+                      _friendRequestIdForProfile!,
+                      displayName,
+                      false,
+                    ),
               child: const Text('Decline'),
             ),
           ],
@@ -2452,6 +2702,10 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
     }
   }
 
+  // Collapsible state for Groups and Teams
+  bool _groupsExpanded = true;
+  bool _teamsExpanded = true;
+
   @override
   Widget build(BuildContext context) {
     final supa = Supabase.instance.client;
@@ -2464,27 +2718,34 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
       teamsBySport.putIfAbsent(key, () => []).add(t);
     }
 
+    // Color constants matching rules.md
+    const tealDark = Color(0xFF0E7C7B);
+    const teal = Color(0xFF1FA3A3);
+    const tealSoft = Color(0xFF5CB8B4);
+    const white = Color(0xFFFFFFFF);
+    const offWhite = Color(0xFFEFF7F6);
+    const orange = Color(0xFFFF8A30);
+    const greenButton = Color(0xFF4FAFAF);
+    const textDark = Color(0xFF0F2E2E);
+    const profileTeal = Color(0xFF14919B);
+
     return Scaffold(
+      backgroundColor: profileTeal,
       appBar: AppBar(
-        title: Text(_isSelf ? 'My Profile' : 'Player Profile'),
+        backgroundColor: profileTeal,
+        elevation: 0,
+        title: const Text(''),
         actions: [
-          // 🔍 Global search from profile
-          IconButton(
-            tooltip:
-                'Search a player/team by name or ZIP or email id or phone number',
-            icon: const Icon(Icons.search),
-            onPressed: () => showGlobalSearchSheet(context),
-          ),
           if (_isSelf)
             IconButton(
               tooltip: _isEditing ? 'Cancel editing' : 'Edit profile',
-              icon: Icon(_isEditing ? Icons.close : Icons.edit),
+              icon: Icon(_isEditing ? Icons.close : Icons.edit, color: white),
               onPressed: _isEditing ? _cancelEditing : _startEditing,
             ),
           if (_isSelf)
             IconButton(
               tooltip: 'Logout',
-              icon: const Icon(Icons.logout),
+              icon: const Icon(Icons.logout, color: white),
               onPressed: _logout,
             ),
         ],
@@ -2492,848 +2753,1228 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
       body: _loading
           ? const Center(child: CircularProgressIndicator())
           : _userRow == null
-              ? const Center(
-                  child: Text('No profile found.'),
-                )
-              : RefreshIndicator(
-                  onRefresh: _loadProfile,
-                  child: SingleChildScrollView(
-                    physics: const AlwaysScrollableScrollPhysics(),
-                    child: Padding(
-                      padding: const EdgeInsets.all(16),
-                      child: Column(
-                        children: [
-                          // Header card
-                          Card(
-                            shape: RoundedRectangleBorder(
-                              borderRadius: BorderRadius.circular(16),
-                            ),
-                            elevation: 3,
-                            child: Padding(
-                              padding: const EdgeInsets.all(16),
-                              child: Column(
-                                crossAxisAlignment:
-                                    CrossAxisAlignment.start,
-                                children: [
-                                  Row(
-                                    crossAxisAlignment:
-                                        CrossAxisAlignment.center,
-                                    children: [
-                                      // Avatar
-                                      CircleAvatar(
-                                        radius: 38,
-                                        backgroundImage:
-                                            (_userRow!['photo_url']
-                                                        as String?)
-                                                    ?.isNotEmpty ==
-                                                true
-                                                ? NetworkImage(
-                                                    _userRow!['photo_url']
-                                                        as String,
-                                                  )
-                                                : null,
-                                        child: ((_userRow!['photo_url']
-                                                        as String?)
-                                                    ?.isEmpty ??
-                                                true)
-                                            ? Text(
-                                                (_userRow!['full_name']
-                                                            as String?)
-                                                        ?.isNotEmpty ==
-                                                    true
-                                                    ? (_userRow![
-                                                                'full_name']
-                                                            as String)[0]
-                                                        .toUpperCase()
-                                                    : '?',
-                                                style: const TextStyle(
-                                                  fontSize: 28,
-                                                  fontWeight:
-                                                      FontWeight.bold,
-                                                ),
-                                              )
-                                            : null,
-                                      ),
-                                      const SizedBox(width: 16),
-                                      Expanded(
-                                        child: Column(
-                                          crossAxisAlignment:
-                                              CrossAxisAlignment.start,
-                                          children: [
-                                            if (_isEditing)
-                                              TextField(
-                                                controller: _nameEditController,
-                                                style: const TextStyle(
-                                                  fontSize: 20,
-                                                  fontWeight: FontWeight.bold,
-                                                ),
-                                                decoration: const InputDecoration(
-                                                  border: OutlineInputBorder(),
-                                                  contentPadding: EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                                                ),
-                                              )
-                                            else
-                                              Text(
-                                                (_userRow!['full_name']
-                                                            as String?) ??
-                                                    'No Name',
-                                                style: const TextStyle(
-                                                  fontSize: 20,
-                                                  fontWeight:
-                                                      FontWeight.bold,
-                                                ),
-                                              ),
-                                            const SizedBox(height: 4),
-                                            if (_isEditing)
-                                              InkWell(
-                                                onTap: _showHomeLocationPicker,
-                                                child: Container(
-                                                  padding: const EdgeInsets.all(12),
-                                                  decoration: BoxDecoration(
-                                                    border: Border.all(color: Colors.grey.shade400),
-                                                    borderRadius: BorderRadius.circular(4),
-                                                  ),
-                                                  child: Row(
-                                                    children: [
-                                                      const Icon(Icons.location_on, size: 16, color: Colors.grey),
-                                                      const SizedBox(width: 8),
-                                                      Expanded(
-                                                        child: Text(
-                                                          () {
-                                                            if (_editHomeCity != null && _editHomeState != null && _editHomeCity!.isNotEmpty && _editHomeState!.isNotEmpty) {
-                                                              if (_editHomeZipCode != null && _editHomeZipCode!.isNotEmpty) {
-                                                                return '$_editHomeCity, $_editHomeState $_editHomeZipCode';
-                                                              }
-                                                              return '$_editHomeCity, $_editHomeState';
-                                                            } else if (_editHomeZipCode != null && _editHomeZipCode!.isNotEmpty) {
-                                                              return _editHomeZipCode!;
-                                                            }
-                                                            return 'Tap to set home location';
-                                                          }(),
-                                                          style: TextStyle(
-                                                            color: (_editHomeCity != null && _editHomeState != null) ? Colors.black87 : Colors.grey,
-                                                          ),
-                                                        ),
-                                                      ),
-                                                      const Icon(Icons.chevron_right, size: 16, color: Colors.grey),
-                                                    ],
-                                                  ),
-                                                ),
-                                              )
-                                            else
-                                              Text(
-                                                () {
-                                                  final homeCity = _userRow!['home_city'] as String?;
-                                                  final homeState = _userRow!['home_state'] as String?;
-                                                  final homeZip = _userRow!['home_zip_code'] as String?;
-                                                  
-                                                  if (homeCity != null && homeState != null && homeCity.isNotEmpty && homeState.isNotEmpty) {
-                                                    if (homeZip != null && homeZip.isNotEmpty) {
-                                                      return '$homeCity, $homeState $homeZip';
-                                                    }
-                                                    return '$homeCity, $homeState';
-                                                  } else if (homeZip != null && homeZip.isNotEmpty) {
-                                                    return homeZip;
-                                                  }
-                                                  return 'Location: Not set';
-                                                }(),
-                                                style: const TextStyle(
-                                                  fontSize: 14,
-                                                  color: Colors.black87,
-                                                ),
-                                              ),
-                                            const SizedBox(height: 8),
-                                            Row(
-                                              children: <Widget>[
-                                                const Icon(
-                                                  Icons.groups,
-                                                  size: 16,
-                                                  color: Colors
-                                                      .blueGrey,
-                                                ),
-                                                const SizedBox(width: 4),
-                                                Text(
-                                                  'Teams: $_teamsCount',
-                                                  style:
-                                                      const TextStyle(
-                                                    fontSize: 13,
-                                                    color:
-                                                        Colors.blueGrey,
-                                                  ),
-                                                ),
-                                              ],
-                                            ),
-                                          ],
-                                        ),
-                                      ),
-                                    ],
-                                  ),
-                                  if (_isSelf && _isEditing) ...[
-                                    const SizedBox(height: 12),
-                                    Row(
-                                      mainAxisAlignment: MainAxisAlignment.end,
-                                      children: [
-                                        TextButton(
-                                          onPressed: _savingProfile ? null : _cancelEditing,
-                                          child: const Text('Cancel'),
-                                        ),
-                                        const SizedBox(width: 8),
-                                        ElevatedButton(
-                                          onPressed: _savingProfile ? null : _saveProfile,
-                                          child: _savingProfile
-                                              ? const SizedBox(
-                                                  width: 16,
-                                                  height: 16,
-                                                  child: CircularProgressIndicator(strokeWidth: 2),
-                                                )
-                                              : const Text('Save'),
-                                        ),
-                                      ],
-                                    ),
-                                  ],
-                                  if (!_isSelf) ...[
-                                    const SizedBox(height: 12),
-                                    _buildFriendHeaderAction(),
-                                  ],
-                                ],
-                              ),
-                            ),
-                          ),
-
-                          const SizedBox(height: 16),
-
-                          // Bio Section (only for self)
-                          if (_isSelf) ...[
-                            _buildBioSection(),
-                            const SizedBox(height: 24),
-                          ],
-
-                          // Friend requests (self only)
-                          if (_isSelf && _incomingRequests.isNotEmpty) ...[
-                            Align(
-                              alignment: Alignment.centerLeft,
-                              child: Text(
-                                'Friend Requests',
-                                style: Theme.of(context)
-                                    .textTheme
-                                    .titleMedium
-                                    ?.copyWith(
-                                      fontWeight: FontWeight.bold,
-                                    ),
-                              ),
-                            ),
-                            const SizedBox(height: 8),
-                            Column(
-                              children: _incomingRequests.map((r) {
-                                final name =
-                                    r['full_name'] as String? ??
-                                        'Unknown';
-                                final photoUrl =
-                                    r['photo_url'] as String?;
-                                final reqId =
-                                    r['request_id'] as String;
-
-                                return Card(
-                                  child: ListTile(
-                                    leading: CircleAvatar(
-                                      backgroundImage:
-                                          (photoUrl != null &&
-                                                  photoUrl.isNotEmpty)
-                                              ? NetworkImage(photoUrl)
-                                              : null,
-                                      child: (photoUrl == null ||
-                                              photoUrl.isEmpty)
-                                          ? Text(
-                                              name.isNotEmpty
-                                                  ? name[0]
-                                                      .toUpperCase()
-                                                  : '?',
-                                            )
-                                          : null,
-                                    ),
-                                    title: Text(name),
-                                    trailing: Wrap(
-                                      spacing: 4,
-                                      children: [
-                                        TextButton(
-                                          onPressed: () =>
-                                              _respondToFriendRequest(
-                                            reqId,
-                                            name,
-                                            false,
-                                          ),
-                                          child: const Text('Decline'),
-                                        ),
-                                        ElevatedButton(
-                                          onPressed: () =>
-                                              _respondToFriendRequest(
-                                            reqId,
-                                            name,
-                                            true,
-                                          ),
-                                          child: const Text('Accept'),
-                                        ),
-                                      ],
-                                    ),
-                                  ),
-                                );
-                              }).toList(),
-                            ),
-                            const SizedBox(height: 24),
-                          ],
-
-                          // Friends section
-                          Row(
-                            mainAxisAlignment:
-                                MainAxisAlignment.spaceBetween,
-                            children: [
-                              Text(
-                                'Friends',
-                                style: Theme.of(context)
-                                    .textTheme
-                                    .titleMedium
-                                    ?.copyWith(
-                                      fontWeight: FontWeight.bold,
-                                    ),
-                              ),
-                              if (_isSelf)
-                                TextButton.icon(
-                                  onPressed: _showManageFriendsSheet,
-                                  icon: const Icon(
-                                    Icons.person_add_alt_1,
-                                    size: 18,
-                                  ),
-                                  label: const Text('Add new friends'),
-                                ),
-                            ],
-                          ),
-                          const SizedBox(height: 8),
-                          if (_friends.isEmpty)
-                            const Align(
-                              alignment: Alignment.centerLeft,
-                              child: Text(
-                                'No friends added yet.',
-                                style: TextStyle(
-                                  fontSize: 13,
-                                  color: Colors.grey,
-                                ),
-                              ),
-                            )
-                          else
-                            Column(
-                              children: _friends.map((f) {
-                                final name =
-                                    f['full_name'] as String? ??
-                                        'Unknown';
-                                final photoUrl =
-                                    f['photo_url'] as String?;
-                                final zip =
-                                    f['base_zip_code'] as String?;
-
-                                return Card(
-                                  margin: const EdgeInsets.symmetric(
-                                    vertical: 4,
-                                  ),
-                                  child: ListTile(
-                                    leading: CircleAvatar(
-                                      backgroundImage:
-                                          (photoUrl != null &&
-                                                  photoUrl.isNotEmpty)
-                                              ? NetworkImage(photoUrl)
-                                              : null,
-                                      child: (photoUrl == null ||
-                                              photoUrl.isEmpty)
-                                          ? Text(
-                                              name.isNotEmpty
-                                                  ? name[0]
-                                                      .toUpperCase()
-                                                  : '?',
-                                            )
-                                          : null,
-                                    ),
-                                    title: Text(name),
-                                    onTap: () {
-                                      Navigator.of(context).push(
-                                        MaterialPageRoute(
-                                          builder: (_) =>
-                                              UserProfileScreen(
-                                            userId:
-                                                f['id'] as String,
-                                          ),
-                                        ),
-                                      );
-                                    },
-                                    trailing: _isSelf
-                                        ? IconButton(
-                                            tooltip: 'Remove friend',
-                                            icon: const Icon(
-                                              Icons.person_remove,
-                                            ),
-                                            onPressed: () =>
-                                                _removeFriend(
-                                              f['id'] as String,
-                                              name,
-                                            ),
-                                          )
-                                        : null,
-                                  ),
-                                );
-                              }).toList(),
-                            ),
-
-                          const SizedBox(height: 24),
-
-                          // Friends Groups section (show for profile user)
-                          if (_friendsGroups.isNotEmpty || _isSelf) ...[
-                            Row(
-                              mainAxisAlignment:
-                                  MainAxisAlignment.spaceBetween,
+          ? const Center(child: Text('No profile found.'))
+          : SafeArea(
+              child: SingleChildScrollView(
+                padding: const EdgeInsets.symmetric(horizontal: 16),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    const SizedBox(height: 16),
+                    // Profile Header Card - WHITE background
+                    Card(
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(18),
+                      ),
+                      elevation: 2,
+                      color: white,
+                      child: Padding(
+                        padding: const EdgeInsets.all(16),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.center,
+                          children: [
+                            // Profile Photo - centered
+                            Stack(
                               children: [
-                                Column(
-                                  crossAxisAlignment: CrossAxisAlignment.start,
-                                  children: [
-                                    Text(
-                                      'Friends Groups',
-                                      style: Theme.of(context)
-                                          .textTheme
-                                          .titleMedium
-                                          ?.copyWith(
+                                CircleAvatar(
+                                  radius: 60,
+                                  backgroundColor: orange,
+                                  backgroundImage:
+                                      (_userRow!['photo_url'] as String?)
+                                              ?.isNotEmpty ==
+                                          true
+                                      ? NetworkImage(
+                                          _userRow!['photo_url'] as String,
+                                        )
+                                      : null,
+                                  child:
+                                      ((_userRow!['photo_url'] as String?)
+                                              ?.isEmpty ??
+                                          true)
+                                      ? Text(
+                                          (_userRow!['full_name'] as String?)
+                                                      ?.isNotEmpty ==
+                                                  true
+                                              ? (_userRow!['full_name']
+                                                        as String)[0]
+                                                    .toUpperCase()
+                                              : '?',
+                                          style: const TextStyle(
+                                            fontSize: 48,
                                             fontWeight: FontWeight.bold,
+                                            color: white,
                                           ),
-                                    ),
-                                    const SizedBox(height: 2),
-                                    Row(
-                                      children: [
-                                        Icon(
-                                          Icons.lock_outline,
-                                          size: 12,
-                                          color: Colors.grey.shade600,
-                                        ),
-                                        const SizedBox(width: 4),
-                                        Text(
-                                          'Private - Only visible to group members',
-                                          style: TextStyle(
-                                            fontSize: 11,
-                                            color: Colors.grey.shade600,
-                                            fontStyle: FontStyle.italic,
-                                          ),
-                                        ),
-                                      ],
-                                    ),
-                                  ],
+                                        )
+                                      : null,
                                 ),
-                                if (_friendsGroups.isNotEmpty)
-                                  TextButton.icon(
-                                    onPressed: _showManageFriendsGroupSheet,
-                                    icon: const Icon(
-                                      Icons.settings,
-                                      size: 18,
+                                if (_isSelf)
+                                  Positioned(
+                                    bottom: 0,
+                                    right: 0,
+                                    child: CircleAvatar(
+                                      radius: 18,
+                                      backgroundColor: orange,
+                                      child: IconButton(
+                                        padding: EdgeInsets.zero,
+                                        icon: const Icon(
+                                          Icons.camera_alt,
+                                          size: 18,
+                                          color: white,
+                                        ),
+                                        onPressed: _changeProfilePhoto,
+                                      ),
                                     ),
-                                    label: const Text('Manage'),
                                   ),
                               ],
                             ),
-                            const SizedBox(height: 8),
-                            
-                            // "Create Friends Group" card (only for self)
-                            if (_isSelf)
-                              Card(
-                                margin: const EdgeInsets.only(bottom: 8),
-                                shape: RoundedRectangleBorder(
-                                  borderRadius: BorderRadius.circular(12),
+                            const SizedBox(height: 12),
+                            // Name - centered
+                            if (_isEditing)
+                              TextField(
+                                controller: _nameEditController,
+                                textAlign: TextAlign.center,
+                                style: const TextStyle(
+                                  fontSize: 24,
+                                  fontWeight: FontWeight.bold,
+                                  color: textDark,
                                 ),
-                                color: Colors.green.shade50, // Not const
-                                child: ListTile(
-                                  leading: const CircleAvatar(
-                                    backgroundColor: Colors.green,
-                                    child: Icon(
-                                      Icons.group_add,
-                                      color: Colors.white,
+                                decoration: InputDecoration(
+                                  border: OutlineInputBorder(
+                                    borderSide: BorderSide(
+                                      color: Colors.grey.shade300,
                                     ),
                                   ),
-                                  title: const Text(
-                                    'Create Friends Group',
-                                    style: TextStyle(
-                                      fontWeight: FontWeight.w600,
+                                  enabledBorder: OutlineInputBorder(
+                                    borderSide: BorderSide(
+                                      color: Colors.grey.shade300,
                                     ),
                                   ),
-                                  subtitle: const Text(
-                                    'Create a group to easily invite multiple friends to games.',
+                                  focusedBorder: OutlineInputBorder(
+                                    borderSide: BorderSide(color: greenButton),
                                   ),
-                                  onTap: _showCreateFriendsGroupDialog,
-                                ),
-                              ),
-                            
-                            if (_friendsGroups.isEmpty)
-                              const Align(
-                                alignment: Alignment.centerLeft,
-                                child: Text(
-                                  'No friends groups yet. Create one to easily invite multiple friends to games!',
-                                  style: TextStyle(
-                                    fontSize: 13,
-                                    color: Colors.grey,
+                                  contentPadding: const EdgeInsets.symmetric(
+                                    horizontal: 12,
+                                    vertical: 8,
                                   ),
                                 ),
                               )
                             else
-                              Builder(
-                                builder: (context) {
-                                  // Group by sport
-                                  final Map<String, List<Map<String, dynamic>>> groupsBySport = {};
-                                  for (final group in _friendsGroups) {
-                                    final sport = (group['sport'] as String?) ?? 'Other';
-                                    groupsBySport.putIfAbsent(sport, () => []).add(group);
-                                  }
-
-                                  // Sort sports
-                                  final sortedSports = groupsBySport.keys.toList()..sort();
-
-                                  return Column(
-                                    children: sortedSports.map((sportKey) {
-                                      final sportGroups = groupsBySport[sportKey]!;
-                                      
-                                      String _displaySport(String key) {
-                                        return key.replaceAll('_', ' ').split(' ').map((w) =>
-                                            w.isEmpty ? w : w[0].toUpperCase() + w.substring(1).toLowerCase()).join(' ');
-                                      }
-
-                                      return Column(
-                                        crossAxisAlignment: CrossAxisAlignment.start,
-                                        children: [
-                                          const SizedBox(height: 8),
-                                          Row(
-                                            children: [
-                                              const Icon(
-                                                Icons.sports,
-                                                size: 18,
-                                                color: Colors.black87,
-                                              ),
-                                              const SizedBox(width: 6),
-                                              Text(
-                                                _displaySport(sportKey),
-                                                style: const TextStyle(
-                                                  fontSize: 15,
-                                                  fontWeight: FontWeight.w600,
-                                                ),
-                                              ),
-                                            ],
-                                          ),
-                                          const SizedBox(height: 4),
-                                          ...sportGroups.map((group) {
-                                            final groupId = group['id'] as String;
-                                            final groupName = group['name'] as String? ?? 'Unnamed Group';
-                                            final groupSport = group['sport'] as String?;
-                                            final memberCount = group['member_count'] as int? ?? 0;
-                                            final isCreator = (group['created_by'] as String?) == _effectiveUserId;
-
-                                            return Card(
-                                              margin: const EdgeInsets.symmetric(
-                                                vertical: 4,
-                                              ),
-                                              child: ListTile(
-                                                leading: CircleAvatar(
-                                                  backgroundColor: Colors.blue.shade100,
-                                                  child: Icon(
-                                                    Icons.group,
-                                                    color: Colors.blue.shade700,
-                                                  ),
-                                                ),
-                                                title: Text(
-                                                  groupSport != null
-                                                      ? '$groupName, ${_displaySport(groupSport)}'
-                                                      : groupName,
-                                                  style: const TextStyle(
-                                                    fontWeight: FontWeight.w600,
-                                                  ),
-                                                ),
-                                                subtitle: Text(
-                                                  '$memberCount ${memberCount == 1 ? 'member' : 'members'}',
-                                                ),
-                                                trailing: Row(
-                                                  mainAxisSize: MainAxisSize.min,
-                                                  children: [
-                                                    IconButton(
-                                                      icon: const Icon(Icons.edit),
-                                                      tooltip: 'Edit group',
-                                                      onPressed: () => _showEditFriendsGroupDialog(group),
-                                                    ),
-                                                    if (!isCreator)
-                                                      IconButton(
-                                                        icon: const Icon(Icons.exit_to_app),
-                                                        tooltip: 'Leave group',
-                                                        onPressed: () => _leaveFriendsGroup(groupId, groupName),
-                                                      ),
-                                                  ],
-                                                ),
-                                                onTap: () => _showFriendsGroupDetails(group),
-                                              ),
-                                            );
-                                          }).toList(),
-                                        ],
-                                      );
-                                    }).toList(),
-                                  );
-                                },
+                              Text(
+                                (_userRow!['full_name'] as String?) ??
+                                    'No Name',
+                                style: const TextStyle(
+                                  fontSize: 24,
+                                  fontWeight: FontWeight.bold,
+                                  color: textDark,
+                                ),
+                                textAlign: TextAlign.center,
                               ),
-                            const SizedBox(height: 24),
-                          ],
-
-                          // Teams section (grouped by sport)
-                          Row(
-                            mainAxisAlignment:
-                                MainAxisAlignment.spaceBetween,
-                            children: [
-                              Column(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                children: [
-                                  Text(
-                                    'Teams',
-                                    style: Theme.of(context)
-                                        .textTheme
-                                        .titleMedium
-                                        ?.copyWith(
-                                          fontWeight: FontWeight.bold,
-                                        ),
+                            const SizedBox(height: 8),
+                            // Location - centered
+                            if (_isEditing)
+                              InkWell(
+                                onTap: _showHomeLocationPicker,
+                                child: Container(
+                                  padding: const EdgeInsets.symmetric(
+                                    horizontal: 16,
+                                    vertical: 8,
                                   ),
-                                  const SizedBox(height: 2),
-                                  Row(
+                                  decoration: BoxDecoration(
+                                    border: Border.all(
+                                      color: Colors.grey.shade300,
+                                    ),
+                                    borderRadius: BorderRadius.circular(20),
+                                  ),
+                                  child: Row(
+                                    mainAxisSize: MainAxisSize.min,
                                     children: [
                                       Icon(
-                                        Icons.public,
-                                        size: 12,
-                                        color: Colors.grey.shade600,
+                                        Icons.location_on,
+                                        size: 16,
+                                        color: Colors.grey.shade700,
                                       ),
-                                      const SizedBox(width: 4),
+                                      const SizedBox(width: 8),
                                       Text(
-                                        'Public - Visible to everyone on Sportsdug',
+                                        () {
+                                          if (_editHomeCity != null &&
+                                              _editHomeState != null &&
+                                              _editHomeCity!.isNotEmpty &&
+                                              _editHomeState!.isNotEmpty) {
+                                            return '$_editHomeCity, $_editHomeState';
+                                          } else if (_editHomeZipCode != null &&
+                                              _editHomeZipCode!.isNotEmpty) {
+                                            return _editHomeZipCode!;
+                                          }
+                                          return 'Tap to set home location';
+                                        }(),
                                         style: TextStyle(
-                                          fontSize: 11,
-                                          color: Colors.grey.shade600,
-                                          fontStyle: FontStyle.italic,
+                                          color: Colors.grey.shade700,
                                         ),
                                       ),
                                     ],
                                   ),
+                                ),
+                              )
+                            else
+                              Text(
+                                () {
+                                  final homeCity =
+                                      _userRow!['home_city'] as String?;
+                                  final homeState =
+                                      _userRow!['home_state'] as String?;
+
+                                  if (homeCity != null &&
+                                      homeState != null &&
+                                      homeCity.isNotEmpty &&
+                                      homeState.isNotEmpty) {
+                                    return '$homeCity, $homeState';
+                                  } else if (_userRow!['home_zip_code'] !=
+                                          null &&
+                                      (_userRow!['home_zip_code'] as String)
+                                          .isNotEmpty) {
+                                    return _userRow!['home_zip_code'] as String;
+                                  }
+                                  return 'Not set';
+                                }(),
+                                style: const TextStyle(
+                                  fontSize: 16,
+                                  color: textDark,
+                                ),
+                                textAlign: TextAlign.center,
+                              ),
+                            const SizedBox(height: 16),
+                            // Edit Profile and Share buttons - GREEN buttons
+                            if (!_isEditing && _isSelf) ...[
+                              Row(
+                                mainAxisAlignment: MainAxisAlignment.center,
+                                children: [
+                                  ElevatedButton.icon(
+                                    onPressed: _startEditing,
+                                    icon: const Icon(Icons.edit, size: 18),
+                                    label: const Text('Edit Profile'),
+                                    style: ElevatedButton.styleFrom(
+                                      backgroundColor: greenButton,
+                                      foregroundColor: white,
+                                      padding: const EdgeInsets.symmetric(
+                                        horizontal: 16,
+                                        vertical: 12,
+                                      ),
+                                      shape: RoundedRectangleBorder(
+                                        borderRadius: BorderRadius.circular(8),
+                                      ),
+                                    ),
+                                  ),
+                                  const SizedBox(width: 12),
+                                  ElevatedButton.icon(
+                                    onPressed: () {
+                                      // TODO: Implement share functionality
+                                      ScaffoldMessenger.of(
+                                        context,
+                                      ).showSnackBar(
+                                        const SnackBar(
+                                          content: Text(
+                                            'Share functionality coming soon',
+                                          ),
+                                        ),
+                                      );
+                                    },
+                                    icon: const Icon(Icons.share, size: 18),
+                                    label: const Text('Share'),
+                                    style: ElevatedButton.styleFrom(
+                                      backgroundColor: greenButton,
+                                      foregroundColor: white,
+                                      padding: const EdgeInsets.symmetric(
+                                        horizontal: 16,
+                                        vertical: 12,
+                                      ),
+                                      shape: RoundedRectangleBorder(
+                                        borderRadius: BorderRadius.circular(8),
+                                      ),
+                                    ),
+                                  ),
                                 ],
                               ),
-                              if (_isSelf)
-                                TextButton.icon(
-                                  onPressed: () {
-                                    Navigator.of(context).push(
-                                      MaterialPageRoute(
-                                        builder: (_) =>
-                                            const TeamsScreen(),
+                            ],
+                            if (_isSelf && _isEditing) ...[
+                              const SizedBox(height: 16),
+                              Row(
+                                mainAxisAlignment: MainAxisAlignment.center,
+                                children: [
+                                  TextButton(
+                                    onPressed: _savingProfile
+                                        ? null
+                                        : _cancelEditing,
+                                    child: const Text(
+                                      'Cancel',
+                                      style: TextStyle(color: textDark),
+                                    ),
+                                  ),
+                                  const SizedBox(width: 8),
+                                  ElevatedButton(
+                                    onPressed: _savingProfile
+                                        ? null
+                                        : _saveProfile,
+                                    style: ElevatedButton.styleFrom(
+                                      backgroundColor: greenButton,
+                                      foregroundColor: white,
+                                    ),
+                                    child: _savingProfile
+                                        ? const SizedBox(
+                                            width: 16,
+                                            height: 16,
+                                            child: CircularProgressIndicator(
+                                              strokeWidth: 2,
+                                              color: white,
+                                            ),
+                                          )
+                                        : const Text('Save'),
+                                  ),
+                                ],
+                              ),
+                            ],
+                            if (!_isSelf) ...[
+                              const SizedBox(height: 16),
+                              _buildFriendHeaderAction(),
+                            ],
+                          ],
+                        ),
+                      ),
+                    ),
+
+                    const SizedBox(height: 16),
+
+                    // Statistics Section - White card with teal icons
+                    _buildStatisticsSection(),
+                    const SizedBox(height: 16),
+
+                    // Sports Identity Section - White card
+                    _buildSportsIdentitySection(),
+                    const SizedBox(height: 16),
+
+                    // Friend requests (self only)
+                    if (_isSelf && _incomingRequests.isNotEmpty) ...[
+                      Card(
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(16),
+                        ),
+                        elevation: 2,
+                        color: const Color(0xFF4FAFAF),
+                        child: Padding(
+                          padding: const EdgeInsets.all(16),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                'Friend Requests',
+                                style: Theme.of(context).textTheme.titleMedium
+                                    ?.copyWith(
+                                      fontWeight: FontWeight.bold,
+                                      color: Colors.white,
+                                    ),
+                              ),
+                              const SizedBox(height: 12),
+                              Column(
+                                children: _incomingRequests.map((r) {
+                                  final name =
+                                      r['full_name'] as String? ?? 'Unknown';
+                                  final photoUrl = r['photo_url'] as String?;
+                                  final reqId = r['request_id'] as String;
+
+                                  return Card(
+                                    margin: const EdgeInsets.only(bottom: 8),
+                                    child: ListTile(
+                                      leading: CircleAvatar(
+                                        backgroundImage:
+                                            (photoUrl != null &&
+                                                photoUrl.isNotEmpty)
+                                            ? NetworkImage(photoUrl)
+                                            : null,
+                                        child:
+                                            (photoUrl == null ||
+                                                photoUrl.isEmpty)
+                                            ? Text(
+                                                name.isNotEmpty
+                                                    ? name[0].toUpperCase()
+                                                    : '?',
+                                              )
+                                            : null,
+                                      ),
+                                      title: Text(name),
+                                      trailing: Wrap(
+                                        spacing: 4,
+                                        children: [
+                                          TextButton(
+                                            onPressed: () =>
+                                                _respondToFriendRequest(
+                                                  reqId,
+                                                  name,
+                                                  false,
+                                                ),
+                                            child: const Text('Decline'),
+                                          ),
+                                          ElevatedButton(
+                                            onPressed: () =>
+                                                _respondToFriendRequest(
+                                                  reqId,
+                                                  name,
+                                                  true,
+                                                ),
+                                            child: const Text('Accept'),
+                                          ),
+                                        ],
+                                      ),
+                                    ),
+                                  );
+                                }).toList(),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                      const SizedBox(height: 16),
+                    ],
+
+                    // Friends section - White card with horizontal scroll
+                    Card(
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(18),
+                      ),
+                      elevation: 2,
+                      color: white,
+                      child: Padding(
+                        padding: const EdgeInsets.all(16),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Row(
+                              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                              children: [
+                                Row(
+                                  children: [
+                                    Icon(
+                                      Icons.people,
+                                      size: 20,
+                                      color: tealDark,
+                                    ),
+                                    const SizedBox(width: 8),
+                                    Text(
+                                      'Friends (${_friends.length})',
+                                      style: const TextStyle(
+                                        fontSize: 18,
+                                        fontWeight: FontWeight.bold,
+                                        color: textDark,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                                if (_isSelf)
+                                  TextButton.icon(
+                                    onPressed: _showManageFriendsSheet,
+                                    icon: const Icon(
+                                      Icons.add,
+                                      size: 18,
+                                      color: greenButton,
+                                    ),
+                                    label: const Text(
+                                      'Add',
+                                      style: TextStyle(color: greenButton),
+                                    ),
+                                  ),
+                              ],
+                            ),
+                            const SizedBox(height: 12),
+                            if (_friends.isEmpty)
+                              Text(
+                                'No friends added yet.',
+                                style: TextStyle(
+                                  fontSize: 13,
+                                  color: Colors.grey.shade600,
+                                ),
+                              )
+                            else
+                              SizedBox(
+                                height: 110,
+                                child: ListView.builder(
+                                  scrollDirection: Axis.horizontal,
+                                  itemCount: _friends.length,
+                                  itemBuilder: (context, index) {
+                                    final f = _friends[index];
+                                    final name =
+                                        f['full_name'] as String? ?? 'Unknown';
+                                    final photoUrl = f['photo_url'] as String?;
+                                    final friendId = f['id'] as String;
+
+                                    return GestureDetector(
+                                      onTap: () {
+                                        Navigator.of(context).push(
+                                          MaterialPageRoute(
+                                            builder: (_) => UserProfileScreen(
+                                              userId: friendId,
+                                            ),
+                                          ),
+                                        );
+                                      },
+                                      child: Padding(
+                                        padding: const EdgeInsets.only(
+                                          right: 16,
+                                        ),
+                                        child: Column(
+                                          mainAxisSize: MainAxisSize.min,
+                                          children: [
+                                            CircleAvatar(
+                                              radius: 28,
+                                              backgroundColor: orange,
+                                              backgroundImage:
+                                                  (photoUrl != null &&
+                                                      photoUrl.isNotEmpty)
+                                                  ? NetworkImage(photoUrl)
+                                                  : null,
+                                              child:
+                                                  (photoUrl == null ||
+                                                      photoUrl.isEmpty)
+                                                  ? Text(
+                                                      name.isNotEmpty
+                                                          ? name[0]
+                                                                .toUpperCase()
+                                                          : '?',
+                                                      style: const TextStyle(
+                                                        fontSize: 24,
+                                                        fontWeight:
+                                                            FontWeight.bold,
+                                                        color: white,
+                                                      ),
+                                                    )
+                                                  : null,
+                                            ),
+                                            const SizedBox(height: 4),
+                                            SizedBox(
+                                              width: 60,
+                                              child: Text(
+                                                name,
+                                                textAlign: TextAlign.center,
+                                                overflow: TextOverflow.ellipsis,
+                                                style: const TextStyle(
+                                                  fontSize: 12,
+                                                  color: textDark,
+                                                ),
+                                                maxLines: 1,
+                                              ),
+                                            ),
+                                          ],
+                                        ),
                                       ),
                                     );
                                   },
-                                  icon: const Icon(
-                                    Icons.group_add,
-                                    size: 18,
-                                  ),
-                                  label: const Text('Manage'),
-                                ),
-                            ],
-                          ),
-                          const SizedBox(height: 8),
-
-                          // "Create your team" card
-                          if (_isSelf)
-                            Card(
-                              margin: const EdgeInsets.only(bottom: 8),
-                              shape: RoundedRectangleBorder(
-                                borderRadius: BorderRadius.circular(12),
-                              ),
-                              color: Colors.green.shade50,
-                              child: ListTile(
-                                leading: const CircleAvatar(
-                                  backgroundColor: Colors.green,
-                                  child: Icon(
-                                    Icons.add,
-                                    color: Colors.white,
-                                  ),
-                                ),
-                                title: const Text(
-                                  'Create your team',
-                                  style: TextStyle(
-                                    fontWeight: FontWeight.w600,
-                                  ),
-                                ),
-                                subtitle: const Text(
-                                  'Set up a new team for your sport and invite players.',
-                                ),
-                                onTap: _showCreateTeamSheet,
-                              ),
-                            ),
-
-                          if (_teams.isEmpty)
-                            const Align(
-                              alignment: Alignment.centerLeft,
-                              child: Text(
-                                'This player is not part of any team yet.',
-                                style: TextStyle(
-                                  fontSize: 13,
-                                  color: Colors.grey,
                                 ),
                               ),
-                            )
-                          else
-                            Column(
-                              children:
-                                  teamsBySport.entries.map((entry) {
-                                final sportKey = entry.key;
-                                final sportTeams = entry.value;
+                          ],
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 16),
 
-                                return Column(
-                                  crossAxisAlignment:
-                                      CrossAxisAlignment.start,
+                    // My Groups - White card, collapsible
+                    if ((_friendsGroups.isNotEmpty || _isSelf))
+                      Card(
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(18),
+                        ),
+                        elevation: 2,
+                        color: white,
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            InkWell(
+                              onTap: () => setState(
+                                () => _groupsExpanded = !_groupsExpanded,
+                              ),
+                              child: Padding(
+                                padding: const EdgeInsets.all(16),
+                                child: Row(
+                                  mainAxisAlignment:
+                                      MainAxisAlignment.spaceBetween,
                                   children: [
-                                    const SizedBox(height: 8),
                                     Row(
                                       children: [
-                                        const Icon(
-                                          Icons.sports,
-                                          size: 18,
-                                          color: Colors.black87,
+                                        Icon(
+                                          Icons.people,
+                                          size: 20,
+                                          color: tealDark,
                                         ),
-                                        const SizedBox(width: 6),
-                                        Text(
-                                          _toDisplaySport(sportKey),
-                                          style: const TextStyle(
-                                            fontSize: 15,
-                                            fontWeight:
-                                                FontWeight.w600,
+                                        const SizedBox(width: 8),
+                                        const Text(
+                                          'My Groups',
+                                          style: TextStyle(
+                                            fontSize: 18,
+                                            fontWeight: FontWeight.bold,
+                                            color: textDark,
                                           ),
                                         ),
                                       ],
                                     ),
-                                    const SizedBox(height: 4),
-                                    ...sportTeams.map((t) {
-                                      final role =
-                                          (t['role'] as String?) ??
-                                              'member';
-                                      final roleText =
-                                          _roleLabel(role);
-                                      final roleColor =
-                                          _roleColor(role);
-
-                                      return Card(
-                                        margin:
-                                            const EdgeInsets.symmetric(
-                                          vertical: 4,
-                                        ),
-                                        child: ListTile(
-                                          leading: CircleAvatar(
-                                            child: Text(
-                                              (t['name']
-                                                              as String?)
-                                                          ?.isNotEmpty ==
-                                                      true
-                                                  ? (t['name']
-                                                          as String)[0]
-                                                      .toUpperCase()
-                                                  : '?',
+                                    Row(
+                                      children: [
+                                        if (_isSelf)
+                                          TextButton.icon(
+                                            onPressed: _friendsGroups.isNotEmpty
+                                                ? _showManageFriendsGroupSheet
+                                                : _showCreateFriendsGroupDialog,
+                                            icon: const Icon(
+                                              Icons.add,
+                                              size: 18,
+                                              color: greenButton,
+                                            ),
+                                            label: Text(
+                                              _friendsGroups.isNotEmpty
+                                                  ? 'Add'
+                                                  : 'Create',
+                                              style: const TextStyle(
+                                                color: greenButton,
+                                              ),
                                             ),
                                           ),
-                                          title: Text(
-                                            t['name'] as String? ?? '',
+                                        Icon(
+                                          _groupsExpanded
+                                              ? Icons.expand_less
+                                              : Icons.expand_more,
+                                          color: textDark,
+                                        ),
+                                      ],
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            ),
+                            if (_groupsExpanded) ...[
+                              Padding(
+                                padding: const EdgeInsets.fromLTRB(
+                                  16,
+                                  0,
+                                  16,
+                                  16,
+                                ),
+                                child: _friendsGroups.isEmpty
+                                    ? Text(
+                                        'No groups yet.',
+                                        style: TextStyle(
+                                          fontSize: 13,
+                                          color: Colors.grey.shade600,
+                                        ),
+                                      )
+                                    : Builder(
+                                        builder: (context) {
+                                          final Map<
+                                            String,
+                                            List<Map<String, dynamic>>
+                                          >
+                                          groupsBySport = {};
+                                          for (final group in _friendsGroups) {
+                                            final sport =
+                                                (group['sport'] as String?) ??
+                                                'Other';
+                                            groupsBySport
+                                                .putIfAbsent(sport, () => [])
+                                                .add(group);
+                                          }
+                                          final sortedSports =
+                                              groupsBySport.keys.toList()
+                                                ..sort();
+                                          return Column(
+                                            crossAxisAlignment:
+                                                CrossAxisAlignment.start,
+                                            children: sortedSports.map((
+                                              sportKey,
+                                            ) {
+                                              final sportGroups =
+                                                  groupsBySport[sportKey]!;
+                                              return Column(
+                                                crossAxisAlignment:
+                                                    CrossAxisAlignment.start,
+                                                children: [
+                                                  Row(
+                                                    children: [
+                                                      Icon(
+                                                        Icons.sports,
+                                                        size: 16,
+                                                        color: tealDark,
+                                                      ),
+                                                      const SizedBox(width: 6),
+                                                      Text(
+                                                        _toDisplaySport(
+                                                          sportKey,
+                                                        ),
+                                                        style: const TextStyle(
+                                                          fontSize: 13,
+                                                          fontWeight:
+                                                              FontWeight.w600,
+                                                          color: textDark,
+                                                        ),
+                                                      ),
+                                                    ],
+                                                  ),
+                                                  const SizedBox(height: 8),
+                                                  Wrap(
+                                                    spacing: 8,
+                                                    runSpacing: 8,
+                                                    children: sportGroups.map((
+                                                      group,
+                                                    ) {
+                                                      final groupName =
+                                                          group['name']
+                                                              as String? ??
+                                                          'Unnamed Group';
+                                                      final memberCount =
+                                                          group['member_count']
+                                                              as int? ??
+                                                          0;
+                                                      return ActionChip(
+                                                        avatar: const Icon(
+                                                          Icons.group,
+                                                          size: 18,
+                                                        ),
+                                                        label: Text(groupName),
+                                                        backgroundColor: Colors
+                                                            .grey
+                                                            .shade100,
+                                                        onPressed: () {
+                                                          Navigator.of(
+                                                            context,
+                                                          ).push(
+                                                            MaterialPageRoute(
+                                                              builder: (_) =>
+                                                                  FriendsGroupProfileScreen(
+                                                                    groupId:
+                                                                        group['id']
+                                                                            as String,
+                                                                    groupName:
+                                                                        groupName,
+                                                                  ),
+                                                            ),
+                                                          );
+                                                        },
+                                                      );
+                                                    }).toList(),
+                                                  ),
+                                                  const SizedBox(height: 16),
+                                                ],
+                                              );
+                                            }).toList(),
+                                          );
+                                        },
+                                      ),
+                              ),
+                              if (_isSelf)
+                                Padding(
+                                  padding: const EdgeInsets.fromLTRB(
+                                    16,
+                                    0,
+                                    16,
+                                    16,
+                                  ),
+                                  child: ElevatedButton.icon(
+                                    onPressed: _showCreateFriendsGroupDialog,
+                                    icon: const Icon(Icons.add, color: white),
+                                    label: const Text(
+                                      'Create Group',
+                                      style: TextStyle(color: white),
+                                    ),
+                                    style: ElevatedButton.styleFrom(
+                                      backgroundColor: greenButton,
+                                      padding: const EdgeInsets.symmetric(
+                                        horizontal: 16,
+                                        vertical: 12,
+                                      ),
+                                      shape: RoundedRectangleBorder(
+                                        borderRadius: BorderRadius.circular(8),
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                            ],
+                          ],
+                        ),
+                      ),
+                    if ((_friendsGroups.isNotEmpty || _isSelf) &&
+                        (_teams.isNotEmpty || _isSelf))
+                      const SizedBox(height: 16),
+                    // My Teams - White card, collapsible
+                    if (_teams.isNotEmpty || _isSelf)
+                      Card(
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(18),
+                        ),
+                        elevation: 2,
+                        color: white,
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            InkWell(
+                              onTap: () => setState(
+                                () => _teamsExpanded = !_teamsExpanded,
+                              ),
+                              child: Padding(
+                                padding: const EdgeInsets.all(16),
+                                child: Row(
+                                  mainAxisAlignment:
+                                      MainAxisAlignment.spaceBetween,
+                                  children: [
+                                    Row(
+                                      children: [
+                                        Icon(
+                                          Icons.groups,
+                                          size: 20,
+                                          color: tealDark,
+                                        ),
+                                        const SizedBox(width: 8),
+                                        const Text(
+                                          'My Teams',
+                                          style: TextStyle(
+                                            fontSize: 18,
+                                            fontWeight: FontWeight.bold,
+                                            color: textDark,
                                           ),
-                                          subtitle: Text(
-                                            '${_toDisplaySport(t['sport'] as String? ?? '')}'
-                                            ' • ${t['proficiency_level'] ?? 'N/A'}'
+                                        ),
+                                      ],
+                                    ),
+                                    Row(
+                                      children: [
+                                        if (_isSelf)
+                                          TextButton.icon(
+                                            onPressed: () {
+                                              Navigator.of(context).push(
+                                                MaterialPageRoute(
+                                                  builder: (_) =>
+                                                      const TeamsScreen(),
+                                                ),
+                                              );
+                                            },
+                                            icon: const Icon(
+                                              Icons.add,
+                                              size: 18,
+                                              color: greenButton,
+                                            ),
+                                            label: const Text(
+                                              'Add',
+                                              style: TextStyle(
+                                                color: greenButton,
+                                              ),
+                                            ),
                                           ),
-                                          trailing: roleText != null && roleColor != null
-                                              ? Chip(
-                                                  label: Text(
-                                                    roleText!,
+                                        Icon(
+                                          _teamsExpanded
+                                              ? Icons.expand_less
+                                              : Icons.expand_more,
+                                          color: textDark,
+                                        ),
+                                      ],
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            ),
+                            if (_teamsExpanded) ...[
+                              Padding(
+                                padding: const EdgeInsets.fromLTRB(
+                                  16,
+                                  0,
+                                  16,
+                                  16,
+                                ),
+                                child: _teams.isEmpty
+                                    ? Text(
+                                        'No teams yet.',
+                                        style: TextStyle(
+                                          fontSize: 13,
+                                          color: Colors.grey.shade600,
+                                        ),
+                                      )
+                                    : Column(
+                                        crossAxisAlignment:
+                                            CrossAxisAlignment.start,
+                                        children: teamsBySport.entries.map((
+                                          entry,
+                                        ) {
+                                          final sportKey = entry.key;
+                                          final sportTeams = entry.value;
+                                          return Column(
+                                            crossAxisAlignment:
+                                                CrossAxisAlignment.start,
+                                            children: [
+                                              Row(
+                                                children: [
+                                                  Icon(
+                                                    Icons.sports,
+                                                    size: 16,
+                                                    color: tealDark,
+                                                  ),
+                                                  const SizedBox(width: 6),
+                                                  Text(
+                                                    _toDisplaySport(sportKey),
                                                     style: const TextStyle(
-                                                      color: Colors.white,
+                                                      fontSize: 13,
+                                                      fontWeight:
+                                                          FontWeight.w600,
+                                                      color: textDark,
                                                     ),
                                                   ),
-                                                  backgroundColor: roleColor!,
-                                                )
-                                              : null,
-                                          onTap: () {
-                                            Navigator.of(context)
-                                                .push(
-                                              MaterialPageRoute(
-                                                builder: (_) =>
-                                                    TeamProfileScreen(
-                                                  teamId:
-                                                      t['id'] as String,
-                                                  teamName: t['name']
-                                                          as String? ??
-                                                      '',
-                                                ),
+                                                ],
                                               ),
-                                            );
-                                          },
-                                        ),
-                                      );
-                                    }),
-                                  ],
-                                );
-                              }).toList(),
-                            ),
-
-                          const SizedBox(height: 24),
-                        ],
+                                              const SizedBox(height: 8),
+                                              Wrap(
+                                                spacing: 8,
+                                                runSpacing: 8,
+                                                children: sportTeams.map((t) {
+                                                  final role =
+                                                      (t['role'] as String?) ??
+                                                      'member';
+                                                  final isAdmin =
+                                                      role.toLowerCase() ==
+                                                      'admin';
+                                                  final teamName =
+                                                      t['name'] as String? ??
+                                                      '';
+                                                  final teamId =
+                                                      t['id'] as String;
+                                                  return ActionChip(
+                                                    avatar: Icon(
+                                                      isAdmin
+                                                          ? Icons.star
+                                                          : Icons.group,
+                                                      size: 18,
+                                                      color: isAdmin
+                                                          ? white
+                                                          : null,
+                                                    ),
+                                                    label: Text(teamName),
+                                                    backgroundColor: isAdmin
+                                                        ? orange
+                                                        : Colors.grey.shade100,
+                                                    labelStyle: TextStyle(
+                                                      color: isAdmin
+                                                          ? white
+                                                          : textDark,
+                                                      fontWeight: isAdmin
+                                                          ? FontWeight.bold
+                                                          : FontWeight.normal,
+                                                    ),
+                                                    onPressed: () {
+                                                      Navigator.of(
+                                                        context,
+                                                      ).push(
+                                                        MaterialPageRoute(
+                                                          builder: (_) =>
+                                                              TeamProfileScreen(
+                                                                teamId: teamId,
+                                                                teamName:
+                                                                    teamName,
+                                                              ),
+                                                        ),
+                                                      );
+                                                    },
+                                                  );
+                                                }).toList(),
+                                              ),
+                                              const SizedBox(height: 16),
+                                            ],
+                                          );
+                                        }).toList(),
+                                      ),
+                              ),
+                              if (_isSelf)
+                                Padding(
+                                  padding: const EdgeInsets.fromLTRB(
+                                    16,
+                                    0,
+                                    16,
+                                    16,
+                                  ),
+                                  child: ElevatedButton.icon(
+                                    onPressed: _showCreateTeamSheet,
+                                    icon: const Icon(Icons.add, color: white),
+                                    label: const Text(
+                                      'Create Team',
+                                      style: TextStyle(color: white),
+                                    ),
+                                    style: ElevatedButton.styleFrom(
+                                      backgroundColor: orange,
+                                      padding: const EdgeInsets.symmetric(
+                                        horizontal: 16,
+                                        vertical: 12,
+                                      ),
+                                      shape: RoundedRectangleBorder(
+                                        borderRadius: BorderRadius.circular(8),
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                            ],
+                          ],
+                        ),
                       ),
-                    ),
+                    const SizedBox(height: 80), // Space for FABs
+                  ],
+                ),
+              ),
+            ),
+      floatingActionButton: _isSelf
+          ? Column(
+              mainAxisSize: MainAxisSize.min,
+              mainAxisAlignment: MainAxisAlignment.end,
+              children: [
+                FloatingActionButton.extended(
+                  heroTag: 'create_team',
+                  onPressed: _showCreateTeamSheet,
+                  backgroundColor: orange,
+                  icon: const Icon(Icons.group_add, color: white),
+                  label: const Text(
+                    'Create Team',
+                    style: TextStyle(color: white, fontWeight: FontWeight.w600),
                   ),
                 ),
+                const SizedBox(height: 12),
+                FloatingActionButton.extended(
+                  heroTag: 'create_group',
+                  onPressed: _showCreateFriendsGroupDialog,
+                  backgroundColor: orange,
+                  icon: const Icon(Icons.group, color: white),
+                  label: const Text(
+                    'Create Group',
+                    style: TextStyle(color: white, fontWeight: FontWeight.w600),
+                  ),
+                ),
+              ],
+            )
+          : null,
+      floatingActionButtonLocation: FloatingActionButtonLocation.endFloat,
     );
   }
-  
-  Widget _buildBioSection() {
-    final bio = _userRow?['bio'] as String?;
-    final bioText = bio != null && bio.isNotEmpty ? bio : 'No bio added yet.';
-    
+
+  Widget _buildStatisticsSection() {
+    const tealDark = Color(0xFF0E7C7B);
+    const white = Color(0xFFFFFFFF);
+    const textDark = Color(0xFF0F2E2E);
+
     return Card(
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(16),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
+      elevation: 2,
+      color: white,
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.spaceAround,
+          children: [
+            Expanded(
+              child: _buildStatItem(
+                icon: Icons.people_outline,
+                label: 'Games',
+                value: _gamesCount.toString(),
+              ),
+            ),
+            Expanded(
+              child: _buildStatItem(
+                icon: Icons.groups,
+                label: 'Teams',
+                value: _teams.length.toString(),
+              ),
+            ),
+            Expanded(
+              child: _buildStatItem(
+                icon: Icons.emoji_events,
+                label: 'Wins',
+                value: _winsCount.toString(),
+              ),
+            ),
+          ],
+        ),
       ),
-      elevation: 3,
+    );
+  }
+
+  Widget _buildStatItem({
+    required IconData icon,
+    required String label,
+    required String value,
+  }) {
+    const tealDark = Color(0xFF0E7C7B);
+    const textDark = Color(0xFF0F2E2E);
+
+    return Column(
+      children: [
+        Icon(icon, color: tealDark, size: 24),
+        const SizedBox(height: 8),
+        Text(
+          value,
+          style: const TextStyle(
+            fontSize: 20,
+            fontWeight: FontWeight.bold,
+            color: textDark,
+          ),
+        ),
+        const SizedBox(height: 4),
+        Text(label, style: const TextStyle(fontSize: 14, color: textDark)),
+        const SizedBox(height: 4),
+        const Icon(Icons.arrow_forward_ios, size: 12, color: Colors.grey),
+      ],
+    );
+  }
+
+  Widget _buildSportsIdentitySection() {
+    const tealDark = Color(0xFF0E7C7B);
+    const greenButton = Color(0xFF4FAFAF);
+    const white = Color(0xFFFFFFFF);
+    const textDark = Color(0xFF0F2E2E);
+
+    return Card(
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
+      elevation: 2,
+      color: white,
       child: Padding(
         padding: const EdgeInsets.all(16),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
-                const Icon(Icons.person, color: Colors.blue),
-                const SizedBox(width: 8),
-                const Text(
-                  'Bio',
-                  style: TextStyle(
-                    fontSize: 18,
-                    fontWeight: FontWeight.bold,
-                  ),
+                Row(
+                  children: [
+                    Icon(Icons.sports, size: 20, color: tealDark),
+                    const SizedBox(width: 8),
+                    const Text(
+                      'Sports Identity',
+                      style: TextStyle(
+                        fontSize: 18,
+                        fontWeight: FontWeight.bold,
+                        color: textDark,
+                      ),
+                    ),
+                  ],
                 ),
+                if (_isSelf)
+                  TextButton.icon(
+                    onPressed: () {
+                      Navigator.of(context)
+                          .push(
+                            MaterialPageRoute(
+                              builder: (_) => const SelectSportsScreen(),
+                            ),
+                          )
+                          .then((_) => _loadProfile());
+                    },
+                    icon: const Icon(Icons.add, size: 18, color: greenButton),
+                    label: const Text(
+                      'Add',
+                      style: TextStyle(color: greenButton),
+                    ),
+                  ),
               ],
             ),
-            const SizedBox(height: 16),
-            if (_isEditing)
-              TextField(
-                controller: _bioEditController,
-                decoration: const InputDecoration(
-                  border: OutlineInputBorder(),
-                  hintText: 'Enter your bio...',
-                ),
-                maxLines: 4,
+            const SizedBox(height: 12),
+            if (_sports.isEmpty)
+              Text(
+                'No sports selected yet.',
+                style: TextStyle(fontSize: 13, color: Colors.grey.shade600),
               )
             else
-              Text(
-                bioText,
-                style: TextStyle(
-                  fontSize: 14,
-                  color: (bio == null || bio.isEmpty) ? Colors.grey : Colors.black87,
-                  fontStyle: (bio == null || bio.isEmpty) ? FontStyle.italic : FontStyle.normal,
-                ),
+              Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  // Primary sport (first sport) with icon and arrow
+                  if (_sports.isNotEmpty)
+                    InkWell(
+                      onTap: () {
+                        // Navigate to sport detail if needed
+                      },
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(vertical: 8),
+                        child: Row(
+                          children: [
+                            Icon(
+                              _getSportIcon(_sports[0]),
+                              size: 20,
+                              color: tealDark,
+                            ),
+                            const SizedBox(width: 8),
+                            Text(
+                              _toDisplaySport(_sports[0]),
+                              style: const TextStyle(
+                                fontSize: 16,
+                                color: textDark,
+                                fontWeight: FontWeight.w500,
+                              ),
+                            ),
+                            const Spacer(),
+                            const Icon(
+                              Icons.arrow_forward_ios,
+                              size: 16,
+                              color: Colors.grey,
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  // Other Sports section
+                  if (_sports.length > 1) ...[
+                    const SizedBox(height: 12),
+                    Text(
+                      'Other Sports:',
+                      style: TextStyle(
+                        fontSize: 14,
+                        color: Colors.grey.shade600,
+                        fontWeight: FontWeight.w500,
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    Wrap(
+                      spacing: 8,
+                      runSpacing: 8,
+                      children: _sports.skip(1).map((sport) {
+                        return CircleAvatar(
+                          radius: 20,
+                          backgroundColor: greenButton,
+                          child: Text(
+                            _toDisplaySport(sport)[0].toUpperCase(),
+                            style: const TextStyle(
+                              fontSize: 16,
+                              fontWeight: FontWeight.bold,
+                              color: white,
+                            ),
+                          ),
+                        );
+                      }).toList(),
+                    ),
+                  ],
+                ],
               ),
           ],
         ),
       ),
     );
+  }
+
+  IconData _getSportIcon(String sport) {
+    final sportLower = sport.toLowerCase();
+    switch (sportLower) {
+      case 'cricket':
+        return Icons.sports_cricket;
+      case 'tennis':
+        return Icons.sports_tennis;
+      case 'basketball':
+        return Icons.sports_basketball;
+      case 'soccer':
+      case 'football':
+        return Icons.sports_soccer;
+      case 'volleyball':
+        return Icons.sports_volleyball;
+      case 'badminton':
+        return Icons.sports;
+      case 'pickleball':
+        return Icons.sports;
+      case 'table_tennis':
+        return Icons.sports;
+      default:
+        return Icons.sports;
+    }
   }
 }
 
@@ -3350,7 +3991,8 @@ class _HomeLocationPickerDialog extends StatefulWidget {
   });
 
   @override
-  State<_HomeLocationPickerDialog> createState() => _HomeLocationPickerDialogState();
+  State<_HomeLocationPickerDialog> createState() =>
+      _HomeLocationPickerDialogState();
 }
 
 class _HomeLocationPickerDialogState extends State<_HomeLocationPickerDialog> {
@@ -3389,9 +4031,9 @@ class _HomeLocationPickerDialogState extends State<_HomeLocationPickerDialog> {
         _isSearching = false;
       });
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Error searching: $e')),
-        );
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('Error searching: $e')));
       }
     }
   }
@@ -3428,10 +4070,7 @@ class _HomeLocationPickerDialogState extends State<_HomeLocationPickerDialog> {
               children: [
                 const Text(
                   'Set Home Location',
-                  style: TextStyle(
-                    fontSize: 20,
-                    fontWeight: FontWeight.bold,
-                  ),
+                  style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
                 ),
                 IconButton(
                   icon: const Icon(Icons.close),
@@ -3476,34 +4115,31 @@ class _HomeLocationPickerDialogState extends State<_HomeLocationPickerDialog> {
               const SizedBox(height: 16),
               const Text(
                 'Search Results:',
-                style: TextStyle(
-                  fontSize: 14,
-                  fontWeight: FontWeight.w600,
-                ),
+                style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600),
               ),
               const SizedBox(height: 8),
               Expanded(
                 child: _isSearching
                     ? const Center(child: CircularProgressIndicator())
                     : _searchResults.isEmpty
-                        ? const Center(
-                            child: Text(
-                              'No results found',
-                              style: TextStyle(color: Colors.grey),
-                            ),
-                          )
-                        : ListView.builder(
-                            itemCount: _searchResults.length,
-                            itemBuilder: (context, index) {
-                              final location = _searchResults[index];
-                              return ListTile(
-                                leading: const Icon(Icons.location_on),
-                                title: Text(location['display']!),
-                                subtitle: Text('ZIP: ${location['zip']}'),
-                                onTap: () => _selectLocation(location),
-                              );
-                            },
-                          ),
+                    ? const Center(
+                        child: Text(
+                          'No results found',
+                          style: TextStyle(color: Colors.grey),
+                        ),
+                      )
+                    : ListView.builder(
+                        itemCount: _searchResults.length,
+                        itemBuilder: (context, index) {
+                          final location = _searchResults[index];
+                          return ListTile(
+                            leading: const Icon(Icons.location_on),
+                            title: Text(location['display']!),
+                            subtitle: Text('ZIP: ${location['zip']}'),
+                            onTap: () => _selectLocation(location),
+                          );
+                        },
+                      ),
               ),
             ],
 

@@ -59,18 +59,30 @@ class HomeTabsController extends ChangeNotifier {
     notifyListeners();
 
     try {
+      // Load user basics first (needed for discovery matches)
       await loadUserBasics();
-      await loadAdminTeamsAndInvites();
-      await loadHiddenGames();
-      await loadConfirmedTeamMatches();
-      await loadDiscoveryPickupMatches();
-      await loadPendingGamesForAdmin();
-      await loadFriendsOnlyIndividualGames();
-      await loadMyPendingAvailabilityMatches();
-      await loadPendingIndividualGames();
-      await loadAwaitingOpponentConfirmationGames();
-      await loadPublicPendingGames();
-      await loadProfileNotifications();
+      
+      // Start discovery matches loading immediately after user basics (prioritize it)
+      // Load it in parallel with other data for faster startup
+      final discoveryFuture = loadDiscoveryPickupMatches();
+      
+      // Load other data in parallel for faster startup
+      // Note: loadPendingGamesForAdmin is called inside loadAdminTeamsAndInvites, so don't duplicate it
+      await Future.wait([
+        loadAdminTeamsAndInvites(),
+        loadHiddenGames(),
+        loadConfirmedTeamMatches(),
+        loadFriendsOnlyIndividualGames(),
+        loadMyPendingAvailabilityMatches(),
+        loadPendingIndividualGames(),
+        loadAwaitingOpponentConfirmationGames(),
+        loadPublicPendingGames(),
+        loadProfileNotifications(),
+      ]);
+      
+      // Wait for discovery matches to complete
+      await discoveryFuture;
+      
       setupRealtimeAttendance();
     } catch (e) {
       lastError = 'Init failed: $e';
