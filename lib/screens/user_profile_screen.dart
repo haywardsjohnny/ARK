@@ -1,5 +1,6 @@
 import 'dart:typed_data';
 import 'package:flutter/material.dart';
+import 'dart:ui';
 import 'package:image_picker/image_picker.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import '../services/location_service.dart';
@@ -2864,7 +2865,7 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
                                             controller: _nameEditController,
                                             style: const TextStyle(
                                               fontFamily: 'Inter',
-                                              fontSize: 26,
+                                              fontSize: 24,
                                               fontWeight: FontWeight.w600,
                                               color: white,
                                             ),
@@ -2889,16 +2890,26 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
                                             ),
                                           )
                                         else
-                                          Text(
-                                            (_userRow!['full_name'] as String?) ?? 'No Name',
-                                            style: const TextStyle(
-                                              fontFamily: 'Inter',
-                                              fontSize: 26,
-                                              fontWeight: FontWeight.w600,
-                                              color: white,
+                                          ShaderMask(
+                                            shaderCallback: (bounds) => LinearGradient(
+                                              begin: Alignment.centerRight,
+                                              end: Alignment.centerLeft,
+                                              colors: [
+                                                Colors.white,
+                                                const Color(0xFFFFFACD), // Light yellow / whitish yellow
+                                              ],
+                                            ).createShader(bounds),
+                                            child: Text(
+                                              (_userRow!['full_name'] as String?) ?? 'No Name',
+                                              style: const TextStyle(
+                                                fontFamily: 'Inter',
+                                                fontSize: 24,
+                                                fontWeight: FontWeight.w600,
+                                                color: white,
+                                              ),
+                                              overflow: TextOverflow.ellipsis,
+                                              maxLines: 1,
                                             ),
-                                            overflow: TextOverflow.ellipsis,
-                                            maxLines: 1,
                                           ),
                                         const SizedBox(height: 6),
                                         // City only (hide state and zip) with location icon
@@ -2953,7 +2964,7 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
                                             onTap: _startEditing,
                                             borderRadius: BorderRadius.circular(12),
                                             child: Container(
-                                              height: 52,
+                                              height: 40,
                                               decoration: BoxDecoration(
                                               color: Colors.white,
                                                 borderRadius: BorderRadius.circular(12),
@@ -2969,23 +2980,23 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
                                                   ),
                                                 ],
                                               ),
-                                              child: const Row(
+                                              child: Row(
                                                 mainAxisAlignment: MainAxisAlignment.center,
                                                 crossAxisAlignment: CrossAxisAlignment.center,
                                                 children: [
                                                   Icon(
                                                     Icons.edit,
-                                                    size: 20,
-                                                    color: teal,
+                                                    size: 18,
+                                                    color: textDark,
                                                   ),
-                                                  SizedBox(width: 8),
+                                                  const SizedBox(width: 8),
                                                   Text(
                                                     'Edit Profile',
                                                     style: TextStyle(
                                                       fontFamily: 'Inter',
-                                                      fontSize: 18,
+                                                      fontSize: 16,
                                                       fontWeight: FontWeight.w600,
-                                                      color: teal,
+                                                      color: textDark,
                                     ),
                                   ),
                                 ],
@@ -3008,7 +3019,7 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
                                             },
                                             borderRadius: BorderRadius.circular(12),
                                             child: Container(
-                                              height: 52,
+                                              height: 40,
                                               decoration: BoxDecoration(
                                                 color: Colors.white,
                                                 borderRadius: BorderRadius.circular(12),
@@ -3024,23 +3035,23 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
                                                   ),
                                                 ],
                                               ),
-                                              child: const Row(
+                                              child: Row(
                                                 mainAxisAlignment: MainAxisAlignment.center,
                                                 crossAxisAlignment: CrossAxisAlignment.center,
                                                 children: [
                                                   Icon(
                                                     Icons.share,
-                                                    size: 20,
-                                                    color: teal,
+                                                    size: 18,
+                                                    color: textDark,
                                                   ),
-                                                  SizedBox(width: 8),
+                                                  const SizedBox(width: 8),
                                                   Text(
                                                     'Share',
                                                     style: TextStyle(
                                                       fontFamily: 'Inter',
-                                                      fontSize: 18,
+                                                      fontSize: 16,
                                                       fontWeight: FontWeight.w600,
-                                                      color: teal,
+                                                      color: textDark,
                                                     ),
                                                   ),
                                                 ],
@@ -3098,42 +3109,82 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
                 ),
               ],
             ),
-          // 8️⃣ FLOATING ACTION BUTTONS (ONLY PLACE FOR ORANGE) - moved further down
+          // 8️⃣ FLOATING ACTION BUTTONS (ONLY PLACE FOR ORANGE) - moved closer to bottom nav
           if (_isSelf)
             Positioned(
-              bottom: 160, // Moved further down from bottom nav
+              bottom: 5, // Almost touching the Profile tab in bottom navigation
               right: 16,
               child: Column(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  FloatingActionButton.extended(
-                    heroTag: 'create_team',
-                    onPressed: _showCreateTeamSheet,
-                    backgroundColor: orange,
-                    icon: const Icon(Icons.group_add, color: white),
-                    label: const Text(
-                      'Create Team',
-                      style: TextStyle(
-                        fontFamily: 'Inter',
-                        fontSize: 14,
-                        fontWeight: FontWeight.w600,
-                        color: white,
+                  InkWell(
+                    onTap: _showCreateTeamSheet,
+                    borderRadius: BorderRadius.circular(28),
+                    child: Container(
+                      height: 36,
+                      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                      decoration: BoxDecoration(
+                        color: orange,
+                        borderRadius: BorderRadius.circular(28),
+                        boxShadow: [
+                          BoxShadow(
+                            color: Colors.black.withOpacity(0.2),
+                            blurRadius: 4,
+                            offset: const Offset(0, 2),
+                          ),
+                        ],
+                      ),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          const Icon(Icons.group_add, color: white, size: 16),
+                          const SizedBox(width: 6),
+                          const Text(
+                            'Create Team',
+                            style: TextStyle(
+                              fontFamily: 'Inter',
+                              fontSize: 12,
+                              fontWeight: FontWeight.w600,
+                              color: white,
+                            ),
+                          ),
+                        ],
                       ),
                     ),
                   ),
-                  const SizedBox(height: 12),
-                  FloatingActionButton.extended(
-                    heroTag: 'create_group',
-                    onPressed: _showCreateFriendsGroupDialog,
-                    backgroundColor: orange,
-                    icon: const Icon(Icons.group, color: white),
-                    label: const Text(
-                      'Create Group',
-                      style: TextStyle(
-                        fontFamily: 'Inter',
-                        fontSize: 14,
-                        fontWeight: FontWeight.w600,
-                        color: white,
+                  const SizedBox(height: 8),
+                  InkWell(
+                    onTap: _showCreateFriendsGroupDialog,
+                    borderRadius: BorderRadius.circular(28),
+                    child: Container(
+                      height: 36,
+                      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                      decoration: BoxDecoration(
+                        color: orange,
+                        borderRadius: BorderRadius.circular(28),
+                        boxShadow: [
+                          BoxShadow(
+                            color: Colors.black.withOpacity(0.2),
+                            blurRadius: 4,
+                            offset: const Offset(0, 2),
+                          ),
+                        ],
+                      ),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          const Icon(Icons.group, color: white, size: 16),
+                          const SizedBox(width: 6),
+                          const Text(
+                            'Create Group',
+                            style: TextStyle(
+                              fontFamily: 'Inter',
+                              fontSize: 12,
+                              fontWeight: FontWeight.w600,
+                              color: white,
+                            ),
+                          ),
+                        ],
                       ),
                     ),
                   ),
@@ -3153,7 +3204,7 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
 
     // Stats section with darker white background (chip-like), rounded corners, touches borders
     return Container(
-      height: 110, // Increased height
+      height: 85, // Decreased height
       decoration: BoxDecoration(
         color: Colors.grey.shade100, // Darker white background for chip appearance
         borderRadius: BorderRadius.circular(20),
@@ -3200,9 +3251,9 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
                             maxLines: 1,
                             style: TextStyle(
                               fontFamily: 'Inter',
-                              fontSize: 18,
+                              fontSize: 14,
                               fontWeight: FontWeight.w600,
-                              color: teal,
+                              color: textDark,
                             ),
                           ),
                         ),
@@ -3236,9 +3287,9 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
                             maxLines: 1,
                             style: TextStyle(
                               fontFamily: 'Inter',
-                              fontSize: 18,
+                              fontSize: 14,
                               fontWeight: FontWeight.w600,
-                              color: teal,
+                              color: textDark,
                             ),
                           ),
                                         ),
@@ -3276,9 +3327,9 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
                       maxLines: 1,
                       style: TextStyle(
                         fontFamily: 'Inter',
-                        fontSize: 18,
+                        fontSize: 14,
                         fontWeight: FontWeight.w600,
-                        color: teal,
+                        color: textDark,
                       ),
                     ),
                   ),
@@ -3333,9 +3384,9 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
                                         'Friends (${_friends.length})',
                                         style: const TextStyle(
                         fontFamily: 'Inter',
-                                          fontSize: 18,
+                                          fontSize: 16,
                         fontWeight: FontWeight.w600,
-                        color: teal,
+                        color: textDark,
                                         ),
                     ),
                   ],
@@ -3352,9 +3403,9 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
                           'Add',
                           style: TextStyle(
                             fontFamily: 'Inter',
-                            fontSize: 18,
+                            fontSize: 16,
                             fontWeight: FontWeight.w600,
-                            color: teal,
+                            color: textDark,
                           ),
                                         ),
                                     ],
@@ -3471,7 +3522,7 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
                             friendName,
                                                       style: const TextStyle(
                               fontFamily: 'Inter',
-                              fontSize: 16,
+                              fontSize: 14,
                               fontWeight: FontWeight.w600,
                               color: textDark,
                             ),
@@ -3509,17 +3560,16 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
       teamsBySport[sport]!.add(team);
     }
 
-    // Sort teams within each sport by member_count (descending), then take top 2
+    // Sort teams within each sport by member_count (descending)
     for (final sport in teamsBySport.keys) {
       teamsBySport[sport]!.sort((a, b) {
         final countA = (a['member_count'] as int?) ?? 0;
         final countB = (b['member_count'] as int?) ?? 0;
         return countB.compareTo(countA);
       });
-      teamsBySport[sport] = teamsBySport[sport]!.take(2).toList();
     }
 
-    // Get first sport (or default)
+    // Get all sports
     final sportKeys = teamsBySport.keys.toList();
     if (sportKeys.isEmpty) {
       return Container(
@@ -3574,9 +3624,6 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
       );
     }
 
-    final firstSport = sportKeys.first;
-    final teamsForSport = teamsBySport[firstSport] ?? [];
-
     String _formatSportName(String sport) {
       return sport
           .split('_')
@@ -3607,8 +3654,8 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
         child: Padding(
           padding: const EdgeInsets.all(16),
           child: Column(
-                                                      crossAxisAlignment: CrossAxisAlignment.start,
-                                                      children: [
+                                                  crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
               // Header
               Row(
                 children: [
@@ -3626,30 +3673,39 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
                 ],
               ),
               const SizedBox(height: 12),
-              // Sport name with chevron
-              Row(
-                children: [
-                  Icon(Icons.sports_soccer, size: 18, color: tealDark),
-                  const SizedBox(width: 8),
-                  Expanded(
-                    child: Text(
-                      _formatSportName(firstSport),
-                      style: const TextStyle(
-                        fontFamily: 'Inter',
-                        fontSize: 14,
-                        fontWeight: FontWeight.w600,
-                        color: textDark,
-                      ),
-                      overflow: TextOverflow.ellipsis,
-                      maxLines: 1,
-                    ),
-                  ),
-                  Icon(Icons.chevron_right, size: 18, color: Colors.grey.shade400),
-                ],
-              ),
-              const SizedBox(height: 12),
-              // Teams list (top 2)
-              ...teamsForSport.map((team) {
+              // Scrollable list of all sports and their teams
+              Expanded(
+                child: SingleChildScrollView(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: sportKeys.map((sport) {
+                      final teamsForSport = teamsBySport[sport] ?? [];
+                                                    return Column(
+                                                      crossAxisAlignment: CrossAxisAlignment.start,
+                                                      children: [
+                          // Sport name with chevron
+                          Row(
+                            children: [
+                              Icon(Icons.sports_soccer, size: 18, color: tealDark),
+                              const SizedBox(width: 8),
+                              Expanded(
+                                child: Text(
+                                  _formatSportName(sport),
+                                  style: const TextStyle(
+                                    fontFamily: 'Inter',
+                                    fontSize: 14,
+                                    fontWeight: FontWeight.w600,
+                                    color: textDark,
+                                  ),
+                                  overflow: TextOverflow.ellipsis,
+                                  maxLines: 1,
+                                ),
+                              ),
+                            ],
+                          ),
+                          const SizedBox(height: 8),
+                          // Teams list for this sport
+                          ...teamsForSport.map((team) {
                 final teamName = (team['name'] as String?) ?? 'Unknown';
                 final memberCount = (team['member_count'] as int?) ?? 0;
                 final role = (team['role'] as String?) ?? 'member';
@@ -3720,8 +3776,15 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
                         ),
                     ],
                   ),
-                );
-              }),
+                                                            );
+                                                          }).toList(),
+                                                        const SizedBox(height: 16),
+                                                      ],
+                                                    );
+                                                  }).toList(),
+                  ),
+                ),
+                                            ),
                                         ],
                                       ),
                                     ),
@@ -3759,17 +3822,16 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
       groupsBySport[sport]!.add(group);
     }
 
-    // Sort groups within each sport by member_count (descending), then take top 2
+    // Sort groups within each sport by member_count (descending)
     for (final sport in groupsBySport.keys) {
       groupsBySport[sport]!.sort((a, b) {
         final countA = (a['member_count'] as int?) ?? 0;
         final countB = (b['member_count'] as int?) ?? 0;
         return countB.compareTo(countA);
       });
-      groupsBySport[sport] = groupsBySport[sport]!.take(2).toList();
     }
 
-    // Get first sport (or default)
+    // Get all sports
     final sportKeys = groupsBySport.keys.toList();
     if (sportKeys.isEmpty) {
       return InkWell(
@@ -3827,9 +3889,6 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
       );
     }
 
-    final firstSport = sportKeys.first;
-    final groupsForSport = groupsBySport[firstSport] ?? [];
-
     String _formatSportName(String sport) {
       return sport
           .split('_')
@@ -3879,30 +3938,39 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
                 ],
               ),
               const SizedBox(height: 12),
-              // Sport name with chevron
-              Row(
+              // Scrollable list of all sports and their groups
+              Expanded(
+                child: SingleChildScrollView(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: sportKeys.map((sport) {
+                      final groupsForSport = groupsBySport[sport] ?? [];
+                      return Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
                                                                       children: [
-                  Icon(Icons.sports_soccer, size: 18, color: tealDark),
+                          // Sport name with chevron
+                          Row(
+                            children: [
+                              Icon(Icons.sports_soccer, size: 18, color: tealDark),
                                                                         const SizedBox(width: 8),
-                  Expanded(
-                    child: Text(
-                      _formatSportName(firstSport),
-                      style: const TextStyle(
-                        fontFamily: 'Inter',
-                        fontSize: 14,
-                        fontWeight: FontWeight.w600,
-                        color: textDark,
-                      ),
-                      overflow: TextOverflow.ellipsis,
-                      maxLines: 1,
-                    ),
-                  ),
-                  Icon(Icons.chevron_right, size: 18, color: Colors.grey.shade400),
-                ],
-              ),
-              const SizedBox(height: 12),
-              // Groups list (top 2)
-              ...groupsForSport.map((group) {
+                              Expanded(
+                                child: Text(
+                                  _formatSportName(sport),
+                                  style: const TextStyle(
+                                    fontFamily: 'Inter',
+                                    fontSize: 14,
+                                    fontWeight: FontWeight.w600,
+                                    color: textDark,
+                                  ),
+                                  overflow: TextOverflow.ellipsis,
+                                  maxLines: 1,
+                                ),
+                              ),
+                            ],
+                          ),
+                          const SizedBox(height: 8),
+                          // Groups list for this sport
+                          ...groupsForSport.map((group) {
                 final groupName = (group['name'] as String?) ?? 'Unknown';
                 final memberCount = (group['member_count'] as int?) ?? 0;
                 final createdBy = (group['created_by'] as String?) ?? '';
@@ -3974,7 +4042,14 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
               ],
                   ),
                 );
-              }),
+                          }).toList(),
+                          const SizedBox(height: 16),
+                        ],
+                      );
+                    }).toList(),
+                  ),
+                ),
+              ),
             ],
           ),
                       ),
@@ -4215,7 +4290,7 @@ class _TeamsGroupsBottomSheetState extends State<_TeamsGroupsBottomSheet> {
     final items = _isTeams ? widget.teams : widget.groups;
 
     return Container(
-      height: MediaQuery.of(context).size.height * 0.75,
+      height: MediaQuery.of(context).size.height * 0.9,
       decoration: const BoxDecoration(
         color: white,
         borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
@@ -4486,21 +4561,21 @@ class _HomeLocationPickerDialogState extends State<_HomeLocationPickerDialog> {
                 if (value.length >= 3) {
                   _searchLocations(value);
                 } else {
-                  setState(() {
+                setState(() {
                     _searchResults = [];
-                  });
+                });
                 }
               },
             ),
-
+            
             // Search Results
             if (_searchController.text.length >= 3) ...[
               const SizedBox(height: 16),
-              const Text(
+            const Text(
                 'Search Results:',
                 style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600),
-              ),
-              const SizedBox(height: 8),
+            ),
+            const SizedBox(height: 8),
               Expanded(
                 child: _isSearching
                     ? const Center(child: CircularProgressIndicator())
