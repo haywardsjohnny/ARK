@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'dart:ui';
 import 'package:image_picker/image_picker.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
+import 'package:share_plus/share_plus.dart';
 import '../services/location_service.dart';
 import '../widgets/global_search_sheet.dart';
 
@@ -31,6 +32,7 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
   List<Map<String, dynamic>> _friends = [];
   List<Map<String, dynamic>> _incomingRequests = [];
   List<Map<String, dynamic>> _friendsGroups = [];
+  List<Map<String, dynamic>> _commonGroups = []; // Common groups when viewing other user
   int _gamesCount = 0; // Games participated
   int _winsCount = 0; // Wins count
 
@@ -46,7 +48,6 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
   // Edit mode state
   bool _isEditing = false;
   final TextEditingController _nameEditController = TextEditingController();
-  final TextEditingController _bioEditController = TextEditingController();
   String? _editHomeCity;
   String? _editHomeState;
   String? _editHomeZipCode;
@@ -74,7 +75,6 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
   @override
   void dispose() {
     _nameEditController.dispose();
-    _bioEditController.dispose();
     super.dispose();
   }
 
@@ -111,11 +111,11 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
     final userId = _effectiveUserId!;
 
     try {
-      // 1) Load main user row (including bio and home location)
+      // 1) Load main user row (including home location)
       final userRow = await supa
           .from('users')
           .select(
-            'id, full_name, photo_url, bio, home_city, home_state, home_zip_code',
+            'id, full_name, photo_url, home_city, home_state, home_zip_code',
           )
           .eq('id', userId)
           .maybeSingle();
@@ -403,7 +403,68 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
         }
       }
 
-      // 9) Load games count and wins count
+      // 9) Load common groups if viewing another user's profile
+      List<Map<String, dynamic>> commonGroups = [];
+      if (_currentUserId != null && _currentUserId != userId) {
+        // Get groups where current user is a member
+        final currentUserMemberGroups = await supa
+            .from('friends_group_members')
+            .select('group_id')
+            .eq('user_id', _currentUserId!);
+        
+        // Get groups where profile user is a member
+        final profileUserMemberGroups = await supa
+            .from('friends_group_members')
+            .select('group_id')
+            .eq('user_id', userId);
+        
+        Set<String> currentUserGroupIds = {};
+        Set<String> profileUserGroupIds = {};
+        
+        if (currentUserMemberGroups is List) {
+          for (final m in currentUserMemberGroups) {
+            final groupId = m['group_id'] as String?;
+            if (groupId != null) currentUserGroupIds.add(groupId);
+          }
+        }
+        
+        if (profileUserMemberGroups is List) {
+          for (final m in profileUserMemberGroups) {
+            final groupId = m['group_id'] as String?;
+            if (groupId != null) profileUserGroupIds.add(groupId);
+          }
+        }
+        
+        // Find common groups
+        final commonGroupIds = currentUserGroupIds.intersection(profileUserGroupIds);
+        
+        if (commonGroupIds.isNotEmpty) {
+          final commonGroupsRows = await supa
+              .from('friends_groups')
+              .select('id, name, created_by, sport')
+              .inFilter('id', commonGroupIds.toList())
+              .order('sport, name');
+          
+          if (commonGroupsRows is List) {
+            for (final g in commonGroupsRows) {
+              final memberRows = await supa
+                  .from('friends_group_members')
+                  .select('id')
+                  .eq('group_id', g['id']);
+              
+              commonGroups.add({
+                'id': g['id'],
+                'name': g['name'],
+                'sport': g['sport'],
+                'created_by': g['created_by'],
+                'member_count': memberRows is List ? memberRows.length : 0,
+              });
+            }
+          }
+        }
+      }
+
+      // 10) Load games count and wins count
       int gamesCount = 0;
       int winsCount = 0;
       
@@ -443,6 +504,7 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
         _friendRelationship = relationship;
         _friendRequestIdForProfile = relReqId;
         _friendsGroups = groups;
+        _commonGroups = commonGroups;
         _gamesCount = gamesCount;
         _winsCount = winsCount;
         _loading = false;
@@ -450,7 +512,6 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
         // Update edit controllers if not in edit mode
         if (!_isEditing && _userRow != null) {
           _nameEditController.text = _userRow!['full_name'] as String? ?? '';
-          _bioEditController.text = _userRow!['bio'] as String? ?? '';
           _editHomeCity = _userRow!['home_city'] as String?;
           _editHomeState = _userRow!['home_state'] as String?;
           _editHomeZipCode = _userRow!['home_zip_code'] as String?;
@@ -470,7 +531,6 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
     setState(() {
       _isEditing = true;
       _nameEditController.text = _userRow!['full_name'] as String? ?? '';
-      _bioEditController.text = _userRow!['bio'] as String? ?? '';
       _editHomeCity = _userRow!['home_city'] as String?;
       _editHomeState = _userRow!['home_state'] as String?;
       _editHomeZipCode = _userRow!['home_zip_code'] as String?;
@@ -481,7 +541,6 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
     setState(() {
       _isEditing = false;
       _nameEditController.text = _userRow?['full_name'] as String? ?? '';
-      _bioEditController.text = _userRow?['bio'] as String? ?? '';
       _editHomeCity = _userRow?['home_city'] as String?;
       _editHomeState = _userRow?['home_state'] as String?;
       _editHomeZipCode = _userRow?['home_zip_code'] as String?;
@@ -499,7 +558,6 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
           .from('users')
           .update({
         'full_name': _nameEditController.text.trim(),
-        'bio': _bioEditController.text.trim(),
         'home_city': _editHomeCity,
         'home_state': _editHomeState,
         'home_zip_code': _editHomeZipCode,
@@ -543,6 +601,26 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
         _editHomeState = result['state'];
         _editHomeZipCode = result['zip'];
       });
+    }
+  }
+
+  Future<void> _shareProfile() async {
+    if (_userRow == null || _effectiveUserId == null) return;
+    
+    final userName = _userRow!['full_name'] as String? ?? 'User';
+    final shareText = 'Check out $userName\'s profile on SportsDug!';
+    final shareLink = 'https://sportsdug.app/profile/${_effectiveUserId}';
+    
+    try {
+      await Share.share(
+        '$shareText\n$shareLink',
+        subject: '$userName\'s SportsDug Profile',
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Failed to share: $e')),
+      );
     }
   }
 
@@ -839,6 +917,224 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
         context,
       ).showSnackBar(SnackBar(content: Text('Failed to cancel request: $e')));
     }
+  }
+
+  Future<void> _showAddFriendSearch() async {
+    final supa = Supabase.instance.client;
+    final currentUserId = _effectiveUserId;
+    if (currentUserId == null) return;
+
+    final searchController = TextEditingController();
+    List<Map<String, dynamic>> results = [];
+    bool searching = false;
+
+    // Map<otherUserId, relationship: 'accepted' | 'outgoing' | 'incoming'>
+    final Map<String, String> relationshipByUserId = {};
+
+    try {
+      final relRows = await supa
+          .from('friends')
+          .select('user_id, friend_id, status')
+          .or('user_id.eq.$currentUserId,friend_id.eq.$currentUserId');
+
+      if (relRows is List) {
+        for (final r in relRows) {
+          final uid = r['user_id'] as String;
+          final fid = r['friend_id'] as String;
+          final status = (r['status'] as String?) ?? 'pending';
+
+          if (uid == currentUserId) {
+            final key = fid;
+            if (status == 'accepted') {
+              relationshipByUserId[key] = 'accepted';
+            } else if (status == 'pending') {
+              relationshipByUserId[key] = 'outgoing';
+            }
+          } else if (fid == currentUserId) {
+            final key = uid;
+            if (status == 'accepted') {
+              relationshipByUserId[key] = 'accepted';
+            } else if (status == 'pending') {
+              relationshipByUserId[key] = 'incoming';
+            }
+          }
+        }
+      }
+    } catch (_) {
+      // ignore for now
+    }
+
+    await showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      builder: (ctx) {
+        return StatefulBuilder(
+          builder: (ctx, setSheetState) {
+            Future<void> doSearch() async {
+              final query = searchController.text.trim();
+              if (query.isEmpty) {
+                setSheetState(() {
+                  results = [];
+                });
+                return;
+              }
+
+              setSheetState(() => searching = true);
+              try {
+                var dbQuery = supa
+                    .from('users')
+                    .select('id, full_name, photo_url, email, phone')
+                    .neq('id', currentUserId);
+
+                // Search by name, email, or phone
+                dbQuery = dbQuery.or('full_name.ilike.%$query%,email.ilike.%$query%,phone.ilike.%$query%');
+
+                final rows = await dbQuery.limit(20);
+                setSheetState(() {
+                  results = (rows as List)
+                      .map<Map<String, dynamic>>(
+                        (u) => {
+                            'id': u['id'] as String,
+                          'full_name': u['full_name'] as String? ?? 'Unknown',
+                            'photo_url': u['photo_url'] as String?,
+                            'email': u['email'] as String?,
+                            'phone': u['phone'] as String?,
+                        },
+                      )
+                      .toList();
+                });
+              } catch (e) {
+                if (mounted) {
+                  ScaffoldMessenger.of(
+                    context,
+                  ).showSnackBar(SnackBar(content: Text('Search failed: $e')));
+                }
+              } finally {
+                setSheetState(() => searching = false);
+              }
+            }
+
+            Future<void> addFriend(String targetUserId, String name) async {
+              try {
+                await supa.from('friends').insert({
+                  'user_id': currentUserId,
+                  'friend_id': targetUserId,
+                  'status': 'pending',
+                });
+
+                if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(content: Text('Friend request sent to $name')),
+                  );
+                  await _loadProfile();
+                }
+
+                setSheetState(() {
+                  relationshipByUserId[targetUserId] = 'outgoing';
+                });
+              } catch (e) {
+                if (mounted) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(content: Text('Failed to add friend: $e')),
+                  );
+                }
+              }
+            }
+
+            return Padding(
+              padding: EdgeInsets.only(
+                left: 16,
+                right: 16,
+                top: 16,
+                bottom: MediaQuery.of(ctx).viewInsets.bottom + 16,
+              ),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const Text(
+                    'Add Friend',
+                    style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+                  ),
+                  const SizedBox(height: 12),
+                  TextField(
+                    controller: searchController,
+                    autofocus: true,
+                    decoration: InputDecoration(
+                      hintText: 'Search by name, email or phone number',
+                      hintStyle: TextStyle(color: Colors.grey.shade400),
+                      prefixIcon: const Icon(Icons.search),
+                      border: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                      contentPadding: const EdgeInsets.symmetric(
+                        horizontal: 12,
+                        vertical: 8,
+                      ),
+                    ),
+                    onChanged: (value) {
+                      doSearch();
+                    },
+                    onSubmitted: (value) {
+                      doSearch();
+                    },
+                  ),
+                  const SizedBox(height: 16),
+                  if (searching)
+                    const Padding(
+                      padding: EdgeInsets.all(16),
+                      child: CircularProgressIndicator(),
+                    )
+                  else if (results.isEmpty && searchController.text.isNotEmpty)
+                    const Padding(
+                      padding: EdgeInsets.all(16),
+                      child: Text('No users found'),
+                    )
+                  else if (results.isNotEmpty)
+                    Expanded(
+                      child: ListView.builder(
+                        shrinkWrap: true,
+                        itemCount: results.length,
+                        itemBuilder: (context, index) {
+                          final user = results[index];
+                          final userId = user['id'] as String;
+                          final name = user['full_name'] as String? ?? 'Unknown';
+                          final photoUrl = user['photo_url'] as String?;
+                          final relationship = relationshipByUserId[userId] ?? 'none';
+
+                          return ListTile(
+                            leading: CircleAvatar(
+                              backgroundImage: photoUrl != null && photoUrl.isNotEmpty
+                                  ? NetworkImage(photoUrl)
+                                  : null,
+                              child: photoUrl == null || photoUrl.isEmpty
+                                  ? const Icon(Icons.person)
+                                  : null,
+                            ),
+                            title: Text(name),
+                            subtitle: user['email'] != null
+                                ? Text(user['email'] as String)
+                                : null,
+                            trailing: relationship == 'accepted'
+                                ? const Text('Friends', style: TextStyle(color: Colors.green))
+                                : relationship == 'outgoing'
+                                    ? const Text('Requested', style: TextStyle(color: Colors.orange))
+                                    : relationship == 'incoming'
+                                        ? const Text('Accept?', style: TextStyle(color: Colors.blue))
+                                        : TextButton(
+                                            onPressed: () => addFriend(userId, name),
+                                            child: const Text('Add'),
+                                          ),
+      );
+                        },
+                      ),
+                    ),
+                ],
+              ),
+            );
+          },
+        );
+      },
+    );
   }
 
   Future<void> _showManageFriendsSheet() async {
@@ -1295,6 +1591,185 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
                         labelText: 'Description (optional)',
                         alignLabelWithHint: true,
                         prefixIcon: Icon(Icons.description_outlined),
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+
+                    if (errorText != null)
+                      Padding(
+                        padding: const EdgeInsets.only(bottom: 8),
+                        child: Text(
+                          errorText!,
+                          style: const TextStyle(
+                            color: Colors.red,
+                            fontSize: 12,
+                          ),
+                        ),
+                      ),
+
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.end,
+                      children: [
+                        TextButton(
+                          onPressed: saving
+                              ? null
+                              : () => Navigator.of(bottomSheetContext).pop(),
+                          child: const Text('Cancel'),
+                        ),
+                        const SizedBox(width: 8),
+                        ElevatedButton.icon(
+                          onPressed: saving ? null : submit,
+                          icon: saving
+                              ? const SizedBox(
+                                  width: 16,
+                                  height: 16,
+                                  child: CircularProgressIndicator(
+                                    strokeWidth: 2,
+                                  ),
+                                )
+                              : const Icon(Icons.check),
+                          label: Text(saving ? 'Creating...' : 'Create'),
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+            );
+          },
+        );
+      },
+    );
+  }
+
+  Future<void> _showCreateGroupSheet() async {
+    final supa = Supabase.instance.client;
+    final rootContext = context;
+    final creatorId = _currentUserId;
+    if (creatorId == null) {
+      ScaffoldMessenger.of(rootContext).showSnackBar(
+        const SnackBar(content: Text('You must be logged in to create a group')),
+      );
+      return;
+    }
+
+    final nameCtrl = TextEditingController();
+    String? selectedSport;
+    String? errorText;
+    bool saving = false;
+
+    await showModalBottomSheet(
+      context: rootContext,
+      isScrollControlled: true,
+      builder: (bottomSheetContext) {
+        final bottomInset = MediaQuery.of(bottomSheetContext).viewInsets.bottom;
+
+        return StatefulBuilder(
+          builder: (ctx, setSheetState) {
+            Future<void> submit() async {
+              final groupName = nameCtrl.text.trim();
+
+              if (selectedSport == null || groupName.isEmpty) {
+                setSheetState(() {
+                  errorText = 'Sport and Group name are required.';
+                });
+                return;
+              }
+
+              setSheetState(() {
+                saving = true;
+                errorText = null;
+              });
+
+              try {
+                // 1) Insert group
+                final insertRes = await supa
+                    .from('friends_groups')
+                    .insert({
+                      'name': groupName,
+                      'sport': selectedSport,
+                      'created_by': creatorId,
+                    })
+                    .select('id')
+                    .maybeSingle();
+
+                final groupId = insertRes?['id'] as String?;
+                if (groupId == null) {
+                  throw Exception('Failed to create group (no ID returned)');
+                }
+
+                // 2) Add creator as member
+                await supa.from('friends_group_members').insert({
+                  'group_id': groupId,
+                  'user_id': creatorId,
+                  'added_by': creatorId,
+                });
+
+                if (!mounted) return;
+
+                Navigator.of(bottomSheetContext).pop();
+                await _loadProfile();
+
+                ScaffoldMessenger.of(rootContext).showSnackBar(
+                  SnackBar(content: Text('Group "$groupName" created')),
+                );
+              } catch (e) {
+                setSheetState(() {
+                  saving = false;
+                  errorText = 'Failed to create group: $e';
+                });
+              }
+            }
+
+            return Padding(
+              padding: EdgeInsets.only(
+                left: 16,
+                right: 16,
+                top: 16,
+                bottom: bottomInset + 16,
+              ),
+              child: SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const Text(
+                      'Create a Group',
+                      style: TextStyle(
+                        fontSize: 18,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+
+                    // Sport dropdown
+                    DropdownButtonFormField<String>(
+                      value: selectedSport,
+                      decoration: const InputDecoration(
+                        labelText: 'Sport *',
+                        prefixIcon: Icon(Icons.sports),
+                      ),
+                      items: _allSportsOptions
+                          .map(
+                            (s) => DropdownMenuItem(
+                              value: s,
+                              child: Text(_toDisplaySport(s)),
+                            ),
+                          )
+                          .toList(),
+                      onChanged: (val) {
+                        setSheetState(() {
+                          selectedSport = val;
+                        });
+                      },
+                    ),
+                    const SizedBox(height: 8),
+
+                    // Group name
+                    TextField(
+                      controller: nameCtrl,
+                      decoration: const InputDecoration(
+                        labelText: 'Group name *',
+                        prefixIcon: Icon(Icons.group),
                       ),
                     ),
                     const SizedBox(height: 8),
@@ -2796,6 +3271,15 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
                               Row(
                                 crossAxisAlignment: CrossAxisAlignment.start,
                                 children: [
+                                  // Back button (only when viewing friend profile)
+                                  if (!_isSelf)
+                                    Padding(
+                                      padding: const EdgeInsets.only(right: 8, top: 4),
+                                      child: IconButton(
+                                        icon: const Icon(Icons.arrow_back, color: white, size: 24),
+                                        onPressed: () => Navigator.of(context).pop(),
+                                      ),
+                                    ),
                                   // Profile Photo - top left
                                   Stack(
                                     children: [
@@ -2859,211 +3343,426 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
                                     child: Column(
                                       crossAxisAlignment: CrossAxisAlignment.start,
                                       children: [
-                                        // Name - top aligned
-                                        if (_isEditing)
-                                          TextField(
+                                        // Name row with logout button
+                                        Row(
+                                          children: [
+                                            Expanded(
+                                              child: _isEditing
+                                                  ? TextField(
                                             controller: _nameEditController,
                                             style: const TextStyle(
-                                              fontFamily: 'Inter',
+                                                        fontFamily: 'Inter',
                                               fontSize: 24,
-                                              fontWeight: FontWeight.w600,
-                                              color: white,
+                                                        fontWeight: FontWeight.w600,
+                                                        color: white,
                                             ),
                                             decoration: InputDecoration(
                                               border: OutlineInputBorder(
-                                                borderSide: BorderSide(
-                                                  color: Colors.grey.shade300,
-                                                ),
+                                                          borderSide: BorderSide(
+                                                            color: Colors.grey.shade300,
+                                                          ),
                                               ),
                                               enabledBorder: OutlineInputBorder(
-                                                borderSide: BorderSide(
-                                                  color: Colors.grey.shade300,
-                                                ),
+                                                          borderSide: BorderSide(
+                                                            color: Colors.grey.shade300,
+                                                          ),
                                               ),
                                               focusedBorder: OutlineInputBorder(
-                                                borderSide: BorderSide(color: greenButton),
+                                                          borderSide: BorderSide(color: greenButton),
                                               ),
-                                              contentPadding: const EdgeInsets.symmetric(
-                                                horizontal: 12,
-                                                vertical: 8,
+                                                        contentPadding: const EdgeInsets.symmetric(
+                                                          horizontal: 12,
+                                                          vertical: 8,
+                                                        ),
+                                            ),
+                                          )
+                                                  : ShaderMask(
+                                                      shaderCallback: (bounds) => LinearGradient(
+                                                        begin: Alignment.centerRight,
+                                                        end: Alignment.centerLeft,
+                                                        colors: [
+                                                          Colors.white,
+                                                          const Color(0xFFFFFACD), // Light yellow / whitish yellow
+                                                        ],
+                                                      ).createShader(bounds),
+                                                      child: Text(
+                                            (_userRow!['full_name'] as String?) ?? 'No Name',
+                                            style: const TextStyle(
+                                                          fontFamily: 'Inter',
+                                              fontSize: 24,
+                                                          fontWeight: FontWeight.w600,
+                                                          color: white,
+                                            ),
+                                                        overflow: TextOverflow.ellipsis,
+                                                        maxLines: 1,
+                                                      ),
+                                                    ),
+                                            ),
+                                            // Logout button (only when viewing own profile)
+                                            if (_isSelf && !_isEditing)
+                                              IconButton(
+                                                icon: const Icon(Icons.logout, color: white, size: 20),
+                                                onPressed: _logout,
+                                                tooltip: 'Logout',
                                               ),
+                                          ],
+                                          ),
+                                        const SizedBox(height: 6),
+                                        // City and State - editable in edit mode
+                                        if (_isEditing)
+                                          InkWell(
+                                            onTap: _showHomeLocationPicker,
+                                              child: Row(
+                                                mainAxisSize: MainAxisSize.min,
+                                                children: [
+                                                const Icon(
+                                                  Icons.location_on,
+                                                  size: 16,
+                                                  color: white,
+                                                ),
+                                                const SizedBox(width: 4),
+                                                Flexible(
+                                                  child: Text(
+                                                    () {
+                                                      if (_editHomeCity != null && _editHomeCity!.isNotEmpty) {
+                                                        String location = _editHomeCity!;
+                                                        if (_editHomeState != null && _editHomeState!.isNotEmpty) {
+                                                          location += ', $_editHomeState';
+                                                        }
+                                                        if (_editHomeZipCode != null && _editHomeZipCode!.isNotEmpty) {
+                                                          location += ' $_editHomeZipCode';
+                                                        }
+                                                        return location;
+                                                      }
+                                                      return 'Tap to set location';
+                                                    }(),
+                                                    style: const TextStyle(
+                                                      fontFamily: 'Inter',
+                                                      fontSize: 14,
+                                                      fontWeight: FontWeight.w400,
+                                                      color: white,
+                                                    ),
+                                                    overflow: TextOverflow.ellipsis,
+                                                    maxLines: 1,
+                                                  ),
+                                                ),
+                                                const SizedBox(width: 4),
+                                                const Icon(
+                                                  Icons.edit,
+                                                  size: 14,
+                                                  color: white,
+                                              ),
+                                              ],
                                             ),
                                           )
                                         else
-                                          ShaderMask(
-                                            shaderCallback: (bounds) => LinearGradient(
-                                              begin: Alignment.centerRight,
-                                              end: Alignment.centerLeft,
-                                              colors: [
-                                                Colors.white,
-                                                const Color(0xFFFFFACD), // Light yellow / whitish yellow
-                                              ],
-                                            ).createShader(bounds),
-                                            child: Text(
-                                              (_userRow!['full_name'] as String?) ?? 'No Name',
-                                              style: const TextStyle(
-                                                fontFamily: 'Inter',
-                                                fontSize: 24,
-                                                fontWeight: FontWeight.w600,
+                                          Row(
+                                            mainAxisSize: MainAxisSize.min,
+                                            children: [
+                                              const Icon(
+                                                Icons.location_on,
+                                                size: 16,
                                                 color: white,
                                               ),
-                                              overflow: TextOverflow.ellipsis,
-                                              maxLines: 1,
-                                            ),
-                                          ),
-                                        const SizedBox(height: 6),
-                                        // City only (hide state and zip) with location icon
-                                        Row(
-                                                mainAxisSize: MainAxisSize.min,
-                                                children: [
-                                            const Icon(
-                                              Icons.location_on,
-                                              size: 16,
-                                              color: white,
-                                            ),
-                                            const SizedBox(width: 4),
-                                            Flexible(
-                                              child: Text(
-                                                () {
-                                                  final homeCity = _userRow!['home_city'] as String?;
-                                                  if (homeCity != null && homeCity.isNotEmpty) {
-                                                    return homeCity;
-                                                  }
-                                                  return '';
-                                                    }(),
-                                                    style: const TextStyle(
-                                                  fontFamily: 'Inter',
-                                                  fontSize: 14,
-                                                  fontWeight: FontWeight.w400,
-                                                  color: white,
-                                                ),
-                                                overflow: TextOverflow.ellipsis,
-                                                maxLines: 1,
-                                                    ),
+                                              const SizedBox(width: 4),
+                                              Flexible(
+                                                child: Text(
+                                            () {
+                                              final homeCity = _userRow!['home_city'] as String?;
+                                              final homeState = _userRow!['home_state'] as String?;
+                                                    if (homeCity != null && homeCity.isNotEmpty) {
+                                                      if (homeState != null && homeState.isNotEmpty) {
+                                                return '$homeCity, $homeState';
+                                              }
+                                                      return homeCity;
+                                                    }
+                                                    return '';
+                                            }(),
+                                            style: const TextStyle(
+                                                    fontFamily: 'Inter',
+                                                    fontSize: 14,
+                                                    fontWeight: FontWeight.w400,
+                                                    color: white,
                                                   ),
-                                                ],
+                                                  overflow: TextOverflow.ellipsis,
+                                                  maxLines: 1,
+                                                ),
                                               ),
+                                            ],
+                                          ),
                                       ],
                                     ),
                                   ),
                                 ],
                               ),
-                              // Edit Profile and Share buttons
-                              if (_isSelf) ...[
-                                const SizedBox(height: 20),
-                                LayoutBuilder(
-                                  builder: (context, constraints) {
-                                    final availableWidth = constraints.maxWidth; // Already accounts for padding
-                                    final buttonSpacing = 12.0;
-                                    final buttonWidth = (availableWidth - buttonSpacing) / 2;
-                                    return Row(
-                                      children: [
-                                        SizedBox(
-                                          width: buttonWidth,
-                                          child: InkWell(
-                                            onTap: _startEditing,
-                                            borderRadius: BorderRadius.circular(12),
-                                            child: Container(
-                                              height: 40,
-                                              decoration: BoxDecoration(
+                              // Edit Profile and Share buttons (or Save/Cancel when editing)
+                              const SizedBox(height: 20),
+                              LayoutBuilder(
+                                builder: (context, constraints) {
+                                  final availableWidth = constraints.maxWidth;
+                                  final buttonSpacing = 12.0;
+                                  final buttonWidth = (availableWidth - buttonSpacing) / 2;
+                                  if (_isSelf) {
+                                    if (_isEditing) {
+                                      // Show Save and Cancel buttons when editing
+                                      return Row(
+                                        children: [
+                                          SizedBox(
+                                            width: buttonWidth,
+                                            child: InkWell(
+                                              onTap: _cancelEditing,
+                                              borderRadius: BorderRadius.circular(12),
+                                              child: Container(
+                                                height: 40,
+                                                decoration: BoxDecoration(
+                                                  color: Colors.white,
+                                                  borderRadius: BorderRadius.circular(12),
+                                                  border: Border.all(
+                                                    color: Colors.grey.shade300,
+                                                    width: 1,
+                                                  ),
+                                                  boxShadow: [
+                                                    BoxShadow(
+                                                      color: Colors.black.withOpacity(0.05),
+                                                      blurRadius: 4,
+                                                      offset: const Offset(0, 2),
+                                                    ),
+                                                  ],
+                                                ),
+                                                child: Row(
+                                                  mainAxisAlignment: MainAxisAlignment.center,
+                                                  crossAxisAlignment: CrossAxisAlignment.center,
+                                                  children: [
+                                                    Icon(
+                                                      Icons.cancel,
+                                                      size: 18,
+                                                      color: textDark,
+                                                    ),
+                                                    const SizedBox(width: 8),
+                                                    Text(
+                                                      'Cancel',
+                                                      style: TextStyle(
+                                                        fontFamily: 'Inter',
+                                              fontSize: 16,
+                                                        fontWeight: FontWeight.w600,
+                                                        color: textDark,
+                                                      ),
+                                                    ),
+                                                  ],
+                                                ),
+                                              ),
+                                            ),
+                                          ),
+                                          SizedBox(width: buttonSpacing),
+                                          SizedBox(
+                                            width: buttonWidth,
+                                            child: InkWell(
+                                              onTap: _savingProfile ? null : _saveProfile,
+                                              borderRadius: BorderRadius.circular(12),
+                                              child: Container(
+                                                height: 40,
+                                                decoration: BoxDecoration(
+                                                  color: _savingProfile ? Colors.grey.shade300 : Colors.white,
+                                                  borderRadius: BorderRadius.circular(12),
+                                                  border: Border.all(
+                                                    color: Colors.grey.shade300,
+                                                    width: 1,
+                                                  ),
+                                                  boxShadow: [
+                                                    BoxShadow(
+                                                      color: Colors.black.withOpacity(0.05),
+                                                      blurRadius: 4,
+                                                      offset: const Offset(0, 2),
+                                                    ),
+                                                  ],
+                                                ),
+                                                child: Row(
+                                                  mainAxisAlignment: MainAxisAlignment.center,
+                                                  crossAxisAlignment: CrossAxisAlignment.center,
+                                                  children: [
+                                                    if (_savingProfile)
+                                                      const SizedBox(
+                                                        width: 18,
+                                                        height: 18,
+                                                        child: CircularProgressIndicator(
+                                                          strokeWidth: 2,
+                                                          color: textDark,
+                                                        ),
+                                                      )
+                                                    else
+                                                      Icon(
+                                                        Icons.check,
+                                                        size: 18,
+                                                        color: textDark,
+                                                      ),
+                                                    const SizedBox(width: 8),
+                                                    Text(
+                                                      _savingProfile ? 'Saving...' : 'Save',
+                                                      style: TextStyle(
+                                                        fontFamily: 'Inter',
+                                                        fontSize: 16,
+                                                        fontWeight: FontWeight.w600,
+                                                        color: textDark,
+                                                      ),
+                                                    ),
+                                                  ],
+                                                ),
+                                              ),
+                                            ),
+                                          ),
+                                        ],
+                                      );
+                                    } else {
+                                      // Show Edit Profile and Share buttons when not editing
+                                      return Row(
+                                        children: [
+                                          SizedBox(
+                                            width: buttonWidth,
+                                            child: InkWell(
+                                              onTap: _startEditing,
+                                              borderRadius: BorderRadius.circular(12),
+                                              child: Container(
+                                                height: 40,
+                                                decoration: BoxDecoration(
                                               color: Colors.white,
-                                                borderRadius: BorderRadius.circular(12),
-                                                border: Border.all(
-                                                  color: Colors.grey.shade300,
-                                                  width: 1,
+                                                  borderRadius: BorderRadius.circular(12),
+                                                  border: Border.all(
+                                                    color: Colors.grey.shade300,
+                                                    width: 1,
+                                                  ),
+                                                  boxShadow: [
+                                                    BoxShadow(
+                                                      color: Colors.black.withOpacity(0.05),
+                                                      blurRadius: 4,
+                                                      offset: const Offset(0, 2),
+                                          ),
+                                      ],
                                                 ),
-                                                boxShadow: [
-                                                  BoxShadow(
-                                                    color: Colors.black.withOpacity(0.05),
-                                                    blurRadius: 4,
-                                                    offset: const Offset(0, 2),
-                                                  ),
-                                                ],
-                                              ),
-                                              child: Row(
-                                                mainAxisAlignment: MainAxisAlignment.center,
-                                                crossAxisAlignment: CrossAxisAlignment.center,
-                                                children: [
-                                                  Icon(
-                                                    Icons.edit,
-                                                    size: 18,
-                                                    color: textDark,
-                                                  ),
-                                                  const SizedBox(width: 8),
-                                                  Text(
-                                                    'Edit Profile',
-                                                    style: TextStyle(
-                                                      fontFamily: 'Inter',
-                                                      fontSize: 16,
-                                                      fontWeight: FontWeight.w600,
+                                                child: Row(
+                                                  mainAxisAlignment: MainAxisAlignment.center,
+                                                  crossAxisAlignment: CrossAxisAlignment.center,
+                                                  children: [
+                                                    Icon(
+                                                      Icons.edit,
+                                                      size: 18,
                                                       color: textDark,
+                                                    ),
+                                                    const SizedBox(width: 8),
+                                                    Text(
+                                                      'Edit Profile',
+                                                      style: TextStyle(
+                                                        fontFamily: 'Inter',
+                                                        fontSize: 16,
+                                                        fontWeight: FontWeight.w600,
+                                                        color: textDark,
                                     ),
                                   ),
                                 ],
                               ),
+                                              ),
                                             ),
                                           ),
-                                        ),
-                                        SizedBox(width: buttonSpacing),
-                                        SizedBox(
-                                          width: buttonWidth,
-                                          child: InkWell(
-                                            onTap: () {
-                                        ScaffoldMessenger.of(context).showSnackBar(
-                                                const SnackBar(
-                                                  content: Text(
-                                                    'Share functionality coming soon',
+                                          SizedBox(width: buttonSpacing),
+                                          SizedBox(
+                                            width: buttonWidth,
+                                            child: InkWell(
+                                              onTap: _shareProfile,
+                                              borderRadius: BorderRadius.circular(12),
+                                              child: Container(
+                                                height: 40,
+                                                decoration: BoxDecoration(
+                                                  color: Colors.white,
+                                                  borderRadius: BorderRadius.circular(12),
+                                                  border: Border.all(
+                                                    color: Colors.grey.shade300,
+                                                    width: 1,
                                                   ),
+                                                  boxShadow: [
+                                                    BoxShadow(
+                                                      color: Colors.black.withOpacity(0.05),
+                                                      blurRadius: 4,
+                                                      offset: const Offset(0, 2),
+                                                    ),
+                                                  ],
                                                 ),
-                                              );
-                                            },
-                                            borderRadius: BorderRadius.circular(12),
-                                            child: Container(
-                                              height: 40,
-                                              decoration: BoxDecoration(
-                                                color: Colors.white,
-                                                borderRadius: BorderRadius.circular(12),
-                                                border: Border.all(
-                                                  color: Colors.grey.shade300,
-                                                  width: 1,
-                                                ),
-                                                boxShadow: [
-                                                  BoxShadow(
-                                                    color: Colors.black.withOpacity(0.05),
-                                                    blurRadius: 4,
-                                                    offset: const Offset(0, 2),
-                                                  ),
-                                                ],
-                                              ),
-                                              child: Row(
-                                                mainAxisAlignment: MainAxisAlignment.center,
-                                                crossAxisAlignment: CrossAxisAlignment.center,
-                                                children: [
-                                                  Icon(
-                                                    Icons.share,
-                                                    size: 18,
-                                                    color: textDark,
-                                                  ),
-                                                  const SizedBox(width: 8),
-                                                  Text(
-                                                    'Share',
-                                                    style: TextStyle(
-                                                      fontFamily: 'Inter',
-                                                      fontSize: 16,
-                                                      fontWeight: FontWeight.w600,
+                                                child: Row(
+                                                  mainAxisAlignment: MainAxisAlignment.center,
+                                                  crossAxisAlignment: CrossAxisAlignment.center,
+                                  children: [
+                                                    Icon(
+                                                      Icons.share,
+                                                      size: 18,
                                                       color: textDark,
                                                     ),
-                                                  ),
-                                                ],
+                                                    const SizedBox(width: 8),
+                                                    Text(
+                                                      'Share',
+                                                      style: TextStyle(
+                                                        fontFamily: 'Inter',
+                                                        fontSize: 16,
+                                                        fontWeight: FontWeight.w600,
+                                                        color: textDark,
+                                                      ),
+                                      ),
+                                                  ],
+                                                ),
                                               ),
                                             ),
                                           ),
+                                        ],
+                                      );
+                                    }
+                                  } else {
+                                    // Show only Share button when viewing another user's profile
+                                    return SizedBox(
+                                      width: buttonWidth,
+                                      child: InkWell(
+                                        onTap: _shareProfile,
+                                        borderRadius: BorderRadius.circular(12),
+                                        child: Container(
+                                          height: 40,
+                                          decoration: BoxDecoration(
+                                            color: Colors.white,
+                                            borderRadius: BorderRadius.circular(12),
+                                            border: Border.all(
+                                              color: Colors.grey.shade300,
+                                              width: 1,
+                                            ),
+                                            boxShadow: [
+                                              BoxShadow(
+                                                color: Colors.black.withOpacity(0.05),
+                                                blurRadius: 4,
+                                                offset: const Offset(0, 2),
+                                              ),
+                                            ],
+                                          ),
+                                          child: Row(
+                                            mainAxisAlignment: MainAxisAlignment.center,
+                                            crossAxisAlignment: CrossAxisAlignment.center,
+                                            children: [
+                                              Icon(
+                                                Icons.share,
+                                                size: 18,
+                                                color: textDark,
+                                              ),
+                                              const SizedBox(width: 8),
+                                              Text(
+                                                'Share',
+                                                style: TextStyle(
+                                                  fontFamily: 'Inter',
+                                                  fontSize: 16,
+                                                  fontWeight: FontWeight.w600,
+                                                  color: textDark,
+                                                ),
+                                              ),
+                                            ],
+                                          ),
                                         ),
-                                      ],
+                                      ),
                                     );
-                                  },
-                                ),
-                              ],
+                                  }
+                                },
+                              ),
                             ],
                           ),
                         ),
@@ -3075,35 +3774,53 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
                 Expanded(
                   child: SafeArea(
                     top: false,
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                    child: RefreshIndicator(
+                      onRefresh: _loadProfile,
+                      child: SingleChildScrollView(
+                        physics: const AlwaysScrollableScrollPhysics(),
+                        child: ConstrainedBox(
+                          constraints: BoxConstraints(
+                            minHeight: MediaQuery.of(context).size.height - 
+                                     MediaQuery.of(context).padding.top - 
+                                     kToolbarHeight - 
+                                     MediaQuery.of(context).padding.bottom,
+                                    ),
+                          child: IntrinsicHeight(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.stretch,
                                   children: [
-                        // Statistics Section - touches borders
-                        _buildStatisticsSection(),
-                        // Spacing to separate chips visually
-                        const SizedBox(height: 8),
-                        // Friends Section - similar to stats
-                        _buildFriendsSection(),
-                        // Spacing between Friends and Teams/Groups sections
-                        const SizedBox(height: 12),
-                        // My Teams and My Groups sections side by side
-                        Expanded(
-                          child: Row(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              // My Teams section (left half)
-                              Expanded(
-                                child: _buildMyTeamsSection(),
+                                // Spacing to show gap from teal background
+                                const SizedBox(height: 12),
+                                // Statistics Section
+                                _buildStatisticsSection(),
+                                // Spacing to separate chips visually
+                                const SizedBox(height: 8),
+                                // Friends Section - similar to stats
+                                _buildFriendsSection(),
+                                // Spacing between Friends and Teams/Groups sections
+                                const SizedBox(height: 12),
+                                // My Teams and My Groups sections side by side
+                                Expanded(
+                                  child: Row(
+                                    crossAxisAlignment: CrossAxisAlignment.start,
+                                    children: [
+                                      // My Teams section (left half)
+                                      Expanded(
+                                        child: _buildMyTeamsSection(),
                                     ),
                                     const SizedBox(width: 8),
-                              // My Groups section (right half)
-                              Expanded(
-                                child: _buildMyGroupsSection(),
-                              ),
-                            ],
+                                      // My Groups section (right half)
+                                      Expanded(
+                                        child: _buildMyGroupsSection(),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                              ],
+                            ),
                           ),
                         ),
-                      ],
+                      ),
                     ),
                   ),
                 ),
@@ -3131,9 +3848,9 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
                             color: Colors.black.withOpacity(0.2),
                             blurRadius: 4,
                             offset: const Offset(0, 2),
-                          ),
-                        ],
-                      ),
+                                    ),
+                                  ],
+                                ),
                       child: Row(
                         mainAxisSize: MainAxisSize.min,
                         children: [
@@ -3148,13 +3865,13 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
                               color: white,
                             ),
                           ),
-                        ],
-                      ),
-                    ),
-                  ),
+                                ],
+                              ),
+                            ),
+                          ),
                   const SizedBox(height: 8),
                   InkWell(
-                    onTap: _showCreateFriendsGroupDialog,
+                    onTap: _showCreateGroupSheet,
                     borderRadius: BorderRadius.circular(28),
                     child: Container(
                       height: 36,
@@ -3204,7 +3921,7 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
 
     // Stats section with darker white background (chip-like), rounded corners, touches borders
     return Container(
-      height: 85, // Decreased height
+      height: 60, // Decreased height since we removed Wins row
       decoration: BoxDecoration(
         color: Colors.grey.shade100, // Darker white background for chip appearance
         borderRadius: BorderRadius.circular(20),
@@ -3232,7 +3949,7 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
                     child: Row(
                       crossAxisAlignment: CrossAxisAlignment.center,
                       children: [
-                        Icon(Icons.people_outline, size: 22, color: tealDark),
+                        Icon(Icons.sports_esports, size: 22, color: tealDark),
                         const SizedBox(width: 10),
                                     Text(
                           _gamesCount.toString(),
@@ -3241,8 +3958,8 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
                             fontSize: 24,
                             fontWeight: FontWeight.w700,
                             color: textDark,
-                          ),
-                        ),
+                                    ),
+                              ),
                         const SizedBox(width: 8),
                         const Expanded(
                           child: Text(
@@ -3300,44 +4017,6 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
                                   ],
                                 ),
                               ),
-          Divider(height: 1, thickness: 1, color: Colors.grey.shade200),
-          // Bottom row: Wins + chevron
-          Expanded(
-            child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 12),
-              child: Row(
-                crossAxisAlignment: CrossAxisAlignment.center,
-                children: [
-                  Icon(Icons.emoji_events, size: 22, color: tealDark),
-                  const SizedBox(width: 10),
-                  Text(
-                    _winsCount.toString(),
-                    style: const TextStyle(
-                      fontFamily: 'Inter',
-                      fontSize: 24,
-                      fontWeight: FontWeight.w700,
-                      color: textDark,
-                    ),
-                  ),
-                  const SizedBox(width: 8),
-                  const Expanded(
-                    child: Text(
-                      'Wins',
-                      overflow: TextOverflow.ellipsis,
-                      maxLines: 1,
-                      style: TextStyle(
-                        fontFamily: 'Inter',
-                        fontSize: 14,
-                        fontWeight: FontWeight.w600,
-                        color: textDark,
-                      ),
-                    ),
-                  ),
-                  Icon(Icons.chevron_right, size: 22, color: Colors.grey.shade400),
-                ],
-              ),
-            ),
-          ),
         ],
       ),
     );
@@ -3376,24 +4055,35 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
                                     mainAxisAlignment: MainAxisAlignment.spaceBetween,
               crossAxisAlignment: CrossAxisAlignment.center,
                                     children: [
-                Row(
-                  children: [
-                    Icon(Icons.people, size: 20, color: tealDark),
-                    const SizedBox(width: 8),
+                Expanded(
+                  child: GestureDetector(
+                    onTap: () {
+                      Navigator.of(context).push(
+                        MaterialPageRoute(builder: (_) => const FriendsScreen()),
+                      );
+                    },
+                    child: Row(
+                      children: [
+                        Icon(Icons.people, size: 20, color: tealDark),
+                        const SizedBox(width: 8),
                                       Text(
                                         'Friends (${_friends.length})',
                                         style: const TextStyle(
-                        fontFamily: 'Inter',
-                                          fontSize: 16,
-                        fontWeight: FontWeight.w600,
-                        color: textDark,
-                                        ),
+                            fontFamily: 'Inter',
+                            fontSize: 16,
+                            fontWeight: FontWeight.w600,
+                            color: textDark,
+                          ),
+                        ),
+                        const Spacer(),
+                        Icon(Icons.chevron_right, size: 20, color: Colors.grey.shade600),
+                      ],
                     ),
-                  ],
+                                        ),
                                       ),
                                       if (_isSelf)
                   InkWell(
-                    onTap: _showManageFriendsSheet,
+                    onTap: _showAddFriendSearch,
                     child: Row(
                       mainAxisSize: MainAxisSize.min,
                       children: [
@@ -3414,60 +4104,30 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
               ],
             ),
           ),
-          // Horizontal scrollable friend list (max 2-3 friends visible)
+          // Horizontal scrollable friend list (show all friends)
           Expanded(
                                       child: ListView.builder(
                                         scrollDirection: Axis.horizontal,
               padding: const EdgeInsets.symmetric(horizontal: 12),
-              itemCount: (_friends.length > 3 ? 3 : _friends.length) + 1, // Max 3 friends + chevron
+                                        itemCount: _friends.length,
                                         itemBuilder: (context, index) {
-                final maxVisible = _friends.length > 3 ? 3 : _friends.length;
-
-                if (index == maxVisible) {
-                  // Chevron card for more friends
-                                          return GestureDetector(
-                                            onTap: () {
-                                              Navigator.of(context).push(
-                        MaterialPageRoute(builder: (_) => const FriendsScreen()),
-                      );
-                    },
-                    child: Padding(
-                      padding: const EdgeInsets.only(left: 8),
-                      child: Container(
-                        width: 85,
-                        decoration: BoxDecoration(
-                          color: Colors.grey.shade200,
-                          borderRadius: BorderRadius.circular(12),
-                        ),
-                        child: Center(
-                          child: Icon(
-                            Icons.chevron_right,
-                            size: 28,
-                            color: Colors.grey.shade600,
-                          ),
-                        ),
-                                                  ),
-                                                ),
-                                              );
-                }
-                
                 final friend = _friends[index];
                 final friendName = friend['full_name'] as String? ?? 'Unknown';
                 final photoUrl = friend['photo_url'] as String?;
                 final friendId = friend['id'] as String?;
-                
-                return GestureDetector(
+
+                                          return GestureDetector(
                   onTap: friendId != null
                       ? () {
-                          Navigator.of(context).push(
-                            MaterialPageRoute(
+                                              Navigator.of(context).push(
+                                                MaterialPageRoute(
                               builder: (_) => UserProfileScreen(userId: friendId),
-                            ),
-                          );
+                                                ),
+                                              );
                         }
                       : null,
                                             child: Padding(
-                    padding: EdgeInsets.only(right: index < maxVisible - 1 ? 12 : 0),
+                    padding: EdgeInsets.only(right: index < _friends.length - 1 ? 12 : 0),
                                               child: Column(
                                                 mainAxisSize: MainAxisSize.min,
                                                 children: [
@@ -3525,7 +4185,7 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
                               fontSize: 14,
                               fontWeight: FontWeight.w600,
                               color: textDark,
-                            ),
+                                                      ),
                             overflow: TextOverflow.ellipsis,
                                                       maxLines: 1,
                             textAlign: TextAlign.center,
@@ -3616,7 +4276,7 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
                   fontSize: 14,
                   fontWeight: FontWeight.w400,
                   color: Colors.grey,
-                ),
+                                              ),
               ),
             ],
           ),
@@ -3633,162 +4293,172 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
           .join(' ');
     }
 
-    return InkWell(
-      onTap: () => _showTeamsGroupsBottomSheet(context, isTeams: true),
-      child: Container(
-        decoration: BoxDecoration(
-          color: white,
-          borderRadius: BorderRadius.circular(20),
-          border: Border.all(
-            color: Colors.black.withOpacity(0.1),
-            width: 0.5,
+    return Container(
+      decoration: BoxDecoration(
+        color: white,
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(
+          color: Colors.black.withOpacity(0.1),
+          width: 0.5,
+        ),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withOpacity(0.05),
+            blurRadius: 4,
+            offset: const Offset(0, 2),
           ),
-          boxShadow: [
-            BoxShadow(
-              color: Colors.black.withOpacity(0.05),
-              blurRadius: 4,
-              offset: const Offset(0, 2),
+        ],
+      ),
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            // Header
+            Row(
+              children: [
+                Icon(Icons.groups, size: 20, color: tealDark),
+                const SizedBox(width: 8),
+                const Text(
+                  'My Teams',
+                  style: TextStyle(
+                    fontFamily: 'Inter',
+                    fontSize: 16,
+                    fontWeight: FontWeight.w600,
+                    color: textDark,
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 12),
+            // Scrollable list of all sports and their teams
+            Expanded(
+              child: SingleChildScrollView(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: sportKeys.map((sport) {
+                    final teamsForSport = teamsBySport[sport] ?? [];
+                    return Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        // Sport name with icon
+                        Row(
+                          children: [
+                            Icon(Icons.sports_soccer, size: 18, color: tealDark),
+                            const SizedBox(width: 8),
+                            Expanded(
+                              child: Text(
+                                _formatSportName(sport),
+                                style: const TextStyle(
+                                  fontFamily: 'Inter',
+                                  fontSize: 14,
+                                  fontWeight: FontWeight.w600,
+                                  color: textDark,
+                                ),
+                                overflow: TextOverflow.ellipsis,
+                                maxLines: 1,
+                              ),
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 8),
+                        // Teams list for this sport - each team is clickable
+                        ...teamsForSport.map((team) {
+                          final teamName = (team['name'] as String?) ?? 'Unknown';
+                          final teamId = team['id'] as String? ?? '';
+                          final memberCount = (team['member_count'] as int?) ?? 0;
+                          final role = (team['role'] as String?) ?? 'member';
+                          final isAdmin = role.toLowerCase() == 'admin';
+                          
+                          return InkWell(
+                            onTap: teamId.isNotEmpty ? () {
+                              Navigator.of(context).push(
+                                MaterialPageRoute(
+                                  builder: (_) => TeamProfileScreen(
+                                    teamId: teamId,
+                                    teamName: teamName,
+                                  ),
+                                ),
+                              );
+                            } : null,
+                            child: Padding(
+                              padding: const EdgeInsets.only(bottom: 12),
+                              child: Row(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  // Team icon
+                                  Container(
+                                    width: 32,
+                                    height: 32,
+                                    decoration: BoxDecoration(
+                                      color: tealDark.withOpacity(0.1),
+                                      shape: BoxShape.circle,
+                                    ),
+                                    child: Icon(Icons.sports_volleyball, size: 18, color: tealDark),
+                                  ),
+                                  const SizedBox(width: 12),
+                                  // Team name and player count
+                                  Expanded(
+                                    child: Column(
+                                      crossAxisAlignment: CrossAxisAlignment.start,
+                                      children: [
+                                        Text(
+                                          teamName,
+                                          style: const TextStyle(
+                                            fontFamily: 'Inter',
+                                            fontSize: 14,
+                                            fontWeight: FontWeight.w600,
+                                            color: textDark,
+                                          ),
+                                          overflow: TextOverflow.ellipsis,
+                                          maxLines: 1,
+                                        ),
+                                        const SizedBox(height: 2),
+                                        Text(
+                                          '$memberCount players',
+                                          style: TextStyle(
+                                            fontFamily: 'Inter',
+                                            fontSize: 12,
+                                            fontWeight: FontWeight.w400,
+                                            color: Colors.grey.shade600,
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                  // Admin tag (orange if admin)
+                                  if (isAdmin)
+                                    Container(
+                                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                                      decoration: BoxDecoration(
+                                        color: orange,
+                                        borderRadius: BorderRadius.circular(12),
+                                      ),
+                                      child: const Text(
+                                        'Admin',
+                                        style: TextStyle(
+                                          fontFamily: 'Inter',
+                                          fontSize: 11,
+                                          fontWeight: FontWeight.w600,
+                                          color: white,
+                                        ),
+                                      ),
+                                    ),
+                                ],
+                              ),
+                            ),
+                          );
+                        }).toList(),
+                        const SizedBox(height: 16),
+                      ],
+                    );
+                  }).toList(),
+                ),
+              ),
             ),
           ],
         ),
-        child: Padding(
-          padding: const EdgeInsets.all(16),
-          child: Column(
-                                                  crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              // Header
-              Row(
-                children: [
-                  Icon(Icons.groups, size: 20, color: tealDark),
-                  const SizedBox(width: 8),
-                  const Text(
-                    'My Teams',
-                    style: TextStyle(
-                      fontFamily: 'Inter',
-                      fontSize: 16,
-                      fontWeight: FontWeight.w600,
-                      color: textDark,
-                    ),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 12),
-              // Scrollable list of all sports and their teams
-              Expanded(
-                child: SingleChildScrollView(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: sportKeys.map((sport) {
-                      final teamsForSport = teamsBySport[sport] ?? [];
-                                                    return Column(
-                                                      crossAxisAlignment: CrossAxisAlignment.start,
-                                                      children: [
-                          // Sport name with chevron
-                          Row(
-                            children: [
-                              Icon(Icons.sports_soccer, size: 18, color: tealDark),
-                              const SizedBox(width: 8),
-                              Expanded(
-                                child: Text(
-                                  _formatSportName(sport),
-                                  style: const TextStyle(
-                                    fontFamily: 'Inter',
-                                    fontSize: 14,
-                                    fontWeight: FontWeight.w600,
-                                    color: textDark,
-                                  ),
-                                  overflow: TextOverflow.ellipsis,
-                                  maxLines: 1,
-                                ),
-                              ),
-                            ],
-                          ),
-                          const SizedBox(height: 8),
-                          // Teams list for this sport
-                          ...teamsForSport.map((team) {
-                final teamName = (team['name'] as String?) ?? 'Unknown';
-                final memberCount = (team['member_count'] as int?) ?? 0;
-                final role = (team['role'] as String?) ?? 'member';
-                final isAdmin = role.toLowerCase() == 'admin';
-                
-                return Padding(
-                  padding: const EdgeInsets.only(bottom: 12),
-                                                          child: Row(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                                                            children: [
-                      // Team icon
-                      Container(
-                        width: 32,
-                        height: 32,
-                        decoration: BoxDecoration(
-                          color: tealDark.withOpacity(0.1),
-                          shape: BoxShape.circle,
-                        ),
-                        child: Icon(Icons.sports_volleyball, size: 18, color: tealDark),
-                      ),
-                      const SizedBox(width: 12),
-                      // Team name and player count
-                      Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                                                              Text(
-                              teamName,
-                                                                style: const TextStyle(
-                                fontFamily: 'Inter',
-                                fontSize: 14,
-                                                                  fontWeight: FontWeight.w600,
-                                color: textDark,
-                              ),
-                              overflow: TextOverflow.ellipsis,
-                              maxLines: 1,
-                            ),
-                            const SizedBox(height: 2),
-                            Text(
-                              '$memberCount players',
-                              style: TextStyle(
-                                fontFamily: 'Inter',
-                                fontSize: 12,
-                                fontWeight: FontWeight.w400,
-                                color: Colors.grey.shade600,
-                                                                ),
-                                    ),
-                                  ],
-                                ),
-                                                        ),
-                      // Admin tag (orange if admin)
-                      if (isAdmin)
-                        Container(
-                          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                          decoration: BoxDecoration(
-                            color: orange,
-                            borderRadius: BorderRadius.circular(12),
-                          ),
-                          child: const Text(
-                            'Admin',
-                            style: TextStyle(
-                              fontFamily: 'Inter',
-                              fontSize: 11,
-                              fontWeight: FontWeight.w600,
-                              color: white,
-                            ),
-                          ),
-                        ),
-                    ],
-                  ),
-                                                            );
-                                                          }).toList(),
-                                                        const SizedBox(height: 16),
-                                                      ],
-                                                    );
-                                                  }).toList(),
-                  ),
-                ),
-                                            ),
-                                        ],
-                                      ),
-                                    ),
-                                  ),
+      ),
     );
   }
 
@@ -3812,9 +4482,12 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
     const white = Color(0xFFFFFFFF);
     const textDark = Color(0xFF0F2E2E);
 
+    // When viewing another user, show common groups instead
+    final groupsToShow = _isSelf ? _friendsGroups : _commonGroups;
+
     // Group groups by sport and get top 2 by member count for each sport
     Map<String, List<Map<String, dynamic>>> groupsBySport = {};
-    for (final group in _friendsGroups) {
+    for (final group in groupsToShow) {
       final sport = (group['sport'] as String?) ?? 'Unknown';
       if (!groupsBySport.containsKey(sport)) {
         groupsBySport[sport] = [];
@@ -3834,73 +4507,7 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
     // Get all sports
     final sportKeys = groupsBySport.keys.toList();
     if (sportKeys.isEmpty) {
-      return InkWell(
-        onTap: () => _showTeamsGroupsBottomSheet(context, isTeams: false),
-        child: Container(
-          decoration: BoxDecoration(
-            color: white,
-            borderRadius: BorderRadius.circular(20),
-            border: Border.all(
-              color: Colors.black.withOpacity(0.1),
-              width: 0.5,
-            ),
-            boxShadow: [
-              BoxShadow(
-                color: Colors.black.withOpacity(0.05),
-                blurRadius: 4,
-                offset: const Offset(0, 2),
-              ),
-            ],
-          ),
-                                    child: Padding(
-                                      padding: const EdgeInsets.all(16),
-                                      child: Column(
-                                        crossAxisAlignment: CrossAxisAlignment.start,
-                                        children: [
-                                          Row(
-                                            children: [
-                    Icon(Icons.people, size: 20, color: tealDark),
-                    const SizedBox(width: 8),
-                                              const Text(
-                      'My Groups',
-                                                style: TextStyle(
-                        fontFamily: 'Inter',
-                        fontSize: 16,
-                        fontWeight: FontWeight.w600,
-                        color: textDark,
-                      ),
-                                                ),
-                                            ],
-                                          ),
-                                          const SizedBox(height: 12),
-                const Text(
-                  'No groups yet',
-                                    style: TextStyle(
-                    fontFamily: 'Inter',
-                    fontSize: 14,
-                    fontWeight: FontWeight.w400,
-                    color: Colors.grey,
-                                                            ),
-                                                          ),
-                                                        ],
-                                                      ),
-                                                    ),
-        ),
-      );
-    }
-
-    String _formatSportName(String sport) {
-      return sport
-          .split('_')
-          .map((word) => word.isEmpty
-              ? word
-              : word[0].toUpperCase() + (word.length > 1 ? word.substring(1).toLowerCase() : ''))
-          .join(' ');
-    }
-
-    return InkWell(
-      onTap: () => _showTeamsGroupsBottomSheet(context, isTeams: false),
-      child: Container(
+      return Container(
         decoration: BoxDecoration(
           color: white,
           borderRadius: BorderRadius.circular(20),
@@ -3921,14 +4528,13 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              // Header
               Row(
                 children: [
                   Icon(Icons.people, size: 20, color: tealDark),
                   const SizedBox(width: 8),
-                  const Text(
-                    'My Groups',
-                    style: TextStyle(
+                  Text(
+                    _isSelf ? 'My Groups' : 'Common Groups',
+                    style: const TextStyle(
                       fontFamily: 'Inter',
                       fontSize: 16,
                       fontWeight: FontWeight.w600,
@@ -3938,122 +4544,194 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
                 ],
               ),
               const SizedBox(height: 12),
-              // Scrollable list of all sports and their groups
-              Expanded(
-                child: SingleChildScrollView(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: sportKeys.map((sport) {
-                      final groupsForSport = groupsBySport[sport] ?? [];
-                      return Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                                                                      children: [
-                          // Sport name with chevron
-                          Row(
-                            children: [
-                              Icon(Icons.sports_soccer, size: 18, color: tealDark),
-                                                                        const SizedBox(width: 8),
-                              Expanded(
-                                child: Text(
-                                  _formatSportName(sport),
-                                  style: const TextStyle(
-                                    fontFamily: 'Inter',
-                                    fontSize: 14,
-                                    fontWeight: FontWeight.w600,
-                                    color: textDark,
-                                  ),
-                                  overflow: TextOverflow.ellipsis,
-                                  maxLines: 1,
-                                ),
-                              ),
-                            ],
-                          ),
-                          const SizedBox(height: 8),
-                          // Groups list for this sport
-                          ...groupsForSport.map((group) {
-                final groupName = (group['name'] as String?) ?? 'Unknown';
-                final memberCount = (group['member_count'] as int?) ?? 0;
-                final createdBy = (group['created_by'] as String?) ?? '';
-                final isAdmin = createdBy == _effectiveUserId;
-                
-                return Padding(
-                  padding: const EdgeInsets.only(bottom: 12),
-                  child: Row(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      // Group icon
-                      Container(
-                        width: 32,
-                        height: 32,
-                        decoration: BoxDecoration(
-                          color: tealDark.withOpacity(0.1),
-                          shape: BoxShape.circle,
-                        ),
-                        child: Icon(Icons.shield, size: 18, color: tealDark),
-                      ),
-                      const SizedBox(width: 12),
-                      // Group name and player count
-                      Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Text(
-                              groupName,
-                              style: const TextStyle(
-                                fontFamily: 'Inter',
-                                fontSize: 14,
-                                fontWeight: FontWeight.w600,
-                                color: textDark,
-                              ),
-                              overflow: TextOverflow.ellipsis,
-                              maxLines: 1,
-                            ),
-                            const SizedBox(height: 2),
-                            Text(
-                              '$memberCount players',
-                              style: TextStyle(
-                                fontFamily: 'Inter',
-                                fontSize: 12,
-                                fontWeight: FontWeight.w400,
-                                color: Colors.grey.shade600,
-                              ),
-                            ),
-                        ],
-                      ),
-                    ),
-                      // Admin tag (light teal if admin)
-                      if (isAdmin)
-                        Container(
-                          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                          decoration: BoxDecoration(
-                            color: teal.withOpacity(0.2),
-                            borderRadius: BorderRadius.circular(12),
-                          ),
-                          child: const Text(
-                            'Admin',
-                            style: TextStyle(
-                              fontFamily: 'Inter',
-                              fontSize: 11,
-                              fontWeight: FontWeight.w600,
-                              color: tealDark,
-                            ),
-                  ),
-                ),
-              ],
-                  ),
-                );
-                          }).toList(),
-                          const SizedBox(height: 16),
-                        ],
-                      );
-                    }).toList(),
-                  ),
+              Text(
+                _isSelf ? 'No groups yet' : 'You both do not have any groups common',
+                style: const TextStyle(
+                  fontFamily: 'Inter',
+                  fontSize: 14,
+                  fontWeight: FontWeight.w400,
+                  color: Colors.grey,
                 ),
               ),
             ],
           ),
-                      ),
-                    ),
+        ),
+      );
+    }
+
+    String _formatSportName(String sport) {
+      return sport
+          .split('_')
+          .map((word) => word.isEmpty
+              ? word
+              : word[0].toUpperCase() + (word.length > 1 ? word.substring(1).toLowerCase() : ''))
+          .join(' ');
+    }
+
+    return Container(
+      decoration: BoxDecoration(
+        color: white,
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(
+          color: Colors.black.withOpacity(0.1),
+          width: 0.5,
+        ),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withOpacity(0.05),
+            blurRadius: 4,
+            offset: const Offset(0, 2),
+          ),
+        ],
+      ),
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            // Header
+            Row(
+              children: [
+                Icon(Icons.people, size: 20, color: tealDark),
+                const SizedBox(width: 8),
+                Text(
+                  _isSelf ? 'My Groups' : 'Common Groups',
+                  style: const TextStyle(
+                    fontFamily: 'Inter',
+                    fontSize: 16,
+                    fontWeight: FontWeight.w600,
+                    color: textDark,
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 12),
+            // Scrollable list of all sports and their groups
+            SingleChildScrollView(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: sportKeys.map((sport) {
+                    final groupsForSport = groupsBySport[sport] ?? [];
+                    return Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        // Sport name with icon
+                        Row(
+                          children: [
+                            Icon(Icons.sports_soccer, size: 18, color: tealDark),
+                            const SizedBox(width: 8),
+                            Expanded(
+                              child: Text(
+                                _formatSportName(sport),
+                                style: const TextStyle(
+                                  fontFamily: 'Inter',
+                                  fontSize: 14,
+                                  fontWeight: FontWeight.w600,
+                                  color: textDark,
+                                ),
+                                overflow: TextOverflow.ellipsis,
+                                maxLines: 1,
+                              ),
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 8),
+                        // Groups list for this sport - each group is clickable
+                        ...groupsForSport.map((group) {
+                          final groupName = (group['name'] as String?) ?? 'Unknown';
+                          final groupId = group['id'] as String? ?? '';
+                          final memberCount = (group['member_count'] as int?) ?? 0;
+                          final createdBy = (group['created_by'] as String?) ?? '';
+                          final isAdmin = createdBy == _effectiveUserId;
+                          
+                          return InkWell(
+                            onTap: groupId.isNotEmpty ? () {
+                              Navigator.of(context).push(
+                                MaterialPageRoute(
+                                  builder: (_) => FriendsGroupProfileScreen(
+                                    groupId: groupId,
+                                    groupName: groupName,
+                                  ),
+                                ),
+                              );
+                            } : null,
+                            child: Padding(
+                              padding: const EdgeInsets.only(bottom: 12),
+                              child: Row(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  // Group icon
+                                  Container(
+                                    width: 32,
+                                    height: 32,
+                                    decoration: BoxDecoration(
+                                      color: tealDark.withOpacity(0.1),
+                                      shape: BoxShape.circle,
+                                    ),
+                                    child: Icon(Icons.shield, size: 18, color: tealDark),
+                                  ),
+                                  const SizedBox(width: 12),
+                                  // Group name and player count
+                                  Expanded(
+                                    child: Column(
+                                      crossAxisAlignment: CrossAxisAlignment.start,
+                                      children: [
+                                        Text(
+                                          groupName,
+                                          style: const TextStyle(
+                                            fontFamily: 'Inter',
+                                            fontSize: 14,
+                                            fontWeight: FontWeight.w600,
+                                            color: textDark,
+                                          ),
+                                          overflow: TextOverflow.ellipsis,
+                                          maxLines: 1,
+                                        ),
+                                        const SizedBox(height: 2),
+                                        Text(
+                                          '$memberCount players',
+                                          style: TextStyle(
+                                            fontFamily: 'Inter',
+                                            fontSize: 12,
+                                            fontWeight: FontWeight.w400,
+                                            color: Colors.grey.shade600,
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                  // Admin tag (light teal if admin)
+                                  if (isAdmin)
+                                    Container(
+                                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                                      decoration: BoxDecoration(
+                                        color: teal.withOpacity(0.2),
+                                        borderRadius: BorderRadius.circular(12),
+                                      ),
+                                      child: const Text(
+                                        'Admin',
+                                        style: TextStyle(
+                                          fontFamily: 'Inter',
+                                          fontSize: 11,
+                                          fontWeight: FontWeight.w600,
+                                          color: tealDark,
+                                        ),
+                                      ),
+                                    ),
+                                ],
+                              ),
+                            ),
+                          );
+                        }).toList(),
+                        const SizedBox(height: 16),
+                      ],
+                    );
+                }).toList(),
+              ),
+            ),
+          ],
+        ),
+      ),
     );
   }
 
@@ -4176,7 +4854,7 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
                                 fontWeight: FontWeight.w500,
                               color: textDark,
                             ),
-                          ),
+                            ),
                           ],
                         ),
                       ),
@@ -4358,23 +5036,6 @@ class _TeamsGroupsBottomSheetState extends State<_TeamsGroupsBottomSheet> {
                     ],
                   ),
                 ),
-                // Manage button
-                if (widget.isSelf)
-                  TextButton(
-                    onPressed: () {
-                      // TODO: Implement manage functionality
-                      Navigator.of(context).pop();
-                    },
-                    child: Text(
-                      'Manage',
-                      style: TextStyle(
-                        fontFamily: 'Inter',
-                        fontSize: 16,
-                        fontWeight: FontWeight.w600,
-                        color: tealDark,
-                      ),
-                    ),
-                  ),
               ],
             ),
           ),
@@ -4421,8 +5082,34 @@ class _TeamsGroupsBottomSheetState extends State<_TeamsGroupsBottomSheet> {
                             : null,
                         trailing: const Icon(Icons.chevron_right, color: Colors.grey),
                         onTap: () {
-                          // TODO: Navigate to team/group details
                           Navigator.of(context).pop();
+                          if (_isTeams) {
+                            final teamId = item['id'] as String?;
+                            final teamName = item['name'] as String? ?? 'Unknown';
+                            if (teamId != null) {
+                              Navigator.of(context).push(
+                                MaterialPageRoute(
+                                  builder: (_) => TeamProfileScreen(
+                                    teamId: teamId,
+                                    teamName: teamName,
+                                  ),
+                                ),
+                              );
+                            }
+                          } else {
+                            final groupId = item['id'] as String?;
+                            final groupName = item['name'] as String? ?? 'Unknown';
+                            if (groupId != null) {
+                              Navigator.of(context).push(
+                                MaterialPageRoute(
+                                  builder: (_) => FriendsGroupProfileScreen(
+                                    groupId: groupId,
+                                    groupName: groupName,
+                                  ),
+                                ),
+                              );
+                            }
+                          }
                         },
                       );
                     },
@@ -4501,7 +5188,6 @@ class _HomeLocationPickerDialogState extends State<_HomeLocationPickerDialog> {
       'city': location['city'] ?? '',
       'state': location['state'] ?? '',
       'zip': location['zip'] ?? '',
-      'display': location['display'] ?? '',
     });
   }
 

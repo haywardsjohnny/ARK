@@ -28,13 +28,18 @@ class HomeTabsController extends ChangeNotifier {
   List<Map<String, dynamic>> friendsOnlyIndividualGames = [];
   List<Map<String, dynamic>> pendingAvailabilityTeamMatches = [];
   List<Map<String, dynamic>> pendingIndividualGames = []; // Individual games with pending requests
+  List<Map<String, dynamic>> pendingJoinRequestsForMyGames = []; // Pending join requests for public pick-up games user created
   List<Map<String, dynamic>> awaitingOpponentConfirmationGames = []; // Team games awaiting opponent acceptance
   List<Map<String, dynamic>> publicPendingGames = []; // Public games matching notification preferences
   List<Map<String, dynamic>> profileNotifications = []; // Recent team/friends group additions (notifications)
+  List<Map<String, dynamic>> incomingFriendRequests = []; // Pending friend requests
+  List<Map<String, dynamic>> pendingTeamFollowRequests = []; // Pending team follow requests (for teams where user is admin)
   bool loadingConfirmedMatches = false;
   bool loadingAllMatches = false;
   bool loadingIndividualMatches = false;
   bool loadingDiscoveryMatches = false;
+  bool loadingConfirmedCount = false; // Lightweight count loading state
+  int? cachedConfirmedGamesCount; // Cached count for smart cards
   
   // Caching for discovery matches (30 second TTL)
   DateTime? _discoveryCacheTime;
@@ -72,12 +77,16 @@ class HomeTabsController extends ChangeNotifier {
         loadAdminTeamsAndInvites(),
         loadHiddenGames(),
         loadConfirmedTeamMatches(),
+        loadAllMyIndividualMatches(), // Load individual games (including private games) for smart card count
         loadFriendsOnlyIndividualGames(),
         loadMyPendingAvailabilityMatches(),
         loadPendingIndividualGames(),
+        loadPendingJoinRequestsForMyGames(), // Load pending join requests for public pick-up games user created
         loadAwaitingOpponentConfirmationGames(),
         loadPublicPendingGames(),
         loadProfileNotifications(),
+        loadIncomingFriendRequests(),
+        loadPendingTeamFollowRequests(),
       ]);
       
       // Wait for discovery matches to complete
@@ -247,15 +256,90 @@ class HomeTabsController extends ChangeNotifier {
 
       final raw = await repo.loadMyAcceptedTeamMatches(uid);
 
-      confirmedTeamMatches = raw
-          .where((m) => !_hiddenRequestIds.contains(m['request_id'] as String))
+      final now = DateTime.now();
+      final teamMatches = raw
+          .where((m) {
+            // Filter out hidden games
+            if (_hiddenRequestIds.contains(m['request_id'] as String)) {
+              return false;
+            }
+            // Filter out past games
+            final startTime1 = m['start_time_1'];
+            final startTime2 = m['start_time_2'];
+            DateTime? startDt;
+            if (startTime1 is String) {
+              final parsed = DateTime.tryParse(startTime1);
+              startDt = parsed?.toLocal();
+            }
+            // Use start_time_1 if available, otherwise start_time_2
+            if (startDt == null && startTime2 is String) {
+              final parsed = DateTime.tryParse(startTime2);
+              startDt = parsed?.toLocal();
+            }
+            // If no start time, exclude the game
+            if (startDt == null) {
+              return false;
+            }
+            // Only include future games (start time is after now)
+            return startDt.isAfter(now);
+          })
           .toList();
+      
+      // NOTE: Private games are NOT included here because they are individual games,
+      // not team matches. They are loaded separately in loadAllMyIndividualMatches()
+      // with enriched data (accepted_count, spots_left, my_attendance_status).
+      // This prevents duplication and race conditions.
+      
+      confirmedTeamMatches = teamMatches;
+      
+      // Update cached count for smart cards
+      _updateConfirmedGamesCount();
+      
+      if (kDebugMode) {
+        print('[DEBUG] loadConfirmedTeamMatches: ${teamMatches.length} team matches (private games loaded separately)');
+      }
     } catch (e) {
       lastError = 'loadConfirmedTeamMatches failed: $e';
+      if (kDebugMode) {
+        print('[DEBUG] loadConfirmedTeamMatches ERROR: $e');
+      }
     } finally {
       loadingConfirmedMatches = false;
       notifyListeners();
     }
+  }
+
+  /// Lightweight method to update confirmed games count for smart cards
+  /// This avoids loading all match data just for counting
+  void _updateConfirmedGamesCount() {
+    // Count team matches (already loaded - these are already filtered to future games)
+    final teamMatchesCount = confirmedTeamMatches.length;
+    
+    // Count private games from already loaded individual matches
+    // Only count future games (current and future dates)
+    final now = DateTime.now();
+    final privateGamesCount = allMyIndividualMatches
+        .where((m) {
+          final status = (m['my_attendance_status'] as String?)?.toLowerCase();
+          final visibility = (m['visibility'] as String?)?.toLowerCase();
+          
+          // Count private games (friends_group visibility) where user has accepted
+          if (status != 'accepted' || visibility != 'friends_group') {
+            return false;
+          }
+          
+          // Filter out past games - only count current and future games
+          final startTime = m['start_time'] as DateTime?;
+          if (startTime == null) {
+            return false; // Exclude games without start time
+          }
+          
+          // Only include future games (start time is after or equal to now)
+          return startTime.isAfter(now) || startTime.isAtSameMomentAs(now);
+        })
+        .length;
+    
+    cachedConfirmedGamesCount = teamMatchesCount + privateGamesCount;
   }
 
   Future<void> loadAllMyMatches() async {
@@ -282,15 +366,50 @@ class HomeTabsController extends ChangeNotifier {
       allMyMatches = raw;
       
       // Also update confirmedTeamMatches for backward compatibility
-      confirmedTeamMatches = raw
-          .where((m) => 
-              !_hiddenRequestIds.contains(m['request_id'] as String) &&
-              (m['status'] as String?)?.toLowerCase() != 'cancelled'
-          )
+      // This includes team matches, but we also need to add private games
+      final now = DateTime.now();
+      final teamMatches = raw
+          .where((m) {
+            // Filter out hidden games
+            if (_hiddenRequestIds.contains(m['request_id'] as String)) {
+              return false;
+            }
+            // Filter out cancelled games
+            if ((m['status'] as String?)?.toLowerCase() == 'cancelled') {
+              return false;
+            }
+            // Filter out past games
+            final startTime1 = m['start_time_1'];
+            final startTime2 = m['start_time_2'];
+            DateTime? startDt;
+            if (startTime1 is String) {
+              final parsed = DateTime.tryParse(startTime1);
+              startDt = parsed?.toLocal();
+            }
+            // Use start_time_1 if available, otherwise start_time_2
+            if (startDt == null && startTime2 is String) {
+              final parsed = DateTime.tryParse(startTime2);
+              startDt = parsed?.toLocal();
+            }
+            // If no start time, exclude the game
+            if (startDt == null) {
+              return false;
+            }
+            // Only include future games (start time is after now)
+            return startDt.isAfter(now);
+          })
           .toList();
       
+      // NOTE: Private games are NOT included here because they are individual games,
+      // not team matches. They are loaded separately in loadAllMyIndividualMatches()
+      // with enriched data (accepted_count, spots_left, my_attendance_status).
+      // This prevents duplication and race conditions.
+      
+      // Update confirmedTeamMatches with filtered team matches
+      confirmedTeamMatches = teamMatches;
+      
       if (kDebugMode) {
-        print('[DEBUG] loadAllMyMatches: Filtered to ${confirmedTeamMatches.length} confirmed matches');
+        print('[DEBUG] loadAllMyMatches: Filtered to ${teamMatches.length} team matches (private games loaded separately)');
       }
     } catch (e) {
       lastError = 'loadAllMyMatches failed: $e';
@@ -443,10 +562,21 @@ class HomeTabsController extends ChangeNotifier {
         }
 
         // Build enriched match list
+        // IMPORTANT: Exclude public games with pending status - they should only appear in pending actions, not My Games
         final List<Map<String, dynamic>> enriched = [];
         for (final game in games) {
           final reqId = game['id'] as String?;
           if (reqId == null) continue;
+
+          final visibility = (game['visibility'] as String?)?.toLowerCase() ?? '';
+          final isPublic = game['is_public'] as bool? ?? false;
+          final myStatus = (attendanceStatusByRequest[reqId] ?? '').toLowerCase();
+          
+          // Filter out public games with pending status - they should only appear in pending actions, not My Games
+          // Public games should only appear in My Games after they're accepted
+          if ((visibility == 'public' || isPublic) && myStatus == 'pending') {
+            continue; // Skip this game - it's a public game with pending status
+          }
 
           final startTime1 = game['start_time_1'];
           final startTime2 = game['start_time_2'];
@@ -470,8 +600,10 @@ class HomeTabsController extends ChangeNotifier {
             'request_id': reqId,
             'sport': game['sport'],
             'zip_code': game['zip_code'],
-            'start_time': startDt,
-            'end_time': endDt,
+            'start_time': startDt, // DateTime object
+            'end_time': endDt, // DateTime object
+            'start_time_1': game['start_time_1'], // Also include original string format for compatibility
+            'start_time_2': game['start_time_2'], // Also include original string format for compatibility
             'venue': game['venue'],
             'details': game['details'],
             'status': game['status'],
@@ -489,8 +621,11 @@ class HomeTabsController extends ChangeNotifier {
         }
 
         allMyIndividualMatches = enriched;
+        // Update cached count for smart cards after loading
+        _updateConfirmedGamesCount();
       } else {
         allMyIndividualMatches = [];
+        _updateConfirmedGamesCount();
       }
     } catch (e) {
       lastError = 'loadAllMyIndividualMatches failed: $e';
@@ -498,6 +633,7 @@ class HomeTabsController extends ChangeNotifier {
         print('[DEBUG] loadAllMyIndividualMatches ERROR: $e');
       }
       allMyIndividualMatches = [];
+      _updateConfirmedGamesCount();
     } finally {
       loadingIndividualMatches = false;
       notifyListeners();
@@ -1050,6 +1186,15 @@ class HomeTabsController extends ChangeNotifier {
             endDt = parsed?.toLocal();
           }
           
+          // Filter out past games - only show future games
+          final now = DateTime.now();
+          if (startDt != null && startDt.isBefore(now)) {
+            if (kDebugMode) {
+              print('[DEBUG] Discovery game ${m['id']?.toString().substring(0, 8)} filtered out - start time is in the past: $startDt');
+            }
+            continue; // Skip past games
+          }
+          
           // Calculate distance from user's ZIP code to game's ZIP code
           double? distanceMiles;
           final gameZip = m['zip_code'] as String?;
@@ -1268,40 +1413,71 @@ class HomeTabsController extends ChangeNotifier {
           }
         }
 
-        // Batch fetch accepted counts for individual games
+        // Batch fetch attendance data for individual games (accepted counts and user's status)
         final individualGameIds = result
             .where((r) => r['mode'] != 'team_vs_team')
             .map<String>((r) => r['request_id'] as String)
             .toList();
         
         final Map<String, int> acceptedCountByRequest = {};
+        final Map<String, String> attendanceStatusByRequest = {};
+        
         if (individualGameIds.isNotEmpty) {
+          // Get all attendance records (both accepted and pending) for these games
           final attendanceRows = await supa
               .from('individual_game_attendance')
-              .select('request_id')
-              .inFilter('request_id', individualGameIds)
-              .eq('status', 'accepted');
+              .select('request_id, status, user_id')
+              .inFilter('request_id', individualGameIds);
           
           if (attendanceRows is List) {
             for (final row in attendanceRows) {
               final reqId = row['request_id'] as String?;
+              final status = (row['status'] as String?)?.toLowerCase() ?? '';
+              final userId = row['user_id'] as String?;
+              
               if (reqId != null) {
-                acceptedCountByRequest[reqId] = (acceptedCountByRequest[reqId] ?? 0) + 1;
+                // Count accepted attendance
+                if (status == 'accepted') {
+                  acceptedCountByRequest[reqId] = (acceptedCountByRequest[reqId] ?? 0) + 1;
+                }
+                
+                // Track current user's attendance status
+                if (userId == uid && !attendanceStatusByRequest.containsKey(reqId)) {
+                  attendanceStatusByRequest[reqId] = status;
+                }
               }
             }
           }
         }
         
-        // Add accepted count and spots left to individual games
+        // Add accepted count, spots left, and user's attendance status to individual games
+        // Filter out games where user has accepted or declined status
+        // - Accepted: they're in My Games now
+        // - Declined: they've been rejected, shouldn't show in trending
+        final List<Map<String, dynamic>> finalResult = [];
         for (final r in result) {
           if (r['mode'] != 'team_vs_team') {
             final reqId = r['request_id'] as String;
             final numPlayers = r['num_players'] as int? ?? 4;
             final acceptedCount = acceptedCountByRequest[reqId] ?? 0;
+            final myStatus = attendanceStatusByRequest[reqId]?.toLowerCase();
+            
+            // Filter out games where user has accepted or declined status
+            if (myStatus == 'accepted') {
+              continue; // Skip this game - user is already participating (in My Games)
+            }
+            if (myStatus == 'declined') {
+              continue; // Skip this game - user's request was denied, don't show in trending
+            }
+            
             r['accepted_count'] = acceptedCount;
             r['spots_left'] = numPlayers - acceptedCount;
+            r['my_attendance_status'] = attendanceStatusByRequest[reqId] ?? '';
           }
+          finalResult.add(r);
         }
+        
+        result = finalResult;
 
         discoveryPickupMatches = result;
         
@@ -1342,6 +1518,15 @@ class HomeTabsController extends ChangeNotifier {
         adminTeams: adminTeams,
         userZipCode: baseZip,
       );
+      
+      // Filter out games that have already passed
+      final now = DateTime.now();
+      pendingTeamMatchesForAdmin = pendingTeamMatchesForAdmin.where((game) {
+        final startTime = game['start_time'] as DateTime?;
+        if (startTime == null) return true; // Keep games without start time
+        return startTime.isAfter(now);
+      }).toList();
+      
       notifyListeners();
     } catch (e) {
       lastError = 'loadPendingGamesForAdmin failed: $e';
@@ -1373,6 +1558,15 @@ class HomeTabsController extends ChangeNotifier {
     try {
       pendingAvailabilityTeamMatches =
           await repo.loadMyPendingAvailabilityMatches(uid);
+      
+      // Filter out games that have already passed
+      final now = DateTime.now();
+      pendingAvailabilityTeamMatches = pendingAvailabilityTeamMatches.where((game) {
+        final startTime = game['start_time'] as DateTime?;
+        if (startTime == null) return true; // Keep games without start time
+        return startTime.isAfter(now);
+      }).toList();
+      
       notifyListeners();
     } catch (e) {
       lastError = 'loadMyPendingAvailabilityMatches failed: $e';
@@ -1570,7 +1764,13 @@ class HomeTabsController extends ChangeNotifier {
           });
         }
 
-        pendingIndividualGames = enriched;
+        // Filter out games that have already passed
+        final now = DateTime.now();
+        pendingIndividualGames = enriched.where((game) {
+          final startTime = game['start_time'] as DateTime?;
+          if (startTime == null) return true; // Keep games without start time
+          return startTime.isAfter(now);
+        }).toList();
       } else {
         pendingIndividualGames = [];
       }
@@ -1586,41 +1786,153 @@ class HomeTabsController extends ChangeNotifier {
     }
   }
   
-  /// Load individual games where organizer needs to approve requests
-  Future<void> loadIndividualGamesForOrganizerApproval() async {
+  /// Load individual games where organizer needs to approve join requests (for public pick-up games only)
+  Future<void> loadPendingJoinRequestsForMyGames() async {
     final uid = currentUserId;
-    if (uid == null) return;
+    if (uid == null) {
+      pendingJoinRequestsForMyGames = [];
+      notifyListeners();
+      return;
+    }
 
     try {
       final supa = Supabase.instance.client;
       
-      // Get games created by user
+      // Get public pick-up games created by user (visibility != 'friends_group')
       final myGames = await supa
           .from('instant_match_requests')
-          .select('id')
+          .select('id, sport, mode, zip_code, start_time_1, start_time_2, venue, details, status, created_by, num_players, visibility')
           .eq('created_by', uid)
           .neq('mode', 'team_vs_team')
           .neq('status', 'cancelled');
 
       if (myGames is! List || myGames.isEmpty) {
-        // No games to approve
+        pendingJoinRequestsForMyGames = [];
+        notifyListeners();
         return;
       }
 
-      final requestIds = myGames.map<String>((g) => g['id'] as String).toList();
+      // Filter to only public games (not friends_group)
+      final publicGameIds = (myGames as List).where((g) {
+        final visibility = (g['visibility'] as String?)?.toLowerCase();
+        return visibility != 'friends_group';
+      }).map<String>((g) => g['id'] as String).toList();
 
-      // Get pending attendance requests
+      if (publicGameIds.isEmpty) {
+        pendingJoinRequestsForMyGames = [];
+        notifyListeners();
+        return;
+      }
+
+      // Get pending attendance requests for these games
       final pendingRequests = await supa
           .from('individual_game_attendance')
           .select('request_id, user_id, created_at')
-          .inFilter('request_id', requestIds)
+          .inFilter('request_id', publicGameIds)
           .eq('status', 'pending')
           .order('created_at', ascending: false);
 
-      // This will be used in the UI to show approval dialogs
-      // For now, we'll handle approvals directly in the UI when viewing games
+      if (pendingRequests is! List || pendingRequests.isEmpty) {
+        pendingJoinRequestsForMyGames = [];
+        notifyListeners();
+        return;
+      }
+
+      // Group requests by game and get user details
+      final Map<String, List<Map<String, dynamic>>> requestsByGameId = {};
+      final Set<String> userIds = {};
+      
+      for (final req in pendingRequests) {
+        final gameId = req['request_id'] as String?;
+        final userId = req['user_id'] as String?;
+        if (gameId != null && userId != null) {
+          requestsByGameId.putIfAbsent(gameId, () => []).add(req);
+          userIds.add(userId);
+        }
+      }
+
+      // Get user details
+      final users = userIds.isEmpty ? <dynamic>[] : await supa
+          .from('users')
+          .select('id, full_name, photo_url')
+          .inFilter('id', userIds.toList());
+
+      final Map<String, Map<String, dynamic>> userMap = {};
+      if (users is List) {
+        for (final u in users) {
+          final id = u['id'] as String?;
+          if (id != null) {
+            userMap[id] = {
+              'id': id,
+              'full_name': u['full_name'] ?? 'Unknown',
+              'photo_url': u['photo_url'],
+            };
+          }
+        }
+      }
+
+      // Build enriched list with game info and pending requests
+      final List<Map<String, dynamic>> enriched = [];
+      for (final game in myGames) {
+        final gameId = game['id'] as String?;
+        if (gameId == null || !publicGameIds.contains(gameId)) continue;
+        
+        final gameRequests = requestsByGameId[gameId] ?? [];
+        if (gameRequests.isEmpty) continue;
+
+        final startTime1 = game['start_time_1'];
+        final startTime2 = game['start_time_2'];
+        DateTime? startDt;
+        DateTime? endDt;
+        if (startTime1 is String) {
+          final parsed = DateTime.tryParse(startTime1);
+          startDt = parsed?.toLocal();
+        }
+        if (startTime2 is String) {
+          final parsed = DateTime.tryParse(startTime2);
+          endDt = parsed?.toLocal();
+        }
+
+        // Create entry for each pending request
+        for (final req in gameRequests) {
+          final userId = req['user_id'] as String?;
+          final user = userId != null ? userMap[userId] : null;
+          
+          enriched.add({
+            'request_id': gameId,
+            'user_id': userId,
+            'user_name': user?['full_name'] ?? 'Unknown',
+            'user_photo_url': user?['photo_url'],
+            'sport': game['sport'],
+            'start_time': startDt,
+            'end_time': endDt,
+            'venue': game['venue'],
+            'details': game['details'],
+            'num_players': game['num_players'] ?? 4,
+            'created_at': req['created_at'],
+          });
+        }
+      }
+
+      // Filter out games that have already passed
+      final now = DateTime.now();
+      pendingJoinRequestsForMyGames = enriched.where((item) {
+        final startTime = item['start_time'] as DateTime?;
+        if (startTime == null) return true;
+        return startTime.isAfter(now);
+      }).toList();
+
+      if (kDebugMode) {
+        print('[DEBUG] loadPendingJoinRequestsForMyGames: Found ${pendingJoinRequestsForMyGames.length} pending join requests');
+      }
     } catch (e) {
-      lastError = 'loadIndividualGamesForOrganizerApproval failed: $e';
+      lastError = 'loadPendingJoinRequestsForMyGames failed: $e';
+      if (kDebugMode) {
+        print('[DEBUG] loadPendingJoinRequestsForMyGames ERROR: $e');
+      }
+      pendingJoinRequestsForMyGames = [];
+    } finally {
+      notifyListeners();
     }
   }
   
@@ -1657,8 +1969,13 @@ class HomeTabsController extends ChangeNotifier {
           .eq('request_id', requestId)
           .eq('user_id', userId);
 
-      // Refresh individual games
+      // Refresh all relevant data:
+      // 1. Individual games - so User 1 (creator) and User 2 (approved user) see updated status
       await loadAllMyIndividualMatches();
+      // 2. Discovery matches - to update availability counter for all users and remove from User 2's trending
+      await loadDiscoveryPickupMatches(forceRefresh: true);
+      // 3. Pending join requests - to remove this approved request from the list
+      await loadPendingJoinRequestsForMyGames();
       notifyListeners();
     } catch (e) {
       lastError = 'approveIndividualGameRequest failed: $e';
@@ -1882,6 +2199,217 @@ class HomeTabsController extends ChangeNotifier {
         print('[ERROR] loadProfileNotifications: $e');
       }
       profileNotifications = [];
+      notifyListeners();
+    }
+  }
+
+  Future<void> loadIncomingFriendRequests() async {
+    final uid = currentUserId;
+    if (uid == null) return;
+
+    try {
+      final pendingRows = await supa
+          .from('friends')
+          .select('id, user_id, created_at')
+          .eq('friend_id', uid)
+          .eq('status', 'pending')
+          .order('created_at', ascending: false);
+
+      List<Map<String, dynamic>> requests = [];
+      if (pendingRows is List && pendingRows.isNotEmpty) {
+        final requesterIds = pendingRows
+            .map<String>((r) => r['user_id'] as String)
+            .toList();
+
+        final requesterUsers = await supa
+            .from('users')
+            .select('id, full_name, photo_url')
+            .inFilter('id', requesterIds);
+
+        final Map<String, Map<String, dynamic>> userById = {};
+        for (final u in requesterUsers as List) {
+          userById[u['id'] as String] = Map<String, dynamic>.from(u);
+        }
+
+        for (final r in pendingRows) {
+          final requesterId = r['user_id'] as String;
+          final u = userById[requesterId];
+          if (u != null) {
+            requests.add({
+              'request_id': r['id'] as String,
+              'user_id': requesterId,
+              'full_name': u['full_name'] as String? ?? 'Unknown',
+              'photo_url': u['photo_url'] as String?,
+            });
+          }
+        }
+      }
+
+      incomingFriendRequests = requests;
+      notifyListeners();
+    } catch (e) {
+      if (kDebugMode) {
+        print('[ERROR] loadIncomingFriendRequests: $e');
+      }
+      incomingFriendRequests = [];
+      notifyListeners();
+    }
+  }
+
+  Future<void> loadPendingTeamFollowRequests() async {
+    final uid = currentUserId;
+    if (uid == null) return;
+
+    try {
+      // Get all teams where user is admin
+      final adminTeamRows = await supa
+          .from('team_members')
+          .select('team_id')
+          .eq('user_id', uid)
+          .eq('role', 'admin');
+
+      if (adminTeamRows is! List || adminTeamRows.isEmpty) {
+        pendingTeamFollowRequests = [];
+        notifyListeners();
+        return;
+      }
+
+      final adminTeamIds = adminTeamRows
+          .map<String>((r) => r['team_id'] as String)
+          .toList();
+
+      // Get target team names for context
+      final targetTeamDetails = await supa
+          .from('teams')
+          .select('id, name')
+          .inFilter('id', adminTeamIds);
+
+      final Map<String, String> targetTeamNames = {};
+      if (targetTeamDetails is List) {
+        for (final team in targetTeamDetails) {
+          targetTeamNames[team['id'] as String] = team['name'] as String? ?? 'Unknown Team';
+        }
+      }
+
+      // Try to get pending requests - use RPC first, fallback to direct query
+      List<Map<String, dynamic>> allRequests = [];
+      
+      // First, try RPC function (bypasses PostgREST schema cache issues when available)
+      bool rpcWorked = false;
+      for (final adminTeamId in adminTeamIds) {
+        try {
+          final rpcResult = await supa.rpc(
+            'get_pending_follow_requests_for_team',
+            params: {'team_id_param': adminTeamId},
+          );
+
+          rpcWorked = true; // At least one RPC call succeeded
+          if (rpcResult is List && rpcResult.isNotEmpty) {
+            for (final req in rpcResult) {
+              final targetTeamName = targetTeamNames[adminTeamId] ?? 'Unknown Team';
+              allRequests.add({
+                'request_id': req['request_id'] as String? ?? '',
+                'requesting_team_id': req['requesting_team_id'] as String? ?? '',
+                'target_team_id': adminTeamId,
+                'requesting_team_name': req['requesting_team_name'] as String? ?? 'Unknown Team',
+                'requesting_team_sport': req['requesting_team_sport'] as String? ?? '',
+                'requesting_team_base_city': req['requesting_team_base_city'] as String? ?? '',
+                'target_team_name': targetTeamName,
+                'created_at': req['created_at'] as String? ?? '',
+              });
+            }
+          }
+        } catch (rpcError) {
+          if (kDebugMode) {
+            print('[DEBUG] RPC error for team $adminTeamId: $rpcError');
+          }
+          // Continue with other teams even if one fails
+        }
+      }
+      
+      // If RPC didn't work (schema cache issue), try direct table query as fallback
+      if (!rpcWorked && allRequests.isEmpty) {
+        try {
+          if (kDebugMode) {
+            print('[DEBUG] RPC failed, trying direct table query for pending follow requests');
+          }
+          
+          // Direct query to team_follow_requests table
+          final followReqRows = await supa
+              .from('team_follow_requests')
+              .select('id, requesting_team_id, target_team_id, created_at')
+              .inFilter('target_team_id', adminTeamIds)
+              .eq('status', 'pending')
+              .order('created_at', ascending: false);
+
+          if (followReqRows is List && followReqRows.isNotEmpty) {
+            // Get requesting team details
+            final requestingTeamIds = (followReqRows as List)
+                .map<String>((r) => r['requesting_team_id'] as String)
+                .toList();
+
+            final teamDetails = await supa
+                .from('teams')
+                .select('id, name, sport, base_city')
+                .inFilter('id', requestingTeamIds);
+
+            final Map<String, Map<String, dynamic>> teamMap = {};
+            if (teamDetails is List) {
+              for (final team in teamDetails) {
+                teamMap[team['id'] as String] = Map<String, dynamic>.from(team);
+              }
+            }
+
+            // Combine request data with team details
+            for (final r in followReqRows as List) {
+              final requestingTeamId = r['requesting_team_id'] as String;
+              final targetTeamId = r['target_team_id'] as String;
+              final requestingTeam = teamMap[requestingTeamId] ?? {};
+              final targetTeamName = targetTeamNames[targetTeamId] ?? 'Unknown Team';
+
+              allRequests.add({
+                'request_id': r['id'] as String? ?? '',
+                'requesting_team_id': requestingTeamId,
+                'target_team_id': targetTeamId,
+                'requesting_team_name': requestingTeam['name'] as String? ?? 'Unknown Team',
+                'requesting_team_sport': requestingTeam['sport'] as String? ?? '',
+                'requesting_team_base_city': requestingTeam['base_city'] as String? ?? '',
+                'target_team_name': targetTeamName,
+                'created_at': r['created_at'] as String? ?? '',
+              });
+            }
+            
+            if (kDebugMode) {
+              print('[DEBUG] Direct table query succeeded, found ${allRequests.length} requests');
+            }
+          }
+        } catch (tableError) {
+          if (kDebugMode) {
+            print('[DEBUG] Direct table query also failed: $tableError');
+          }
+          // Both RPC and direct query failed - likely schema cache issue
+          // Return empty list gracefully
+        }
+      }
+
+      // Sort by created_at descending (newest first)
+      allRequests.sort((a, b) {
+        final aTime = a['created_at'] as String? ?? '';
+        final bTime = b['created_at'] as String? ?? '';
+        return bTime.compareTo(aTime);
+      });
+
+      pendingTeamFollowRequests = allRequests;
+      notifyListeners();
+      
+      if (kDebugMode) {
+        print('[DEBUG] loadPendingTeamFollowRequests: Found ${allRequests.length} pending requests');
+      }
+    } catch (e) {
+      if (kDebugMode) {
+        print('[ERROR] loadPendingTeamFollowRequests: $e');
+      }
+      pendingTeamFollowRequests = [];
       notifyListeners();
     }
   }
